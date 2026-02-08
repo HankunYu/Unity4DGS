@@ -4,6 +4,7 @@
 #pragma kernel CSSetIndices
 #pragma kernel CSCalcDistances
 #pragma kernel CSCalcViewData
+#pragma kernel CSCopyViewDataAndDistances
 #pragma kernel CSUpdateEditData
 #pragma kernel CSInitEditData
 #pragma kernel CSClearBuffer
@@ -82,6 +83,10 @@ void CSCalcDistances (uint3 id : SV_DispatchThreadID)
 }
 
 RWStructuredBuffer<SplatViewData> _SplatViewData;
+RWStructuredBuffer<SplatViewData> _CopyDstViewData;
+RWStructuredBuffer<uint> _CopyDstSortDistances;
+RWStructuredBuffer<uint> _CopyDstSortKeys;
+uint _CopySrcStartIndex, _CopyDstStartIndex, _CopyKernelCount;
 
 float _SplatScale;
 float _SplatOpacityScale;
@@ -244,11 +249,41 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID)
         half4 col;
         col.rgb = ShadeSH(splat.sh, objViewDir, _SHOrder, _SHOnly != 0);
         col.a = min(splat.opacity * opacityScale, 65000);
+
+        if (_SplatBitsValid)
+        {
+            uint wordIdx = idx / 32;
+            uint bitIdx = idx & 31;
+            uint selVal = _SplatSelectedBits.Load(wordIdx * 4);
+            if (selVal & (1 << bitIdx))
+                col.a = -max(col.a, 1.0 / 255.0);
+        }
+
         view.color.x = (f32tof16(col.r) << 16) | f32tof16(col.g);
         view.color.y = (f32tof16(col.b) << 16) | f32tof16(col.a);
     }
     
     _SplatViewData[idx] = view;
+}
+
+[numthreads(GROUP_SIZE,1,1)]
+void CSCopyViewDataAndDistances(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _CopyKernelCount)
+        return;
+
+    uint srcIdx = _CopySrcStartIndex + idx;
+    uint dstIdx = _CopyDstStartIndex + idx;
+    if (srcIdx >= _SplatCount)
+        return;
+
+    _CopyDstViewData[dstIdx] = _SplatViewData[srcIdx];
+
+    float3 pos = LoadSplatPos(srcIdx);
+    pos = mul(_MatrixMV, float4(pos.xyz, 1)).xyz;
+    _CopyDstSortDistances[dstIdx] = FloatToSortableUint(pos.z);
+    _CopyDstSortKeys[dstIdx] = dstIdx;
 }
 
 
@@ -677,7 +712,7 @@ RWByteAddressBuffer _CopyDstOther;
 RWByteAddressBuffer _CopyDstSH;
 RWByteAddressBuffer _CopyDstEditDeleted;
 RWTexture2D<float4> _CopyDstColor;
-uint _CopyDstSize, _CopySrcStartIndex, _CopyDstStartIndex, _CopyCount;
+uint _CopyDstSize, _CopyCount;
 
 float4x4 _CopyTransformMatrix;
 float4 _CopyTransformRotation;
@@ -694,7 +729,7 @@ void CSCopySplats (uint3 id : SV_DispatchThreadID)
     if (srcIdx >= _SplatCount || dstIdx >= _CopyDstSize)
         return;
 
-    SplatData src = LoadSplatData(idx);
+    SplatData src = LoadSplatData(srcIdx);
 
     // transform the splat
     src.pos = mul(_CopyTransformMatrix, float4(src.pos,1)).xyz;

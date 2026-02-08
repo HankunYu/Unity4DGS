@@ -43,10 +43,13 @@ namespace GaussianSplatting.Runtime
                 GaussianSplatRenderSystem.instance.SortAndRenderSplats(ctx.hdCamera.camera, ctx.cmd);
 
             // compose
-            ctx.cmd.BeginSample(GaussianSplatRenderSystem.s_ProfCompose);
-            CoreUtils.SetRenderTarget(ctx.cmd, ctx.cameraColorBuffer, ClearFlag.None);
-            CoreUtils.DrawFullScreen(ctx.cmd, matComposite, ctx.propertyBlock, shaderPassId: 0);
-            ctx.cmd.EndSample(GaussianSplatRenderSystem.s_ProfCompose);
+            if (matComposite != null)
+            {
+                ctx.cmd.BeginSample(GaussianSplatRenderSystem.s_ProfCompose);
+                CoreUtils.SetRenderTarget(ctx.cmd, ctx.cameraColorBuffer, ClearFlag.None);
+                CoreUtils.DrawFullScreen(ctx.cmd, matComposite, ctx.propertyBlock, shaderPassId: 0);
+                ctx.cmd.EndSample(GaussianSplatRenderSystem.s_ProfCompose);
+            }
         }
 
         protected override void Cleanup()

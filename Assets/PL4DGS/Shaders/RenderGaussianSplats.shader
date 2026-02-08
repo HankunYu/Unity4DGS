@@ -29,8 +29,6 @@ struct v2f
 };
 
 StructuredBuffer<SplatViewData> _SplatViewData;
-ByteAddressBuffer _SplatSelectedBits;
-uint _SplatBitsValid;
 
 v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
 {
@@ -60,17 +58,6 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
 		o.vertex = centerClipPos;
 		o.vertex.xy += deltaScreenPos * centerClipPos.w;
 
-		// is this splat selected?
-		if (_SplatBitsValid)
-		{
-			uint wordIdx = instID / 32;
-			uint bitIdx = instID & 31;
-			uint selVal = _SplatSelectedBits.Load(wordIdx * 4);
-			if (selVal & (1 << bitIdx))
-			{
-				o.col.a = -1;				
-			}
-		}
 	}
 	FlipProjectionIfBackbuffer(o.vertex);
     return o;
