@@ -16,9 +16,13 @@ namespace GaussianSplatting.Runtime
 
         public ClampedFloatParameter vintageStrength = new(0.55f, 0f, 1f);
         public ClampedFloatParameter posterizeLevels = new(6f, 2f, 16f);
+        public ClampedFloatParameter posterizeMix = new(0.5f, 0f, 1f);
         public ClampedFloatParameter shadowTintToGreen = new(0.35f, 0f, 1f);
         public ClampedFloatParameter highlightWarmth = new(0.25f, 0f, 1f);
         public ClampedFloatParameter vignette = new(0.1f, 0f, 1f);
+        public ClampedFloatParameter brushStrength = new(0.75f, 0f, 1f);
+        public ClampedFloatParameter brushScale = new(1.8f, 0.5f, 4f);
+        public ClampedFloatParameter brushAngleJitter = new(0.2f, 0f, 1f);
 
         public ClampedFloatParameter blend = new(1f, 0f, 1f);
 
@@ -29,8 +33,9 @@ namespace GaussianSplatting.Runtime
 
             return grainIntensity.value > 0f
                 || vintageStrength.value > 0f
-                || posterizeLevels.value < 16f
-                || vignette.value > 0f;
+                || (posterizeLevels.value < 16f && posterizeMix.value > 0f)
+                || vignette.value > 0f
+                || brushStrength.value > 0f;
         }
     }
 }

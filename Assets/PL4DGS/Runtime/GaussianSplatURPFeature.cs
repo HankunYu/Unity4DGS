@@ -35,9 +35,13 @@ namespace GaussianSplatting.Runtime
             public float grainTemporalJitter;
             public float vintageStrength;
             public float posterizeLevels;
+            public float posterizeMix;
             public float shadowTintToGreen;
             public float highlightWarmth;
             public float vignette;
+            public float brushStrength;
+            public float brushScale;
+            public float brushAngleJitter;
             public float blend;
         }
 
@@ -48,9 +52,13 @@ namespace GaussianSplatting.Runtime
         static readonly int s_grainTemporalJitter = Shader.PropertyToID("_GrainTemporalJitter");
         static readonly int s_vintageStrength = Shader.PropertyToID("_VintageStrength");
         static readonly int s_posterizeLevels = Shader.PropertyToID("_PosterizeLevels");
+        static readonly int s_posterizeMix = Shader.PropertyToID("_PosterizeMix");
         static readonly int s_shadowTintToGreen = Shader.PropertyToID("_ShadowTintToGreen");
         static readonly int s_highlightWarmth = Shader.PropertyToID("_HighlightWarmth");
         static readonly int s_vignetteStrength = Shader.PropertyToID("_VignetteStrength");
+        static readonly int s_brushStrength = Shader.PropertyToID("_BrushStrength");
+        static readonly int s_brushScale = Shader.PropertyToID("_BrushScale");
+        static readonly int s_brushAngleJitter = Shader.PropertyToID("_BrushAngleJitter");
         static readonly int s_effectBlend = Shader.PropertyToID("_EffectBlend");
 
         [SerializeField] StylizeTarget m_StylizeTarget = StylizeTarget.GaussianOnly;
@@ -312,9 +320,13 @@ namespace GaussianSplatting.Runtime
                 grainTemporalJitter = stylizeVolume.grainTemporalJitter.value,
                 vintageStrength = stylizeVolume.vintageStrength.value,
                 posterizeLevels = stylizeVolume.posterizeLevels.value,
+                posterizeMix = stylizeVolume.posterizeMix.value,
                 shadowTintToGreen = stylizeVolume.shadowTintToGreen.value,
                 highlightWarmth = stylizeVolume.highlightWarmth.value,
                 vignette = stylizeVolume.vignette.value,
+                brushStrength = stylizeVolume.brushStrength.value,
+                brushScale = stylizeVolume.brushScale.value,
+                brushAngleJitter = stylizeVolume.brushAngleJitter.value,
                 blend = stylizeVolume.blend.value
             };
             return true;
@@ -334,9 +346,13 @@ namespace GaussianSplatting.Runtime
             material.SetFloat(s_grainTemporalJitter, settings.grainTemporalJitter);
             material.SetFloat(s_vintageStrength, settings.vintageStrength);
             material.SetFloat(s_posterizeLevels, settings.posterizeLevels);
+            material.SetFloat(s_posterizeMix, settings.posterizeMix);
             material.SetFloat(s_shadowTintToGreen, settings.shadowTintToGreen);
             material.SetFloat(s_highlightWarmth, settings.highlightWarmth);
             material.SetFloat(s_vignetteStrength, settings.vignette);
+            material.SetFloat(s_brushStrength, settings.brushStrength);
+            material.SetFloat(s_brushScale, settings.brushScale);
+            material.SetFloat(s_brushAngleJitter, settings.brushAngleJitter);
             material.SetFloat(s_effectBlend, settings.blend);
         }
     }

@@ -147,35 +147,47 @@ MonoBehaviour:
   m_EditorClassIdentifier: GaussianSplatting::GaussianSplatting.Runtime.GaussianStylizeVolume
   active: 1
   enable:
-    m_OverrideState: 0
-    m_Value: 0
+    m_OverrideState: 1
+    m_Value: 1
   grainIntensity:
-    m_OverrideState: 0
-    m_Value: 0.25
+    m_OverrideState: 1
+    m_Value: 0.357
   grainScale:
-    m_OverrideState: 0
+    m_OverrideState: 1
     m_Value: 1.2
   grainTemporalJitter:
     m_OverrideState: 0
     m_Value: 0.2
   vintageStrength:
     m_OverrideState: 0
-    m_Value: 0.55
+    m_Value: 0.269
   posterizeLevels:
+    m_OverrideState: 1
+    m_Value: 7.96
+  posterizeMix:
     m_OverrideState: 0
-    m_Value: 6
+    m_Value: 0.5
   shadowTintToGreen:
-    m_OverrideState: 0
-    m_Value: 0.35
+    m_OverrideState: 1
+    m_Value: 0.257
   highlightWarmth:
-    m_OverrideState: 0
-    m_Value: 0.25
+    m_OverrideState: 1
+    m_Value: 0.648
   vignette:
-    m_OverrideState: 0
-    m_Value: 0.1
+    m_OverrideState: 1
+    m_Value: 0
+  brushStrength:
+    m_OverrideState: 1
+    m_Value: 0.76
+  brushScale:
+    m_OverrideState: 1
+    m_Value: 1.15
+  brushAngleJitter:
+    m_OverrideState: 1
+    m_Value: 0.596
   blend:
-    m_OverrideState: 0
-    m_Value: 1
+    m_OverrideState: 1
+    m_Value: 0.865
 --- !u!114 &7391319092446245454
 MonoBehaviour:
   m_ObjectHideFlags: 3
