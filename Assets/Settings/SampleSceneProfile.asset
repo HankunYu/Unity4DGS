@@ -92,6 +92,7 @@ MonoBehaviour:
   - {fileID: -7893295128165547882}
   - {fileID: 7391319092446245454}
   - {fileID: -3357603926938260329}
+  - {fileID: 4606414564794155788}
 --- !u!114 &849379129802519247
 MonoBehaviour:
   m_ObjectHideFlags: 3
@@ -132,6 +133,49 @@ MonoBehaviour:
   maxNits:
     m_OverrideState: 1
     m_Value: 647
+--- !u!114 &4606414564794155788
+MonoBehaviour:
+  m_ObjectHideFlags: 3
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8b59f59992834d95a0905a8af81bc53e, type: 3}
+  m_Name: GaussianStylizeVolume
+  m_EditorClassIdentifier: GaussianSplatting::GaussianSplatting.Runtime.GaussianStylizeVolume
+  active: 1
+  enable:
+    m_OverrideState: 0
+    m_Value: 0
+  grainIntensity:
+    m_OverrideState: 0
+    m_Value: 0.25
+  grainScale:
+    m_OverrideState: 0
+    m_Value: 1.2
+  grainTemporalJitter:
+    m_OverrideState: 0
+    m_Value: 0.2
+  vintageStrength:
+    m_OverrideState: 0
+    m_Value: 0.55
+  posterizeLevels:
+    m_OverrideState: 0
+    m_Value: 6
+  shadowTintToGreen:
+    m_OverrideState: 0
+    m_Value: 0.35
+  highlightWarmth:
+    m_OverrideState: 0
+    m_Value: 0.25
+  vignette:
+    m_OverrideState: 0
+    m_Value: 0.1
+  blend:
+    m_OverrideState: 0
+    m_Value: 1
 --- !u!114 &7391319092446245454
 MonoBehaviour:
   m_ObjectHideFlags: 3
