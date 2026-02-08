@@ -42,6 +42,11 @@ namespace GaussianSplatting.Runtime
             public float brushStrength;
             public float brushScale;
             public float brushAngleJitter;
+            public float colorMergeStrength;
+            public float colorMergeLevels;
+            public float colorMergeThreshold;
+            public float colorMergeRadius;
+            public float colorMergeEdgeProtect;
             public float blend;
         }
 
@@ -59,6 +64,11 @@ namespace GaussianSplatting.Runtime
         static readonly int s_brushStrength = Shader.PropertyToID("_BrushStrength");
         static readonly int s_brushScale = Shader.PropertyToID("_BrushScale");
         static readonly int s_brushAngleJitter = Shader.PropertyToID("_BrushAngleJitter");
+        static readonly int s_colorMergeStrength = Shader.PropertyToID("_ColorMergeStrength");
+        static readonly int s_colorMergeLevels = Shader.PropertyToID("_ColorMergeLevels");
+        static readonly int s_colorMergeThreshold = Shader.PropertyToID("_ColorMergeThreshold");
+        static readonly int s_colorMergeRadius = Shader.PropertyToID("_ColorMergeRadius");
+        static readonly int s_colorMergeEdgeProtect = Shader.PropertyToID("_ColorMergeEdgeProtect");
         static readonly int s_effectBlend = Shader.PropertyToID("_EffectBlend");
 
         [SerializeField] StylizeTarget m_StylizeTarget = StylizeTarget.GaussianOnly;
@@ -327,6 +337,11 @@ namespace GaussianSplatting.Runtime
                 brushStrength = stylizeVolume.brushStrength.value,
                 brushScale = stylizeVolume.brushScale.value,
                 brushAngleJitter = stylizeVolume.brushAngleJitter.value,
+                colorMergeStrength = stylizeVolume.colorMergeStrength.value,
+                colorMergeLevels = stylizeVolume.colorMergeLevels.value,
+                colorMergeThreshold = stylizeVolume.colorMergeThreshold.value,
+                colorMergeRadius = stylizeVolume.colorMergeRadius.value,
+                colorMergeEdgeProtect = stylizeVolume.colorMergeEdgeProtect.value,
                 blend = stylizeVolume.blend.value
             };
             return true;
@@ -353,6 +368,11 @@ namespace GaussianSplatting.Runtime
             material.SetFloat(s_brushStrength, settings.brushStrength);
             material.SetFloat(s_brushScale, settings.brushScale);
             material.SetFloat(s_brushAngleJitter, settings.brushAngleJitter);
+            material.SetFloat(s_colorMergeStrength, settings.colorMergeStrength);
+            material.SetFloat(s_colorMergeLevels, settings.colorMergeLevels);
+            material.SetFloat(s_colorMergeThreshold, settings.colorMergeThreshold);
+            material.SetFloat(s_colorMergeRadius, settings.colorMergeRadius);
+            material.SetFloat(s_colorMergeEdgeProtect, settings.colorMergeEdgeProtect);
             material.SetFloat(s_effectBlend, settings.blend);
         }
     }

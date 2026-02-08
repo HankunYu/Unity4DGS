@@ -23,6 +23,11 @@ namespace GaussianSplatting.Runtime
         public ClampedFloatParameter brushStrength = new(0.75f, 0f, 1f);
         public ClampedFloatParameter brushScale = new(1.8f, 0.5f, 4f);
         public ClampedFloatParameter brushAngleJitter = new(0.2f, 0f, 1f);
+        public ClampedFloatParameter colorMergeStrength = new(0f, 0f, 1f);
+        public ClampedFloatParameter colorMergeLevels = new(5f, 2f, 16f);
+        public ClampedFloatParameter colorMergeThreshold = new(0.35f, 0f, 1f);
+        public ClampedFloatParameter colorMergeRadius = new(0.5f, 0f, 1f);
+        public ClampedFloatParameter colorMergeEdgeProtect = new(0.75f, 0f, 1f);
 
         public ClampedFloatParameter blend = new(1f, 0f, 1f);
 
@@ -35,7 +40,8 @@ namespace GaussianSplatting.Runtime
                 || vintageStrength.value > 0f
                 || (posterizeLevels.value < 16f && posterizeMix.value > 0f)
                 || vignette.value > 0f
-                || brushStrength.value > 0f;
+                || brushStrength.value > 0f
+                || colorMergeStrength.value > 0f;
         }
     }
 }

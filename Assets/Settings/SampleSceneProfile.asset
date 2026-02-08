@@ -151,7 +151,7 @@ MonoBehaviour:
     m_Value: 1
   grainIntensity:
     m_OverrideState: 1
-    m_Value: 0.357
+    m_Value: 0.582
   grainScale:
     m_OverrideState: 1
     m_Value: 1.2
@@ -165,8 +165,8 @@ MonoBehaviour:
     m_OverrideState: 1
     m_Value: 7.96
   posterizeMix:
-    m_OverrideState: 0
-    m_Value: 0.5
+    m_OverrideState: 1
+    m_Value: 0
   shadowTintToGreen:
     m_OverrideState: 1
     m_Value: 0.257
@@ -178,16 +178,28 @@ MonoBehaviour:
     m_Value: 0
   brushStrength:
     m_OverrideState: 1
-    m_Value: 0.76
+    m_Value: 1
   brushScale:
     m_OverrideState: 1
     m_Value: 1.15
   brushAngleJitter:
     m_OverrideState: 1
-    m_Value: 0.596
+    m_Value: 0.148
+  colorMergeStrength:
+    m_OverrideState: 1
+    m_Value: 0.462
+  colorMergeLevels:
+    m_OverrideState: 1
+    m_Value: 5.64
+  colorMergeThreshold:
+    m_OverrideState: 1
+    m_Value: 0
+  colorMergeRadius:
+    m_OverrideState: 0
+    m_Value: 0.503
   blend:
     m_OverrideState: 1
-    m_Value: 0.865
+    m_Value: 1
 --- !u!114 &7391319092446245454
 MonoBehaviour:
   m_ObjectHideFlags: 3

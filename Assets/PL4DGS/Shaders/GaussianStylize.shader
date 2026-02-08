@@ -44,6 +44,11 @@ float _VignetteStrength;
 float _BrushStrength;
 float _BrushScale;
 float _BrushAngleJitter;
+float _ColorMergeStrength;
+float _ColorMergeLevels;
+float _ColorMergeThreshold;
+float _ColorMergeRadius;
+float _ColorMergeEdgeProtect;
 float _EffectBlend;
 
 float Hash21(float2 p)
@@ -179,6 +184,65 @@ float3 ApplyBrushStroke(float3 color, int2 pixelPos)
     return lerp(color, inked, brushBlend);
 }
 
+float3 QuantizeColor(float3 color, float levels)
+{
+    return floor(saturate(color) * levels + 0.5) / levels;
+}
+
+float3 ApplyColorMerge(float3 color, int2 pixelPos)
+{
+    float mergeStrength = saturate(_ColorMergeStrength);
+    if (mergeStrength <= 0.0001)
+        return color;
+
+    float levels = max(_ColorMergeLevels, 2.0);
+    float3 centerQuantized = QuantizeColor(color, levels);
+
+    int radius = (int)round(lerp(1.0, 3.0, saturate(_ColorMergeRadius)));
+    float radiusSigma = max((float)radius, 1.0) * 0.75;
+    float colorSigma = lerp(0.03, 0.28, saturate(_ColorMergeThreshold));
+
+    float3 accum = 0.0;
+    float weightSum = 0.0;
+    [unroll]
+    for (int y = -3; y <= 3; ++y)
+    {
+        [unroll]
+        for (int x = -3; x <= 3; ++x)
+        {
+            if (abs(x) > radius || abs(y) > radius)
+                continue;
+
+            float2 delta = float2(x, y);
+            float spatialWeight = exp(-dot(delta, delta) / (2.0 * radiusSigma * radiusSigma));
+
+            float3 sampleColor = SampleSource(pixelPos + int2(x, y));
+            float3 sampleQuantized = QuantizeColor(sampleColor, levels);
+            float3 colorDelta = sampleQuantized - centerQuantized;
+            float colorDist2 = dot(colorDelta, colorDelta);
+            float colorWeight = exp(-colorDist2 / (2.0 * colorSigma * colorSigma + 1e-5));
+
+            float w = spatialWeight * colorWeight;
+            accum += sampleQuantized * w;
+            weightSum += w;
+        }
+    }
+
+    float3 merged = weightSum > 1e-5 ? (accum / weightSum) : centerQuantized;
+
+    float lumaL = dot(SampleSource(pixelPos + int2(-1, 0)), float3(0.2126, 0.7152, 0.0722));
+    float lumaR = dot(SampleSource(pixelPos + int2(1, 0)), float3(0.2126, 0.7152, 0.0722));
+    float lumaU = dot(SampleSource(pixelPos + int2(0, 1)), float3(0.2126, 0.7152, 0.0722));
+    float lumaD = dot(SampleSource(pixelPos + int2(0, -1)), float3(0.2126, 0.7152, 0.0722));
+    float edge = saturate(sqrt((lumaR - lumaL) * (lumaR - lumaL) + (lumaU - lumaD) * (lumaU - lumaD)) * 3.2);
+
+    float protect = saturate(_ColorMergeEdgeProtect);
+    float flatAreaMask = 1.0 - smoothstep(0.04, 0.22, edge);
+    float edgeAttenuation = lerp(1.0, flatAreaMask, protect);
+    float finalMergeStrength = mergeStrength * edgeAttenuation;
+    return lerp(color, merged, finalMergeStrength);
+}
+
 half4 fragStylize(v2f i) : SV_Target
 {
     int2 pixel = int2(i.vertex.xy);
@@ -187,6 +251,7 @@ half4 fragStylize(v2f i) : SV_Target
     float3 styled = src.rgb;
     styled = ApplyVintage(styled);
     styled = ApplyBrushStroke(styled, pixel);
+    styled = ApplyColorMerge(styled, pixel);
     float3 posterized = ApplyPosterizeDithered(styled, pixel);
     styled = lerp(styled, posterized, saturate(_PosterizeMix));
     styled = ApplyGrain(styled, i.vertex.xy);
