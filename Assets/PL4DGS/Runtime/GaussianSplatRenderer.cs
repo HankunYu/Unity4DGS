@@ -29,14 +29,12 @@ namespace GaussianSplatting.Runtime
         readonly HashSet<Camera> m_CameraCommandBuffersDone = new();
         readonly List<(GaussianSplatRenderer, MaterialPropertyBlock)> m_ActiveSplats = new();
         readonly MaterialPropertyBlock m_GlobalMpb = new();
+        readonly Dictionary<int, GlobalOrderGroupCache> m_GlobalGroups = new();
 
         CommandBuffer m_CommandBuffer;
-        GraphicsBuffer m_GlobalSortDistances;
-        GraphicsBuffer m_GlobalSortKeys;
-        GraphicsBuffer m_GlobalViewData;
         GpuSorting m_GlobalSorter;
-        GpuSorting.Args m_GlobalSorterArgs;
         ComputeShader m_GlobalSorterShader;
+        int m_GlobalFrameId;
 
         static void DisposeBuffer(ref GraphicsBuffer buf)
         {
@@ -44,12 +42,34 @@ namespace GaussianSplatting.Runtime
             buf = null;
         }
 
+        class GlobalOrderGroupCache
+        {
+            public int splatCapacity;
+            public int groupSignature;
+            public bool hasSortedKeys;
+            public int lastUsedFrame;
+            public GraphicsBuffer viewData;
+            public GraphicsBuffer sortDistances;
+            public GraphicsBuffer sortKeys;
+            public GpuSorting.Args sorterArgs;
+
+            public void Dispose()
+            {
+                viewData?.Dispose();
+                sortDistances?.Dispose();
+                sortKeys?.Dispose();
+                sorterArgs.resources.Dispose();
+                viewData = null;
+                sortDistances = null;
+                sortKeys = null;
+            }
+        }
+
         void DisposeGlobalResources()
         {
-            DisposeBuffer(ref m_GlobalSortDistances);
-            DisposeBuffer(ref m_GlobalSortKeys);
-            DisposeBuffer(ref m_GlobalViewData);
-            m_GlobalSorterArgs.resources.Dispose();
+            foreach (var kvp in m_GlobalGroups)
+                kvp.Value.Dispose();
+            m_GlobalGroups.Clear();
             m_GlobalSorter = null;
             m_GlobalSorterShader = null;
         }
@@ -150,54 +170,89 @@ namespace GaussianSplatting.Runtime
             return true;
         }
 
-        bool EnsureGlobalResources(GaussianSplatRenderer reference, int splatCount)
+        bool EnsureGlobalSorter(GaussianSplatRenderer reference)
         {
-            if (reference == null || reference.m_CSSplatUtilities == null || splatCount <= 0)
+            if (reference == null || reference.m_CSSplatUtilities == null)
                 return false;
-
-            if (m_GlobalViewData == null || m_GlobalViewData.count < splatCount)
-            {
-                DisposeBuffer(ref m_GlobalViewData);
-                DisposeBuffer(ref m_GlobalSortDistances);
-                DisposeBuffer(ref m_GlobalSortKeys);
-                m_GlobalViewData = new GraphicsBuffer(GraphicsBuffer.Target.Structured, splatCount, GaussianSplatRenderer.kGpuViewDataSize)
-                {
-                    name = "GaussianGlobalViewData"
-                };
-                m_GlobalSortDistances = new GraphicsBuffer(GraphicsBuffer.Target.Structured, splatCount, 4)
-                {
-                    name = "GaussianGlobalSortDistances"
-                };
-                m_GlobalSortKeys = new GraphicsBuffer(GraphicsBuffer.Target.Structured, splatCount, 4)
-                {
-                    name = "GaussianGlobalSortIndices"
-                };
-            }
-
             if (m_GlobalSorter == null || m_GlobalSorterShader != reference.m_CSSplatUtilities)
             {
-                m_GlobalSorterArgs.resources.Dispose();
                 m_GlobalSorter = new GpuSorting(reference.m_CSSplatUtilities);
                 m_GlobalSorterShader = reference.m_CSSplatUtilities;
             }
+            return m_GlobalSorter != null && m_GlobalSorter.Valid;
+        }
 
-            if (m_GlobalSorter == null || !m_GlobalSorter.Valid)
+        bool EnsureGlobalGroupCache(int renderOrder, GaussianSplatRenderer reference, int splatCount, out GlobalOrderGroupCache cache)
+        {
+            cache = null;
+            if (!EnsureGlobalSorter(reference) || splatCount <= 0)
                 return false;
 
-            if (m_GlobalSorterArgs.resources.altBuffer == null || m_GlobalSorterArgs.count < (uint)splatCount)
+            if (!m_GlobalGroups.TryGetValue(renderOrder, out cache))
             {
-                m_GlobalSorterArgs.resources.Dispose();
-                m_GlobalSorterArgs.resources = GpuSorting.SupportResources.Load((uint)splatCount);
+                cache = new GlobalOrderGroupCache();
+                m_GlobalGroups.Add(renderOrder, cache);
             }
 
-            m_GlobalSorterArgs.inputKeys = m_GlobalSortDistances;
-            m_GlobalSorterArgs.inputValues = m_GlobalSortKeys;
-            m_GlobalSorterArgs.count = (uint)splatCount;
+            if (cache.viewData == null || cache.splatCapacity < splatCount)
+            {
+                cache.viewData?.Dispose();
+                cache.sortDistances?.Dispose();
+                cache.sortKeys?.Dispose();
+                cache.viewData = new GraphicsBuffer(GraphicsBuffer.Target.Structured, splatCount, GaussianSplatRenderer.kGpuViewDataSize)
+                {
+                    name = $"GaussianGlobalViewData_{renderOrder}"
+                };
+                cache.sortDistances = new GraphicsBuffer(GraphicsBuffer.Target.Structured, splatCount, 4)
+                {
+                    name = $"GaussianGlobalSortDistances_{renderOrder}"
+                };
+                cache.sortKeys = new GraphicsBuffer(GraphicsBuffer.Target.Structured, splatCount, 4)
+                {
+                    name = $"GaussianGlobalSortIndices_{renderOrder}"
+                };
+                cache.splatCapacity = splatCount;
+                cache.hasSortedKeys = false;
+            }
+
+            if (cache.sorterArgs.resources.altBuffer == null || cache.sorterArgs.count < (uint)splatCount)
+            {
+                cache.sorterArgs.resources.Dispose();
+                cache.sorterArgs.resources = GpuSorting.SupportResources.Load((uint)splatCount);
+            }
+
+            cache.sorterArgs.inputKeys = cache.sortDistances;
+            cache.sorterArgs.inputValues = cache.sortKeys;
+            cache.sorterArgs.count = (uint)splatCount;
+            cache.lastUsedFrame = m_GlobalFrameId;
             return true;
+        }
+
+        void ReleaseUnusedGlobalGroups(int activeFrameId)
+        {
+            if (m_GlobalGroups.Count == 0)
+                return;
+            List<int> stale = null;
+            foreach (var kvp in m_GlobalGroups)
+            {
+                if (kvp.Value.lastUsedFrame == activeFrameId)
+                    continue;
+                stale ??= new List<int>();
+                stale.Add(kvp.Key);
+            }
+            if (stale == null)
+                return;
+            foreach (var key in stale)
+            {
+                m_GlobalGroups[key].Dispose();
+                m_GlobalGroups.Remove(key);
+            }
         }
 
         Material SortAndRenderSplatsGlobal(Camera cam, CommandBuffer cmb)
         {
+            ++m_GlobalFrameId;
+            int activeFrameId = m_GlobalFrameId;
             Material matComposite = null;
             bool hasRenderedAGroup = false;
             int groupStart = 0;
@@ -213,12 +268,32 @@ namespace GaussianSplatting.Runtime
                 }
 
                 var reference = m_ActiveSplats[groupStart].Item1;
-                if (!EnsureGlobalResources(reference, groupSplatCount))
+                if (!EnsureGlobalGroupCache(order, reference, groupSplatCount, out var groupCache))
                 {
                     if (!hasRenderedAGroup)
+                    {
+                        ReleaseUnusedGlobalGroups(activeFrameId);
                         return SortAndRenderSplatsPerObject(cam, cmb);
+                    }
                     groupStart = groupEnd;
                     continue;
+                }
+
+                int groupSignature = 17;
+                bool groupSortNeeded = !groupCache.hasSortedKeys;
+                for (int i = groupStart; i < groupEnd; ++i)
+                {
+                    var gs = m_ActiveSplats[i].Item1;
+                    groupSignature = groupSignature * 31 + gs.GetInstanceID();
+                    groupSignature = groupSignature * 31 + gs.splatCount;
+                    int nth = Mathf.Max(1, gs.m_SortNthFrame);
+                    if (gs.m_FrameCounter % nth == 0)
+                        groupSortNeeded = true;
+                }
+                if (groupCache.groupSignature != groupSignature)
+                {
+                    groupCache.hasSortedKeys = false;
+                    groupSortNeeded = true;
                 }
 
                 Material groupDisplayMat = null;
@@ -246,7 +321,8 @@ namespace GaussianSplatting.Runtime
                     }
 
                     bool copySuccess = gs.CopyViewDataAndDistances(cmb, cam, gs.transform.localToWorldMatrix,
-                        m_GlobalViewData, m_GlobalSortDistances, m_GlobalSortKeys, 0, dstOffset, gs.splatCount);
+                        groupCache.viewData, groupCache.sortDistances, groupCache.sortKeys,
+                        0, dstOffset, gs.splatCount, groupSortNeeded || !groupCache.hasSortedKeys);
                     if (!copySuccess)
                     {
                         groupValid = false;
@@ -260,25 +336,34 @@ namespace GaussianSplatting.Runtime
                 if (!groupValid || groupDisplayMat == null || dstOffset == 0)
                 {
                     if (!hasRenderedAGroup)
+                    {
+                        ReleaseUnusedGlobalGroups(activeFrameId);
                         return SortAndRenderSplatsPerObject(cam, cmb);
+                    }
                     groupStart = groupEnd;
                     continue;
                 }
 
-                m_GlobalSorterArgs.count = (uint)dstOffset;
-                m_GlobalSorter.Dispatch(cmb, m_GlobalSorterArgs);
+                if (groupSortNeeded || !groupCache.hasSortedKeys)
+                {
+                    groupCache.sorterArgs.count = (uint)dstOffset;
+                    m_GlobalSorter.Dispatch(cmb, groupCache.sorterArgs);
+                    groupCache.hasSortedKeys = true;
+                }
+                groupCache.groupSignature = groupSignature;
 
                 m_GlobalMpb.Clear();
-                m_GlobalMpb.SetBuffer(GaussianSplatRenderer.Props.SplatViewData, m_GlobalViewData);
-                m_GlobalMpb.SetBuffer(GaussianSplatRenderer.Props.OrderBuffer, m_GlobalSortKeys);
+                m_GlobalMpb.SetBuffer(GaussianSplatRenderer.Props.SplatViewData, groupCache.viewData);
+                m_GlobalMpb.SetBuffer(GaussianSplatRenderer.Props.OrderBuffer, groupCache.sortKeys);
 
                 cmb.BeginSample(s_ProfDraw);
-                cmb.DrawProcedural(Matrix4x4.identity, groupDisplayMat, 0, MeshTopology.Triangles, 6, dstOffset, m_GlobalMpb);
+                cmb.DrawProcedural(reference.m_GpuIndexBuffer, Matrix4x4.identity, groupDisplayMat, 0, MeshTopology.Triangles, 6, dstOffset, m_GlobalMpb);
                 cmb.EndSample(s_ProfDraw);
 
                 hasRenderedAGroup = true;
                 groupStart = groupEnd;
             }
+            ReleaseUnusedGlobalGroups(activeFrameId);
             return matComposite;
         }
 
@@ -519,6 +604,7 @@ namespace GaussianSplatting.Runtime
             public static readonly int CopySrcStartIndex = Shader.PropertyToID("_CopySrcStartIndex");
             public static readonly int CopyDstStartIndex = Shader.PropertyToID("_CopyDstStartIndex");
             public static readonly int CopyKernelCount = Shader.PropertyToID("_CopyKernelCount");
+            public static readonly int CopyWriteKeys = Shader.PropertyToID("_CopyWriteKeys");
         }
 
         [field: NonSerialized] public bool editModified { get; private set; }
@@ -980,7 +1066,7 @@ namespace GaussianSplatting.Runtime
 
         internal bool CopyViewDataAndDistances(CommandBuffer cmb, Camera cam, Matrix4x4 matrix,
             GraphicsBuffer dstViewData, GraphicsBuffer dstSortDistances, GraphicsBuffer dstSortKeys,
-            int srcStartIndex, int dstStartIndex, int copyCount)
+            int srcStartIndex, int dstStartIndex, int copyCount, bool writeSortKeys)
         {
             if (copyCount <= 0)
                 return true;
@@ -1000,6 +1086,7 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeIntParam(m_CSSplatUtilities, Props.CopySrcStartIndex, srcStartIndex);
             cmb.SetComputeIntParam(m_CSSplatUtilities, Props.CopyDstStartIndex, dstStartIndex);
             cmb.SetComputeIntParam(m_CSSplatUtilities, Props.CopyKernelCount, copyCount);
+            cmb.SetComputeIntParam(m_CSSplatUtilities, Props.CopyWriteKeys, writeSortKeys ? 1 : 0);
 
             m_CSSplatUtilities.GetKernelThreadGroupSizes(kernelIndex, out uint gsX, out _, out _);
             cmb.DispatchCompute(m_CSSplatUtilities, kernelIndex, (copyCount + (int)gsX - 1)/(int)gsX, 1, 1);

@@ -87,6 +87,7 @@ RWStructuredBuffer<SplatViewData> _CopyDstViewData;
 RWStructuredBuffer<uint> _CopyDstSortDistances;
 RWStructuredBuffer<uint> _CopyDstSortKeys;
 uint _CopySrcStartIndex, _CopyDstStartIndex, _CopyKernelCount;
+uint _CopyWriteKeys;
 
 float _SplatScale;
 float _SplatOpacityScale;
@@ -283,7 +284,8 @@ void CSCopyViewDataAndDistances(uint3 id : SV_DispatchThreadID)
     float3 pos = LoadSplatPos(srcIdx);
     pos = mul(_MatrixMV, float4(pos.xyz, 1)).xyz;
     _CopyDstSortDistances[dstIdx] = FloatToSortableUint(pos.z);
-    _CopyDstSortKeys[dstIdx] = dstIdx;
+    if (_CopyWriteKeys != 0)
+        _CopyDstSortKeys[dstIdx] = dstIdx;
 }
 
 
