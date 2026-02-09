@@ -522,6 +522,9 @@ namespace GaussianSplatting.Runtime
         GraphicsBuffer m_GpuPosData;
         GraphicsBuffer m_GpuOtherData;
         GraphicsBuffer m_GpuSHData;
+
+        // Set by GaussianAnimator: per-splat animation output (3 float4s per splat)
+        internal GraphicsBuffer m_AnimOutputBuffer;
         Texture m_GpuColorData;
         internal GraphicsBuffer m_GpuChunks;
         internal bool m_GpuChunksValid;
@@ -605,6 +608,8 @@ namespace GaussianSplatting.Runtime
             public static readonly int CopyDstStartIndex = Shader.PropertyToID("_CopyDstStartIndex");
             public static readonly int CopyKernelCount = Shader.PropertyToID("_CopyKernelCount");
             public static readonly int CopyWriteKeys = Shader.PropertyToID("_CopyWriteKeys");
+            public static readonly int AnimOutputData = Shader.PropertyToID("_AnimOutputData");
+            public static readonly int AnimDataValid = Shader.PropertyToID("_AnimDataValid");
         }
 
         [field: NonSerialized] public bool editModified { get; private set; }
@@ -615,6 +620,7 @@ namespace GaussianSplatting.Runtime
 
         public GaussianSplatAsset asset => m_Asset;
         public int splatCount => m_SplatCount;
+        internal GraphicsBuffer GpuPosData => m_GpuPosData;
 
         enum KernelIndices
         {
@@ -948,6 +954,12 @@ namespace GaussianSplatting.Runtime
             UpdateCutoutsBuffer();
             cmb.SetComputeIntParam(cs, Props.SplatCutoutsCount, m_Cutouts?.Length ?? 0);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatCutouts, m_GpuEditCutouts);
+
+            // Animation data binding
+            bool hasAnim = m_AnimOutputBuffer != null;
+            cmb.SetComputeIntParam(cs, Props.AnimDataValid, hasAnim ? 1 : 0);
+            // Always bind a valid buffer to avoid shader errors
+            cmb.SetComputeBufferParam(cs, kernelIndex, Props.AnimOutputData, hasAnim ? m_AnimOutputBuffer : m_GpuView);
         }
 
         internal void SetAssetDataOnMaterial(MaterialPropertyBlock mat)
