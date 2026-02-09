@@ -1,0 +1,444 @@
+// SPDX-License-Identifier: MIT
+// Gaussian Splat procedural animation compute shader.
+// Reads original splat data, applies volume-based modifier effects,
+// and writes animated results to temporary buffers.
+
+#define GROUP_SIZE 256
+
+#pragma kernel CSAnimateSplats
+
+// NOTE: We do NOT include GaussianSplatting.hlsl here because it declares
+// global buffers (_SplatPos, _SplatOther, etc.) that are not bound by
+// GaussianAnimator. We replicate the position loading logic here.
+
+// ── Vector format constants (must match GaussianSplatAsset.VectorFormat) ──
+
+#define VECTOR_FMT_32F 0
+#define VECTOR_FMT_16  1
+#define VECTOR_FMT_11  2
+#define VECTOR_FMT_6   3
+
+static const uint kChunkSize = 256;
+
+// ── Chunk info for dequantization ──
+
+struct AnimSplatChunkInfo
+{
+    uint colR, colG, colB, colA;
+    float2 posX, posY, posZ;
+    uint sclX, sclY, sclZ;
+    uint shR, shG, shB;
+};
+
+// ── Volume & Modifier data structures ──
+
+struct AnimVolumeData
+{
+    float4x4 worldToLocal;
+    float4   shapeParams;   // x: type (0=box, 1=sphere), y: falloff, zw: reserved
+    float4   boundsSize;    // box half-extents or sphere radius
+};
+
+struct AnimModifierData
+{
+    int      volumeIndex;
+    int      modifierType;  // 0=dissolve, 1=wave, 2=warp, 3=property
+    float    pad0;
+    float    pad1;
+    float4   params0;
+    float4   params1;
+    float4   params2;
+    float4   params3;
+};
+
+// ── Buffers ──
+
+StructuredBuffer<AnimVolumeData>    _AnimVolumes;
+StructuredBuffer<AnimModifierData>  _AnimModifiers;
+
+uint _AnimVolumeCount;
+uint _AnimModifierCount;
+uint _AnimSplatCount;
+uint _AnimSplatFormat;
+uint _AnimChunkCount;
+
+// Original data (read-only)
+ByteAddressBuffer _AnimSplatPos;
+StructuredBuffer<AnimSplatChunkInfo> _AnimSplatChunks;
+
+// Output: animated position offsets + property multipliers per splat
+// Layout: float4(posOffset.xyz, opacityMul), float4(scaleMul, colorBlend, 0, 0), float4(colorTint)
+RWStructuredBuffer<float4> _AnimOutput; // 3 float4s per splat
+
+float4x4 _AnimMatrixObjectToWorld;
+
+// ── Noise functions ──
+
+float Hash31(float3 p)
+{
+    p = frac(p * float3(443.8975, 397.2973, 491.1871));
+    p += dot(p, p.zxy + 19.19);
+    return frac(p.x * p.y * p.z);
+}
+
+float3 Hash33(float3 p)
+{
+    return float3(
+        Hash31(p),
+        Hash31(p + 127.1),
+        Hash31(p + 269.5)
+    );
+}
+
+// Simple value noise
+float ValueNoise3D(float3 p)
+{
+    float3 i = floor(p);
+    float3 f = frac(p);
+    f = f * f * (3.0 - 2.0 * f); // smoothstep
+
+    float a = Hash31(i);
+    float b = Hash31(i + float3(1, 0, 0));
+    float c = Hash31(i + float3(0, 1, 0));
+    float d = Hash31(i + float3(1, 1, 0));
+    float e = Hash31(i + float3(0, 0, 1));
+    float ff = Hash31(i + float3(1, 0, 1));
+    float g = Hash31(i + float3(0, 1, 1));
+    float h = Hash31(i + float3(1, 1, 1));
+
+    return lerp(
+        lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y),
+        lerp(lerp(e, ff, f.x), lerp(g, h, f.x), f.y),
+        f.z);
+}
+
+// ── Volume weight calculation ──
+
+float CalcVolumeWeight(float3 worldPos, AnimVolumeData vol)
+{
+    float3 localPos = mul(vol.worldToLocal, float4(worldPos, 1)).xyz;
+    float shapeType = vol.shapeParams.x;
+    float falloff = max(vol.shapeParams.y, 0.001);
+
+    float dist = 0;
+
+    if (shapeType < 0.5) // Box
+    {
+        // distance from unit cube center, mapped so inside = negative, outside = positive
+        float3 halfExt = float3(0.5, 0.5, 0.5);
+        float3 d = abs(localPos) - halfExt;
+        dist = length(max(d, 0)); // 0 inside, positive outside
+        // for falloff inside the box, use max component
+        float inside = max(max(d.x, d.y), d.z);
+        if (inside < 0)
+            dist = inside; // negative = inside
+    }
+    else // Sphere
+    {
+        dist = length(localPos) - 0.5;
+    }
+
+    // dist < 0 means inside volume, dist > 0 means outside
+    if (dist > falloff)
+        return 0;
+    if (dist < 0)
+        return 1;
+
+    // smooth falloff from 1 (at boundary) to 0 (at falloff distance)
+    float t = dist / falloff;
+    return 1.0 - t * t; // quadratic falloff
+}
+
+// ── Position decoding (matches GaussianSplatting.hlsl logic) ──
+
+half3 AnimDecodePacked_6_5_5(uint enc)
+{
+    return half3(
+        (enc & 63) / 63.0,
+        ((enc >> 6) & 31) / 31.0,
+        ((enc >> 11) & 31) / 31.0);
+}
+
+half3 AnimDecodePacked_11_10_11(uint enc)
+{
+    return half3(
+        (enc & 2047) / 2047.0,
+        ((enc >> 11) & 1023) / 1023.0,
+        ((enc >> 21) & 2047) / 2047.0);
+}
+
+float3 AnimDecodePacked_16_16_16(uint2 enc)
+{
+    return float3(
+        (enc.x & 65535) / 65535.0,
+        ((enc.x >> 16) & 65535) / 65535.0,
+        (enc.y & 65535) / 65535.0);
+}
+
+float3 AnimLoadAndDecodeVector(ByteAddressBuffer dataBuffer, uint addrU, uint fmt)
+{
+    uint addrA = addrU & ~0x3;
+    uint val0 = dataBuffer.Load(addrA);
+
+    float3 res = 0;
+    if (fmt == VECTOR_FMT_32F)
+    {
+        uint val1 = dataBuffer.Load(addrA + 4);
+        uint val2 = dataBuffer.Load(addrA + 8);
+        if (addrU != addrA)
+        {
+            uint val3 = dataBuffer.Load(addrA + 12);
+            val0 = (val0 >> 16) | ((val1 & 0xFFFF) << 16);
+            val1 = (val1 >> 16) | ((val2 & 0xFFFF) << 16);
+            val2 = (val2 >> 16) | ((val3 & 0xFFFF) << 16);
+        }
+        res = float3(asfloat(val0), asfloat(val1), asfloat(val2));
+    }
+    else if (fmt == VECTOR_FMT_16)
+    {
+        uint val1 = dataBuffer.Load(addrA + 4);
+        if (addrU != addrA)
+        {
+            val0 = (val0 >> 16) | ((val1 & 0xFFFF) << 16);
+            val1 >>= 16;
+        }
+        res = AnimDecodePacked_16_16_16(uint2(val0, val1));
+    }
+    else if (fmt == VECTOR_FMT_11)
+    {
+        uint val1 = dataBuffer.Load(addrA + 4);
+        if (addrU != addrA)
+        {
+            val0 = (val0 >> 16) | ((val1 & 0xFFFF) << 16);
+        }
+        res = AnimDecodePacked_11_10_11(val0);
+    }
+    else if (fmt == VECTOR_FMT_6)
+    {
+        if (addrU != addrA)
+            val0 >>= 16;
+        res = AnimDecodePacked_6_5_5(val0);
+    }
+    return res;
+}
+
+// ── Load splat position (handles all formats + chunk dequantization) ──
+
+float3 LoadAnimSplatPos(uint idx)
+{
+    uint fmt = _AnimSplatFormat & 0xFF;
+    uint stride = 0;
+    if (fmt == VECTOR_FMT_32F) stride = 12;
+    else if (fmt == VECTOR_FMT_16) stride = 6;
+    else if (fmt == VECTOR_FMT_11) stride = 4;
+    else stride = 2;
+
+    float3 pos = AnimLoadAndDecodeVector(_AnimSplatPos, idx * stride, fmt);
+
+    // Dequantize using chunk bounding box
+    uint chunkIdx = idx / kChunkSize;
+    if (chunkIdx < _AnimChunkCount)
+    {
+        AnimSplatChunkInfo chunk = _AnimSplatChunks[chunkIdx];
+        float3 posMin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
+        float3 posMax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
+        pos = lerp(posMin, posMax, pos);
+    }
+
+    return pos;
+}
+
+// ── Modifier implementations ──
+
+// Dissolve: scatter splats along direction with noise
+void ApplyDissolve(float3 worldPos, float weight, AnimModifierData mod,
+    inout float3 posOffset, inout float opacityMul)
+{
+    float3 dir = mod.params0.xyz;
+    float strength = mod.params0.w;
+    float noiseScale = mod.params1.x;
+    float noiseSpeed = mod.params1.y;
+    float time = mod.params1.z;
+
+    // per-splat noise based on world position
+    float3 noisePos = worldPos * noiseScale + time * noiseSpeed;
+    float3 randOffset = Hash33(worldPos * noiseScale) * 2.0 - 1.0;
+    float noise = ValueNoise3D(noisePos);
+
+    float3 scatter = dir * strength * 3.0 + randOffset * strength * noise * 2.0;
+    posOffset += scatter * weight;
+
+    // fade opacity as strength increases
+    opacityMul *= lerp(1.0, max(0.0, 1.0 - strength * 1.5), weight);
+}
+
+// Wave: periodic displacement
+void ApplyWave(float3 worldPos, float weight, AnimModifierData mod,
+    inout float3 posOffset)
+{
+    float3 axis = mod.params0.xyz;
+    float amplitude = mod.params0.w;
+    float frequency = mod.params1.x;
+    float speed = mod.params1.y;
+    float time = mod.params1.z;
+    int waveType = (int)mod.params1.w;
+
+    float phase = 0;
+    float3 displaceDir = float3(0, 1, 0);
+
+    if (waveType == 0) // Sine
+    {
+        phase = dot(worldPos, axis) * frequency + time * speed;
+        // displace perpendicular to axis
+        float3 up = abs(axis.y) > 0.9 ? float3(1, 0, 0) : float3(0, 1, 0);
+        displaceDir = normalize(cross(axis, up));
+    }
+    else if (waveType == 1) // Radial
+    {
+        float dist = length(worldPos - axis * dot(worldPos, axis));
+        phase = dist * frequency + time * speed;
+        displaceDir = normalize(worldPos - axis * dot(worldPos, axis) + 0.001);
+    }
+    else // Noise
+    {
+        float3 noiseCoord = worldPos * frequency + time * speed;
+        phase = ValueNoise3D(noiseCoord) * 6.28318;
+        displaceDir = normalize(Hash33(worldPos * frequency) * 2.0 - 1.0 + 0.001);
+    }
+
+    posOffset += displaceDir * sin(phase) * amplitude * weight;
+}
+
+// Warp: non-linear spatial distortion
+void ApplyWarp(float3 localPos, float weight, AnimModifierData mod,
+    inout float3 posOffset, float4x4 volWorldToLocal)
+{
+    float3 axis = mod.params0.xyz;
+    float strength = mod.params0.w;
+    float3 center = mod.params1.xyz;
+    int warpType = (int)mod.params1.w;
+    float time = mod.params2.x;
+
+    float3 p = localPos - center;
+
+    if (warpType == 0) // Twist
+    {
+        float angle = dot(p, axis) * strength;
+        float cosA = cos(angle);
+        float sinA = sin(angle);
+        // rotate around axis
+        float3 parallel = axis * dot(p, axis);
+        float3 perp = p - parallel;
+        float3 up = abs(axis.y) > 0.9 ? float3(1, 0, 0) : float3(0, 1, 0);
+        float3 right = normalize(cross(axis, up));
+        float3 fwd = cross(right, axis);
+        float2 c = float2(dot(perp, right), dot(perp, fwd));
+        float2 rotated = float2(c.x * cosA - c.y * sinA, c.x * sinA + c.y * cosA);
+        float3 newPerp = right * rotated.x + fwd * rotated.y;
+        float3 delta = (parallel + newPerp + center) - localPos;
+        posOffset += delta * weight;
+    }
+    else if (warpType == 1) // Bend
+    {
+        float h = dot(p, axis);
+        float angle = h * strength;
+        float3 bendDir = normalize(p - axis * h + 0.001);
+        float3 delta = bendDir * (1.0 - cos(angle)) * abs(h) + axis * (sin(angle) * abs(h) - h);
+        posOffset += delta * weight;
+    }
+    else if (warpType == 2) // Spherize
+    {
+        float len = length(p);
+        if (len > 0.001)
+        {
+            float targetLen = lerp(len, 1.0, strength * weight);
+            float3 delta = normalize(p) * targetLen - p;
+            posOffset += delta;
+        }
+    }
+    else // Pinch
+    {
+        float h = dot(p, axis);
+        float3 perp = p - axis * h;
+        float pinchFactor = exp(-abs(h) * abs(strength));
+        float3 delta = -perp * (1.0 - pinchFactor) * sign(strength);
+        posOffset += delta * weight;
+    }
+}
+
+// Property: modify opacity, scale, color
+void ApplyProperty(float weight, AnimModifierData mod,
+    inout float opacityMul, inout float scaleMul, inout float3 colorTint, inout float colorBlend)
+{
+    float opMul = mod.params0.x;
+    float scMul = mod.params0.y;
+    float cBlend = mod.params0.z;
+    float3 tint = mod.params1.xyz;
+
+    opacityMul *= lerp(1.0, opMul, weight);
+    scaleMul *= lerp(1.0, scMul, weight);
+    colorTint = lerp(colorTint, tint, cBlend * weight);
+    colorBlend = max(colorBlend, cBlend * weight);
+}
+
+// ── Main kernel ──
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void CSAnimateSplats(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _AnimSplatCount)
+        return;
+
+    // Load original position
+    float3 localPos = LoadAnimSplatPos(idx);
+    float3 worldPos = mul(_AnimMatrixObjectToWorld, float4(localPos, 1)).xyz;
+
+    // Accumulated animation results
+    float3 posOffset = float3(0, 0, 0);
+    float opacityMul = 1.0;
+    float scaleMul = 1.0;
+    float3 colorTint = float3(1, 1, 1);
+    float colorBlend = 0;
+
+    // Process each modifier
+    for (uint m = 0; m < _AnimModifierCount; m++)
+    {
+        AnimModifierData mod = _AnimModifiers[m];
+        int volIdx = mod.volumeIndex;
+        if (volIdx < 0 || (uint)volIdx >= _AnimVolumeCount)
+            continue;
+
+        AnimVolumeData vol = _AnimVolumes[volIdx];
+        float weight = CalcVolumeWeight(worldPos, vol);
+
+        if (weight <= 0)
+            continue;
+
+        int mType = mod.modifierType;
+        if (mType == 0) // Dissolve
+        {
+            ApplyDissolve(worldPos, weight, mod, posOffset, opacityMul);
+        }
+        else if (mType == 1) // Wave
+        {
+            ApplyWave(worldPos, weight, mod, posOffset);
+        }
+        else if (mType == 2) // Warp
+        {
+            // warp works in volume local space
+            float3 volLocal = mul(vol.worldToLocal, float4(worldPos, 1)).xyz;
+            ApplyWarp(volLocal, weight, mod, posOffset, vol.worldToLocal);
+        }
+        else if (mType == 3) // Property
+        {
+            ApplyProperty(weight, mod, opacityMul, scaleMul, colorTint, colorBlend);
+        }
+    }
+
+    // Write output: 3 float4s per splat
+    uint baseIdx = idx * 3;
+    _AnimOutput[baseIdx + 0] = float4(posOffset, opacityMul);
+    _AnimOutput[baseIdx + 1] = float4(scaleMul, colorBlend, 0, 0);
+    _AnimOutput[baseIdx + 2] = float4(colorTint, 1);
+}

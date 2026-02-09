@@ -96,6 +96,13 @@ uint _SHOnly;
 
 uint _SplatCutoutsCount;
 
+// Animation data (set by GaussianAnimator, 3 float4s per splat)
+// [0]: posOffset.xyz, opacityMul
+// [1]: scaleMul, colorBlend, 0, 0
+// [2]: colorTint.rgb, 1
+StructuredBuffer<float4> _AnimOutputData;
+uint _AnimDataValid; // 0 = no animation, 1 = animation active
+
 #define SPLAT_CUTOUT_TYPE_ELLIPSOID 0
 #define SPLAT_CUTOUT_TYPE_BOX 1
 
@@ -201,7 +208,26 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID)
 
     SplatData splat = LoadSplatData(idx);
     SplatViewData view = (SplatViewData)0;
-    
+
+    // Apply animation position offset if available
+    float animOpacityMul = 1.0;
+    float animScaleMul = 1.0;
+    float3 animColorTint = float3(1, 1, 1);
+    float animColorBlend = 0;
+    if (_AnimDataValid != 0)
+    {
+        uint animBase = idx * 3;
+        float4 animPosOp = _AnimOutputData[animBase + 0]; // posOffset.xyz, opacityMul
+        float4 animScaleColor = _AnimOutputData[animBase + 1]; // scaleMul, colorBlend, 0, 0
+        float4 animTint = _AnimOutputData[animBase + 2]; // colorTint.rgb, 1
+
+        splat.pos += animPosOp.xyz;
+        animOpacityMul = animPosOp.w;
+        animScaleMul = animScaleColor.x;
+        animColorBlend = animScaleColor.y;
+        animColorTint = animTint.xyz;
+    }
+
     float3 centerWorldPos = mul(_MatrixObjectToWorld, float4(splat.pos,1)).xyz;
     float4 centerClipPos = mul(UNITY_MATRIX_VP, float4(centerWorldPos, 1));
     half opacityScale = _SplatOpacityScale;
@@ -230,7 +256,7 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID)
     if (!behindCam)
     {
         float4 boxRot = splat.rot;
-        float3 boxSize = splat.scale;
+        float3 boxSize = splat.scale * animScaleMul;
 
         float3x3 splatRotScaleMat = CalcMatrixFromRotationScale(boxRot, boxSize);
 
@@ -240,7 +266,7 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID)
         cov3d0 *= splatScale2;
         cov3d1 *= splatScale2;
         float3 cov2d = CalcCovariance2D(splat.pos, cov3d0, cov3d1, _MatrixMV, UNITY_MATRIX_P, _VecScreenParams);
-        
+
         DecomposeCovariance(cov2d, view.axis1, view.axis2);
 
         float3 worldViewDir = _VecWorldSpaceCameraPos.xyz - centerWorldPos;
@@ -249,7 +275,12 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID)
 
         half4 col;
         col.rgb = ShadeSH(splat.sh, objViewDir, _SHOrder, _SHOnly != 0);
-        col.a = min(splat.opacity * opacityScale, 65000);
+
+        // Apply animation color tint
+        if (animColorBlend > 0)
+            col.rgb = lerp(col.rgb, (half3)animColorTint, (half)animColorBlend);
+
+        col.a = min(splat.opacity * opacityScale * animOpacityMul, 65000);
 
         if (_SplatBitsValid)
         {
@@ -263,7 +294,7 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID)
         view.color.x = (f32tof16(col.r) << 16) | f32tof16(col.g);
         view.color.y = (f32tof16(col.b) << 16) | f32tof16(col.a);
     }
-    
+
     _SplatViewData[idx] = view;
 }
 
