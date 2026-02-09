@@ -522,7 +522,6 @@ namespace GaussianSplatting.Runtime
         GraphicsBuffer m_GpuPosData;
         GraphicsBuffer m_GpuOtherData;
         GraphicsBuffer m_GpuSHData;
-        Texture2D tex;
         Texture m_GpuColorData;
         internal GraphicsBuffer m_GpuChunks;
         internal bool m_GpuChunksValid;
@@ -595,6 +594,7 @@ namespace GaussianSplatting.Runtime
             public static readonly int SelectionDeltaRot = Shader.PropertyToID("_SelectionDeltaRot");
             public static readonly int SplatCutoutsCount = Shader.PropertyToID("_SplatCutoutsCount");
             public static readonly int SplatCutouts = Shader.PropertyToID("_SplatCutouts");
+            public static readonly int SelectionRect = Shader.PropertyToID("_SelectionRect");
             public static readonly int SelectionMode = Shader.PropertyToID("_SelectionMode");
             public static readonly int SplatPosMouseDown = Shader.PropertyToID("_SplatPosMouseDown");
             public static readonly int SplatOtherMouseDown = Shader.PropertyToID("_SplatOtherMouseDown");
@@ -694,7 +694,6 @@ namespace GaussianSplatting.Runtime
                 0, 4, 1, 4, 5, 1,
                 2, 3, 6, 3, 7, 6
             });
-            Debug.Log("InitResourcesForAssetsssssssssssss");
         }
         public void InitResourcesForAsset()
         {
@@ -734,7 +733,6 @@ namespace GaussianSplatting.Runtime
                 return;
             if (m_GpuPosData == null)
             {
-                Debug.Log("InitResourcesForAsset");
                 InitResourcesForAsset();
             }
 
@@ -745,7 +743,7 @@ namespace GaussianSplatting.Runtime
 
             var (texWidth, texHeight) = GaussianSplatAsset.CalcTextureSize(asset.splatCount);
             var texFormat = GaussianSplatAsset.ColorFormatToGraphics(asset.colorFormat);
-            tex = new Texture2D(texWidth, texHeight, texFormat, TextureCreationFlags.DontInitializePixels | TextureCreationFlags.IgnoreMipmapLimit | TextureCreationFlags.DontUploadUponCreate) { name = "GaussianColorData" };
+            var tex = new Texture2D(texWidth, texHeight, texFormat, TextureCreationFlags.DontInitializePixels | TextureCreationFlags.IgnoreMipmapLimit | TextureCreationFlags.DontUploadUponCreate) { name = "GaussianColorData" };
             tex.SetPixelData(asset.colorData.GetData<byte>(), 0);
             tex.Apply(false, true);
             m_GpuColorData = tex;
@@ -1150,7 +1148,6 @@ namespace GaussianSplatting.Runtime
                 m_PrevHash = curHash;
                 if (resourcesAreSetUp)
                 {
-                    //DisposeResourcesForAsset();
                     CreateResourcesForAsset();
                 }
                 else
@@ -1343,7 +1340,7 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeVectorParam(m_CSSplatUtilities, Props.VecScreenParams, screenPar);
             cmb.SetComputeVectorParam(m_CSSplatUtilities, Props.VecWorldSpaceCameraPos, camPos);
 
-            cmb.SetComputeVectorParam(m_CSSplatUtilities, "_SelectionRect", new Vector4(rectMin.x, rectMax.y, rectMax.x, rectMin.y));
+            cmb.SetComputeVectorParam(m_CSSplatUtilities, Props.SelectionRect, new Vector4(rectMin.x, rectMax.y, rectMax.x, rectMin.y));
             cmb.SetComputeIntParam(m_CSSplatUtilities, Props.SelectionMode, subtract ? 0 : 1);
 
             if (!DispatchUtilsAndExecute(cmb, KernelIndices.SelectionUpdate, m_SplatCount))
