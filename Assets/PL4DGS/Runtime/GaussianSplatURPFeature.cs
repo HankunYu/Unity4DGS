@@ -5,6 +5,7 @@
 #error Unity Gaussian Splatting URP support only works in Unity 6 or later
 #endif
 
+using System;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
@@ -20,13 +21,73 @@ namespace GaussianSplatting.Runtime
     // ReSharper disable once InconsistentNaming
     class GaussianSplatURPFeature : ScriptableRendererFeature
     {
+        enum StylizeTarget
+        {
+            GaussianOnly = 0,
+            Fullscreen = 1
+        }
+
+        [Serializable]
+        struct StylizeSettings
+        {
+            public float grainIntensity;
+            public float grainScale;
+            public float grainTemporalJitter;
+            public float vintageStrength;
+            public float posterizeLevels;
+            public float posterizeMix;
+            public float shadowTintToGreen;
+            public float highlightWarmth;
+            public float vignette;
+            public float brushStrength;
+            public float brushScale;
+            public float brushAngleJitter;
+            public float colorMergeStrength;
+            public float colorMergeLevels;
+            public float colorMergeThreshold;
+            public float colorMergeRadius;
+            public float colorMergeEdgeProtect;
+            public float blend;
+        }
+
+        const string StylizeShaderName = "Hidden/Gaussian Splatting/Stylize";
+        static readonly int s_stylizeSourceTex = Shader.PropertyToID("_StylizeSourceTex");
+        static readonly int s_grainIntensity = Shader.PropertyToID("_GrainIntensity");
+        static readonly int s_grainScale = Shader.PropertyToID("_GrainScale");
+        static readonly int s_grainTemporalJitter = Shader.PropertyToID("_GrainTemporalJitter");
+        static readonly int s_vintageStrength = Shader.PropertyToID("_VintageStrength");
+        static readonly int s_posterizeLevels = Shader.PropertyToID("_PosterizeLevels");
+        static readonly int s_posterizeMix = Shader.PropertyToID("_PosterizeMix");
+        static readonly int s_shadowTintToGreen = Shader.PropertyToID("_ShadowTintToGreen");
+        static readonly int s_highlightWarmth = Shader.PropertyToID("_HighlightWarmth");
+        static readonly int s_vignetteStrength = Shader.PropertyToID("_VignetteStrength");
+        static readonly int s_brushStrength = Shader.PropertyToID("_BrushStrength");
+        static readonly int s_brushScale = Shader.PropertyToID("_BrushScale");
+        static readonly int s_brushAngleJitter = Shader.PropertyToID("_BrushAngleJitter");
+        static readonly int s_colorMergeStrength = Shader.PropertyToID("_ColorMergeStrength");
+        static readonly int s_colorMergeLevels = Shader.PropertyToID("_ColorMergeLevels");
+        static readonly int s_colorMergeThreshold = Shader.PropertyToID("_ColorMergeThreshold");
+        static readonly int s_colorMergeRadius = Shader.PropertyToID("_ColorMergeRadius");
+        static readonly int s_colorMergeEdgeProtect = Shader.PropertyToID("_ColorMergeEdgeProtect");
+        static readonly int s_effectBlend = Shader.PropertyToID("_EffectBlend");
+
+        [SerializeField] StylizeTarget m_StylizeTarget = StylizeTarget.GaussianOnly;
+        [SerializeField] RenderPassEvent m_StylizeEvent = RenderPassEvent.BeforeRenderingPostProcessing;
+        [SerializeField] Shader m_StylizeShader;
+
+        Material m_StylizeMaterial;
+        bool m_LoggedMissingStylizeShader;
+
         class GSRenderPass : ScriptableRenderPass
         {
             const string GaussianSplatRTName = "_GaussianSplatRT";
+            const string GaussianStylizeRTName = "_GaussianStylizedRT";
 
             const string ProfilerTag = "GaussianSplatRenderGraph";
             static readonly ProfilingSampler s_profilingSampler = new(ProfilerTag);
             static readonly int s_gaussianSplatRT = Shader.PropertyToID(GaussianSplatRTName);
+
+            readonly GaussianSplatURPFeature m_Owner;
 
             class PassData
             {
@@ -34,6 +95,15 @@ namespace GaussianSplatting.Runtime
                 internal TextureHandle SourceTexture;
                 internal TextureHandle SourceDepth;
                 internal TextureHandle GaussianSplatRT;
+                internal TextureHandle StylizedGaussianRT;
+                internal bool ApplyStylize;
+                internal StylizeSettings StylizeSettings;
+                internal Material StylizeMaterial;
+            }
+
+            public GSRenderPass(GaussianSplatURPFeature owner)
+            {
+                m_Owner = owner;
             }
 
             public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
@@ -47,16 +117,27 @@ namespace GaussianSplatting.Runtime
                 rtDesc.depthBufferBits = 0;
                 rtDesc.msaaSamples = 1;
                 rtDesc.graphicsFormat = GraphicsFormat.R16G16B16A16_SFloat;
-                var textureHandle = UniversalRenderer.CreateRenderGraphTexture(renderGraph, rtDesc, GaussianSplatRTName, true);
+                TextureHandle textureHandle = UniversalRenderer.CreateRenderGraphTexture(renderGraph, rtDesc, GaussianSplatRTName, true);
+                bool applyStylize =
+                    m_Owner.CanRunStylizeForCamera(cameraData.camera, StylizeTarget.GaussianOnly, out var stylizeSettings);
+                TextureHandle stylizedHandle = textureHandle;
+                if (applyStylize)
+                    stylizedHandle = UniversalRenderer.CreateRenderGraphTexture(renderGraph, rtDesc, GaussianStylizeRTName, true);
 
                 passData.CameraData = cameraData;
                 passData.SourceTexture = resourceData.activeColorTexture;
                 passData.SourceDepth = resourceData.activeDepthTexture;
                 passData.GaussianSplatRT = textureHandle;
+                passData.StylizedGaussianRT = stylizedHandle;
+                passData.ApplyStylize = applyStylize;
+                passData.StylizeSettings = stylizeSettings;
+                passData.StylizeMaterial = m_Owner.m_StylizeMaterial;
 
                 builder.UseTexture(resourceData.activeColorTexture, AccessFlags.ReadWrite);
                 builder.UseTexture(resourceData.activeDepthTexture);
-                builder.UseTexture(textureHandle, AccessFlags.Write);
+                builder.UseTexture(textureHandle, AccessFlags.ReadWrite);
+                if (applyStylize)
+                    builder.UseTexture(stylizedHandle, AccessFlags.ReadWrite);
                 builder.AllowPassCulling(false);
                 builder.SetRenderFunc(static (PassData data, UnsafeGraphContext context) =>
                 {
@@ -67,28 +148,108 @@ namespace GaussianSplatting.Runtime
                     Material matComposite = GaussianSplatRenderSystem.instance.SortAndRenderSplats(data.CameraData.camera, commandBuffer);
                     if (matComposite != null)
                     {
+                        TextureHandle composeSource = data.GaussianSplatRT;
+                        if (data.ApplyStylize && data.StylizeMaterial != null)
+                        {
+                            SetStylizeMaterialProperties(data.StylizeMaterial, in data.StylizeSettings);
+                            commandBuffer.SetGlobalTexture(s_stylizeSourceTex, data.GaussianSplatRT);
+                            Blitter.BlitCameraTexture(commandBuffer, data.GaussianSplatRT, data.StylizedGaussianRT, data.StylizeMaterial, 0);
+                            composeSource = data.StylizedGaussianRT;
+                        }
+
+                        commandBuffer.SetGlobalTexture(s_gaussianSplatRT, composeSource);
                         commandBuffer.BeginSample(GaussianSplatRenderSystem.s_ProfCompose);
-                        Blitter.BlitCameraTexture(commandBuffer, data.GaussianSplatRT, data.SourceTexture, matComposite, 0);
+                        Blitter.BlitCameraTexture(commandBuffer, composeSource, data.SourceTexture, matComposite, 0);
                         commandBuffer.EndSample(GaussianSplatRenderSystem.s_ProfCompose);
                     }
                 });
             }
         }
 
+        class FullscreenStylizePass : ScriptableRenderPass
+        {
+            const string FullscreenStylizeRTName = "_GaussianFullscreenStylizeRT";
+            const string ProfilerTag = "GaussianStylizeFullscreen";
+            static readonly ProfilingSampler s_profilingSampler = new(ProfilerTag);
+
+            readonly GaussianSplatURPFeature m_Owner;
+
+            class PassData
+            {
+                internal TextureHandle SourceTexture;
+                internal TextureHandle TempTexture;
+                internal StylizeSettings StylizeSettings;
+                internal Material StylizeMaterial;
+            }
+
+            public FullscreenStylizePass(GaussianSplatURPFeature owner)
+            {
+                m_Owner = owner;
+            }
+
+            public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
+            {
+                UniversalCameraData cameraData = frameData.Get<UniversalCameraData>();
+                UniversalResourceData resourceData = frameData.Get<UniversalResourceData>();
+                if (!m_Owner.CanRunStylizeForCamera(cameraData.camera, StylizeTarget.Fullscreen, out var stylizeSettings))
+                    return;
+
+                using var builder = renderGraph.AddUnsafePass(ProfilerTag, out PassData passData);
+
+                RenderTextureDescriptor rtDesc = cameraData.cameraTargetDescriptor;
+                rtDesc.depthBufferBits = 0;
+                rtDesc.msaaSamples = 1;
+                TextureHandle tempTexture =
+                    UniversalRenderer.CreateRenderGraphTexture(renderGraph, rtDesc, FullscreenStylizeRTName, true);
+
+                passData.SourceTexture = resourceData.activeColorTexture;
+                passData.TempTexture = tempTexture;
+                passData.StylizeSettings = stylizeSettings;
+                passData.StylizeMaterial = m_Owner.m_StylizeMaterial;
+
+                builder.UseTexture(resourceData.activeColorTexture, AccessFlags.ReadWrite);
+                builder.UseTexture(tempTexture, AccessFlags.ReadWrite);
+                builder.AllowPassCulling(false);
+                builder.SetRenderFunc(static (PassData data, UnsafeGraphContext context) =>
+                {
+                    if (data.StylizeMaterial == null)
+                        return;
+
+                    CommandBuffer commandBuffer = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
+                    using var _ = new ProfilingScope(commandBuffer, s_profilingSampler);
+                    SetStylizeMaterialProperties(data.StylizeMaterial, in data.StylizeSettings);
+                    commandBuffer.SetGlobalTexture(s_stylizeSourceTex, data.SourceTexture);
+                    Blitter.BlitCameraTexture(commandBuffer, data.SourceTexture, data.TempTexture, data.StylizeMaterial, 0);
+                    commandBuffer.SetGlobalTexture(s_stylizeSourceTex, data.TempTexture);
+                    Blitter.BlitCameraTexture(commandBuffer, data.TempTexture, data.SourceTexture, data.StylizeMaterial, 1);
+                });
+            }
+        }
+
         GSRenderPass m_Pass;
+        FullscreenStylizePass m_FullscreenStylizePass;
         bool m_HasCamera;
 
         public override void Create()
         {
-            m_Pass = new GSRenderPass
+            EnsureStylizeMaterial();
+
+            m_Pass = new GSRenderPass(this)
             {
                 renderPassEvent = RenderPassEvent.BeforeRenderingTransparents
+            };
+            m_FullscreenStylizePass = new FullscreenStylizePass(this)
+            {
+                renderPassEvent = m_StylizeEvent
             };
         }
 
         public override void OnCameraPreCull(ScriptableRenderer renderer, in CameraData cameraData)
         {
             m_HasCamera = false;
+            if (!IsSupportedCamera(cameraData.camera))
+                return;
+
             var system = GaussianSplatRenderSystem.instance;
             if (!system.GatherSplatsForCamera(cameraData.camera))
                 return;
@@ -98,14 +259,121 @@ namespace GaussianSplatting.Runtime
 
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
         {
-            if (!m_HasCamera)
-                return;
-            renderer.EnqueuePass(m_Pass);
+            EnsureStylizeMaterial();
+            if (m_HasCamera)
+                renderer.EnqueuePass(m_Pass);
+
+            if (m_StylizeTarget == StylizeTarget.Fullscreen && IsSupportedCamera(renderingData.cameraData.camera))
+            {
+                m_FullscreenStylizePass.renderPassEvent = m_StylizeEvent;
+                renderer.EnqueuePass(m_FullscreenStylizePass);
+            }
         }
 
         protected override void Dispose(bool disposing)
         {
             m_Pass = null;
+            m_FullscreenStylizePass = null;
+            CoreUtils.Destroy(m_StylizeMaterial);
+            m_StylizeMaterial = null;
+        }
+
+        void EnsureStylizeMaterial()
+        {
+            if (m_StylizeMaterial != null)
+                return;
+
+            if (m_StylizeShader == null)
+                m_StylizeShader = Shader.Find(StylizeShaderName);
+            if (m_StylizeShader == null)
+            {
+                if (!m_LoggedMissingStylizeShader)
+                {
+                    Debug.LogWarning(
+                        "Gaussian Stylize shader not found. Assign a shader in GaussianSplatURPFeature or include Hidden/Gaussian Splatting/Stylize.");
+                    m_LoggedMissingStylizeShader = true;
+                }
+                return;
+            }
+
+            m_StylizeMaterial = CoreUtils.CreateEngineMaterial(m_StylizeShader);
+            m_LoggedMissingStylizeShader = false;
+        }
+
+        bool CanRunStylizeForCamera(Camera camera, StylizeTarget target, out StylizeSettings settings)
+        {
+            settings = default;
+            if (m_StylizeTarget != target)
+                return false;
+            if (!IsSupportedCamera(camera))
+                return false;
+            if (m_StylizeMaterial == null)
+                return false;
+            return TryGetStylizeSettings(out settings);
+        }
+
+        bool TryGetStylizeSettings(out StylizeSettings settings)
+        {
+            settings = default;
+            VolumeStack volumeStack = VolumeManager.instance?.stack;
+            if (volumeStack == null)
+                return false;
+
+            GaussianStylizeVolume stylizeVolume = volumeStack.GetComponent<GaussianStylizeVolume>();
+            if (stylizeVolume == null || !stylizeVolume.IsActive())
+                return false;
+
+            settings = new StylizeSettings
+            {
+                grainIntensity = stylizeVolume.grainIntensity.value,
+                grainScale = stylizeVolume.grainScale.value,
+                grainTemporalJitter = stylizeVolume.grainTemporalJitter.value,
+                vintageStrength = stylizeVolume.vintageStrength.value,
+                posterizeLevels = stylizeVolume.posterizeLevels.value,
+                posterizeMix = stylizeVolume.posterizeMix.value,
+                shadowTintToGreen = stylizeVolume.shadowTintToGreen.value,
+                highlightWarmth = stylizeVolume.highlightWarmth.value,
+                vignette = stylizeVolume.vignette.value,
+                brushStrength = stylizeVolume.brushStrength.value,
+                brushScale = stylizeVolume.brushScale.value,
+                brushAngleJitter = stylizeVolume.brushAngleJitter.value,
+                colorMergeStrength = stylizeVolume.colorMergeStrength.value,
+                colorMergeLevels = stylizeVolume.colorMergeLevels.value,
+                colorMergeThreshold = stylizeVolume.colorMergeThreshold.value,
+                colorMergeRadius = stylizeVolume.colorMergeRadius.value,
+                colorMergeEdgeProtect = stylizeVolume.colorMergeEdgeProtect.value,
+                blend = stylizeVolume.blend.value
+            };
+            return true;
+        }
+
+        static bool IsSupportedCamera(Camera camera)
+        {
+            if (camera == null)
+                return false;
+            return camera.cameraType != CameraType.Preview && camera.cameraType != CameraType.Reflection;
+        }
+
+        static void SetStylizeMaterialProperties(Material material, in StylizeSettings settings)
+        {
+            material.SetFloat(s_grainIntensity, settings.grainIntensity);
+            material.SetFloat(s_grainScale, settings.grainScale);
+            material.SetFloat(s_grainTemporalJitter, settings.grainTemporalJitter);
+            material.SetFloat(s_vintageStrength, settings.vintageStrength);
+            material.SetFloat(s_posterizeLevels, settings.posterizeLevels);
+            material.SetFloat(s_posterizeMix, settings.posterizeMix);
+            material.SetFloat(s_shadowTintToGreen, settings.shadowTintToGreen);
+            material.SetFloat(s_highlightWarmth, settings.highlightWarmth);
+            material.SetFloat(s_vignetteStrength, settings.vignette);
+            material.SetFloat(s_brushStrength, settings.brushStrength);
+            material.SetFloat(s_brushScale, settings.brushScale);
+            material.SetFloat(s_brushAngleJitter, settings.brushAngleJitter);
+            material.SetFloat(s_colorMergeStrength, settings.colorMergeStrength);
+            material.SetFloat(s_colorMergeLevels, settings.colorMergeLevels);
+            material.SetFloat(s_colorMergeThreshold, settings.colorMergeThreshold);
+            material.SetFloat(s_colorMergeRadius, settings.colorMergeRadius);
+            material.SetFloat(s_colorMergeEdgeProtect, settings.colorMergeEdgeProtect);
+            material.SetFloat(s_effectBlend, settings.blend);
         }
     }
 }
