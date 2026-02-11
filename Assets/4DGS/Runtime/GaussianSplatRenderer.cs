@@ -637,7 +637,10 @@ namespace GaussianSplatting.Runtime
         {
             m_MorphedDataBuffer = morphedData;
             // Clamp to current view buffer capacity to avoid out-of-bounds
-            m_MorphedSplatCount = m_GpuView != null ? Mathf.Min(splatCount, m_GpuView.count) : splatCount;
+            int clamped = m_GpuView != null ? Mathf.Min(splatCount, m_GpuView.count) : splatCount;
+            if (valid != 0 && clamped < splatCount)
+                Debug.LogWarning($"GaussianMorph: target has more splats ({splatCount}) than source ({m_GpuView?.count ?? 0}); extra splats will be ignored.");
+            m_MorphedSplatCount = clamped;
             m_MorphDataValid = valid;
         }
 
