@@ -527,6 +527,7 @@ namespace GaussianSplatting.Runtime
         internal GraphicsBuffer m_AnimOutputBuffer;
         // Set by GaussianMorph: pre-blended splat data (4 float4s per splat)
         internal GraphicsBuffer m_MorphedDataBuffer;
+        internal GraphicsBuffer m_MorphSHBuffer;
         internal int m_MorphDataValid;
         internal int m_MorphedSplatCount;
         internal float m_MorphWeight;
@@ -618,6 +619,7 @@ namespace GaussianSplatting.Runtime
             public static readonly int MorphedData = Shader.PropertyToID("_MorphedData");
             public static readonly int MorphDataValid = Shader.PropertyToID("_MorphDataValid");
             public static readonly int MorphWeight = Shader.PropertyToID("_MorphWeight");
+            public static readonly int MorphSHData = Shader.PropertyToID("_MorphSHData");
             public static readonly int SrcSplatCount = Shader.PropertyToID("_SrcSplatCount");
         }
 
@@ -642,9 +644,10 @@ namespace GaussianSplatting.Runtime
         internal GraphicsBuffer GpuChunksBuffer => m_GpuChunks;
         internal bool GpuChunksValid => m_GpuChunksValid;
 
-        internal void SetMorphData(GraphicsBuffer morphedData, int splatCount, int valid, float weight = 0f)
+        internal void SetMorphData(GraphicsBuffer morphedData, int splatCount, int valid, float weight = 0f, GraphicsBuffer morphSH = null)
         {
             m_MorphedDataBuffer = morphedData;
+            m_MorphSHBuffer = morphSH;
             m_MorphedSplatCount = splatCount;
             m_MorphDataValid = valid;
             m_MorphWeight = weight;
@@ -1004,10 +1007,13 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.AnimOutputData, hasAnim ? m_AnimOutputBuffer : m_GpuView);
 
             // Morph data binding
+            // _MorphDataValid: 0 = no morph, 1 = morph (no SH), 2 = morph with blended SH
             bool hasMorph = m_MorphedDataBuffer != null && m_MorphDataValid != 0;
-            cmb.SetComputeIntParam(cs, Props.MorphDataValid, hasMorph ? 1 : 0);
+            bool hasMorphSH = hasMorph && m_MorphSHBuffer != null;
+            cmb.SetComputeIntParam(cs, Props.MorphDataValid, hasMorphSH ? 2 : (hasMorph ? 1 : 0));
             cmb.SetComputeFloatParam(cs, Props.MorphWeight, hasMorph ? m_MorphWeight : 0f);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.MorphedData, hasMorph ? m_MorphedDataBuffer : m_GpuView);
+            cmb.SetComputeBufferParam(cs, kernelIndex, Props.MorphSHData, hasMorphSH ? m_MorphSHBuffer : m_GpuPosData);
         }
 
         internal void SetAssetDataOnMaterial(MaterialPropertyBlock mat)

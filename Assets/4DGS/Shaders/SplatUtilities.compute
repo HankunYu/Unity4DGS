@@ -56,8 +56,11 @@ uint _SrcSplatCount; // original source asset splat count (for morph OOB guard)
 // [2]: scale.xyz, 0
 // [3]: color.rgb, 1
 StructuredBuffer<float4> _MorphedData;
-uint _MorphDataValid; // 0 = no morph, 1 = morph active
+uint _MorphDataValid; // 0 = no morph, 1 = morph (no SH), 2 = morph with blended SH
 float _MorphWeight;   // morph blend weight (0 = source, 1 = target)
+
+// Morph SH data (blended SH in fp16 packed format, 96 bytes per splat)
+ByteAddressBuffer _MorphSHData;
 
 // radix sort etc. friendly, see http://stereopsis.com/radix.html
 uint FloatToSortableUint(float f)
@@ -230,23 +233,47 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID)
         float4 md2 = _MorphedData[mb + 2];
         float4 md3 = _MorphedData[mb + 3];
 
-        // Load SH from source only for indices within source range;
-        // target-only splats (idx >= _SrcSplatCount) get zeroed SH.
-        // Fade source SH by (1 - weight) since source SH doesn't match
-        // target geometry — at weight=1 only blended DC color is used.
-        if (idx < _SrcSplatCount)
+        splat = (SplatData)0;
+
+        // Load blended SH from morph SH buffer when available (MorphDataValid == 2)
+        if (_MorphDataValid >= 2)
         {
-            splat = LoadSplatData(idx);
-            half shFade = (half)(1.0 - _MorphWeight);
-            splat.sh.sh1  *= shFade; splat.sh.sh2  *= shFade; splat.sh.sh3  *= shFade;
-            splat.sh.sh4  *= shFade; splat.sh.sh5  *= shFade; splat.sh.sh6  *= shFade;
-            splat.sh.sh7  *= shFade; splat.sh.sh8  *= shFade; splat.sh.sh9  *= shFade;
-            splat.sh.sh10 *= shFade; splat.sh.sh11 *= shFade; splat.sh.sh12 *= shFade;
-            splat.sh.sh13 *= shFade; splat.sh.sh14 *= shFade; splat.sh.sh15 *= shFade;
+            uint shAddr = idx * 96;
+            uint4 shRaw0 = _MorphSHData.Load4(shAddr);
+            uint4 shRaw1 = _MorphSHData.Load4(shAddr + 16);
+            uint4 shRaw2 = _MorphSHData.Load4(shAddr + 32);
+            uint4 shRaw3 = _MorphSHData.Load4(shAddr + 48);
+            uint4 shRaw4 = _MorphSHData.Load4(shAddr + 64);
+            uint3 shRaw5 = _MorphSHData.Load3(shAddr + 80);
+            splat.sh.sh1  = half3(f16tof32(shRaw0.x      ), f16tof32(shRaw0.x >> 16), f16tof32(shRaw0.y      ));
+            splat.sh.sh2  = half3(f16tof32(shRaw0.y >> 16), f16tof32(shRaw0.z      ), f16tof32(shRaw0.z >> 16));
+            splat.sh.sh3  = half3(f16tof32(shRaw0.w      ), f16tof32(shRaw0.w >> 16), f16tof32(shRaw1.x      ));
+            splat.sh.sh4  = half3(f16tof32(shRaw1.x >> 16), f16tof32(shRaw1.y      ), f16tof32(shRaw1.y >> 16));
+            splat.sh.sh5  = half3(f16tof32(shRaw1.z      ), f16tof32(shRaw1.z >> 16), f16tof32(shRaw1.w      ));
+            splat.sh.sh6  = half3(f16tof32(shRaw1.w >> 16), f16tof32(shRaw2.x      ), f16tof32(shRaw2.x >> 16));
+            splat.sh.sh7  = half3(f16tof32(shRaw2.y      ), f16tof32(shRaw2.y >> 16), f16tof32(shRaw2.z      ));
+            splat.sh.sh8  = half3(f16tof32(shRaw2.z >> 16), f16tof32(shRaw2.w      ), f16tof32(shRaw2.w >> 16));
+            splat.sh.sh9  = half3(f16tof32(shRaw3.x      ), f16tof32(shRaw3.x >> 16), f16tof32(shRaw3.y      ));
+            splat.sh.sh10 = half3(f16tof32(shRaw3.y >> 16), f16tof32(shRaw3.z      ), f16tof32(shRaw3.z >> 16));
+            splat.sh.sh11 = half3(f16tof32(shRaw3.w      ), f16tof32(shRaw3.w >> 16), f16tof32(shRaw4.x      ));
+            splat.sh.sh12 = half3(f16tof32(shRaw4.x >> 16), f16tof32(shRaw4.y      ), f16tof32(shRaw4.y >> 16));
+            splat.sh.sh13 = half3(f16tof32(shRaw4.z      ), f16tof32(shRaw4.z >> 16), f16tof32(shRaw4.w      ));
+            splat.sh.sh14 = half3(f16tof32(shRaw4.w >> 16), f16tof32(shRaw5.x      ), f16tof32(shRaw5.x >> 16));
+            splat.sh.sh15 = half3(f16tof32(shRaw5.y      ), f16tof32(shRaw5.y >> 16), f16tof32(shRaw5.z      ));
         }
-        else
+        else if (idx < _SrcSplatCount)
         {
-            splat = (SplatData)0;
+            // Fallback: load source SH and fade by (1 - weight)
+            SplatData srcSplat = LoadSplatData(idx);
+            half shFade = (half)(1.0 - _MorphWeight);
+            splat.sh.sh1  = srcSplat.sh.sh1  * shFade; splat.sh.sh2  = srcSplat.sh.sh2  * shFade;
+            splat.sh.sh3  = srcSplat.sh.sh3  * shFade; splat.sh.sh4  = srcSplat.sh.sh4  * shFade;
+            splat.sh.sh5  = srcSplat.sh.sh5  * shFade; splat.sh.sh6  = srcSplat.sh.sh6  * shFade;
+            splat.sh.sh7  = srcSplat.sh.sh7  * shFade; splat.sh.sh8  = srcSplat.sh.sh8  * shFade;
+            splat.sh.sh9  = srcSplat.sh.sh9  * shFade; splat.sh.sh10 = srcSplat.sh.sh10 * shFade;
+            splat.sh.sh11 = srcSplat.sh.sh11 * shFade; splat.sh.sh12 = srcSplat.sh.sh12 * shFade;
+            splat.sh.sh13 = srcSplat.sh.sh13 * shFade; splat.sh.sh14 = srcSplat.sh.sh14 * shFade;
+            splat.sh.sh15 = srcSplat.sh.sh15 * shFade;
         }
 
         // Override base properties with morphed data

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 using GaussianSplatting.Runtime;
 using UnityEditor;
 using UnityEngine;

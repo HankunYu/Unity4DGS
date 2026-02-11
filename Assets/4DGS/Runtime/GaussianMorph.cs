@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Profiling;
 using UnityEngine;
@@ -11,7 +9,7 @@ namespace GaussianSplatting.Runtime
     /// <summary>
     /// Drives GPU-based morph transitions between two Gaussian Splat assets.
     /// Decodes both source and target on the GPU, blends per-splat properties
-    /// (position, rotation, scale, opacity, color), and feeds the result to
+    /// (position, rotation, scale, opacity, color, SH), and feeds the result to
     /// the renderer via SetMorphData.
     /// </summary>
     [RequireComponent(typeof(GaussianSplatRenderer))]
@@ -19,127 +17,136 @@ namespace GaussianSplatting.Runtime
     [DefaultExecutionOrder(-50)]
     public class GaussianMorph : MonoBehaviour
     {
-        [Tooltip("Target asset to morph into")]
-        public GaussianSplatAsset targetAsset;
+        [SerializeField] [Tooltip("Target asset to morph into")]
+        private GaussianSplatAsset _targetAsset;
 
-        [Range(0f, 1f)]
-        [Tooltip("Blend weight: 0 = source, 1 = target")]
-        public float weight;
+        [SerializeField] [Range(0f, 1f)] [Tooltip("Blend weight: 0 = source, 1 = target")]
+        private float _weight;
 
-        [Tooltip("Reference to GaussianMorph.compute")]
-        public ComputeShader morphShader;
+        [SerializeField] [Tooltip("Reference to GaussianMorph.compute")]
+        private ComputeShader _morphShader;
 
-        [Tooltip("Use spatial nearest-neighbor matching instead of index matching")]
-        public bool useNearestMatch = true;
+        [SerializeField] [Tooltip("Use spatial nearest-neighbor matching instead of index matching")]
+        private bool _useNearestMatch = true;
+
+        // Public accessors
+        public GaussianSplatAsset TargetAsset { get => _targetAsset; set => _targetAsset = value; }
+        public float Weight { get => _weight; set => _weight = value; }
+        public ComputeShader MorphShader { get => _morphShader; set => _morphShader = value; }
+        public bool UseNearestMatch { get => _useNearestMatch; set => _useNearestMatch = value; }
 
         // Cached renderer reference
-        GaussianSplatRenderer m_Renderer;
+        private GaussianSplatRenderer _renderer;
 
         // Target asset GPU buffers
-        GraphicsBuffer m_TgtPosData;
-        GraphicsBuffer m_TgtOtherData;
-        GraphicsBuffer m_TgtSHData;
-        Texture2D m_TgtColorTex;
-        GraphicsBuffer m_TgtChunks;
-        bool m_TgtChunksValid;
+        private GraphicsBuffer _tgtPosData;
+        private GraphicsBuffer _tgtOtherData;
+        private GraphicsBuffer _tgtSHData;
+        private Texture2D _tgtColorTex;
+        private GraphicsBuffer _tgtChunks;
+        private bool _tgtChunksValid;
 
         // Morph output buffer (4 float4 per splat)
-        GraphicsBuffer m_MorphOutput;
+        private GraphicsBuffer _morphOutput;
+
+        // Morph SH output buffer (96 bytes per splat, fp16 packed)
+        private GraphicsBuffer _morphSHOutput;
 
         // Correspondence state
-        GraphicsBuffer m_Correspondence;
-        bool m_CorrespondenceValid;
-        GpuSorting m_MortonSorter;
+        private GraphicsBuffer _correspondence;
+        private bool _correspondenceValid;
+        private GpuSorting _mortonSorter;
 
         // Cached state for change detection
-        GaussianSplatAsset m_CachedTarget;
-        int m_KernelMorph = -1;
-        int m_KernelMorton = -1;
-        int m_KernelCorrespondence = -1;
-        int m_MorphedSplatCount;
+        private GaussianSplatAsset _cachedTarget;
+        private int _kernelMorph = -1;
+        private int _kernelMorton = -1;
+        private int _kernelCorrespondence = -1;
+        private int _morphedSplatCount;
 
-        const int kGroupSize = 64;
+        private const int GroupSize = 64;
 
-        static readonly ProfilerMarker s_ProfMorph = new ProfilerMarker("GaussianMorph.Dispatch");
-        static readonly ProfilerMarker s_ProfCorrespondence = new ProfilerMarker("GaussianMorph.BuildCorrespondence");
+        private static readonly ProfilerMarker ProfMorph = new ProfilerMarker("GaussianMorph.Dispatch");
+        private static readonly ProfilerMarker ProfCorrespondence = new ProfilerMarker("GaussianMorph.BuildCorrespondence");
 
         // Shader property IDs
-        static readonly int PropSrcPos = Shader.PropertyToID("_SrcPos");
-        static readonly int PropSrcOther = Shader.PropertyToID("_SrcOther");
-        static readonly int PropSrcSH = Shader.PropertyToID("_SrcSH");
-        static readonly int PropSrcColor = Shader.PropertyToID("_SrcColor");
-        static readonly int PropSrcChunks = Shader.PropertyToID("_SrcChunks");
-        static readonly int PropSrcFormat = Shader.PropertyToID("_SrcFormat");
-        static readonly int PropSrcChunkCount = Shader.PropertyToID("_SrcChunkCount");
-        static readonly int PropSrcSplatCount = Shader.PropertyToID("_SrcSplatCount");
+        private static readonly int PropSrcPos = Shader.PropertyToID("_SrcPos");
+        private static readonly int PropSrcOther = Shader.PropertyToID("_SrcOther");
+        private static readonly int PropSrcSH = Shader.PropertyToID("_SrcSH");
+        private static readonly int PropSrcColor = Shader.PropertyToID("_SrcColor");
+        private static readonly int PropSrcChunks = Shader.PropertyToID("_SrcChunks");
+        private static readonly int PropSrcFormat = Shader.PropertyToID("_SrcFormat");
+        private static readonly int PropSrcChunkCount = Shader.PropertyToID("_SrcChunkCount");
+        private static readonly int PropSrcSplatCount = Shader.PropertyToID("_SrcSplatCount");
 
-        static readonly int PropTgtPos = Shader.PropertyToID("_TgtPos");
-        static readonly int PropTgtOther = Shader.PropertyToID("_TgtOther");
-        static readonly int PropTgtSH = Shader.PropertyToID("_TgtSH");
-        static readonly int PropTgtColor = Shader.PropertyToID("_TgtColor");
-        static readonly int PropTgtChunks = Shader.PropertyToID("_TgtChunks");
-        static readonly int PropTgtFormat = Shader.PropertyToID("_TgtFormat");
-        static readonly int PropTgtChunkCount = Shader.PropertyToID("_TgtChunkCount");
-        static readonly int PropTgtSplatCount = Shader.PropertyToID("_TgtSplatCount");
+        private static readonly int PropTgtPos = Shader.PropertyToID("_TgtPos");
+        private static readonly int PropTgtOther = Shader.PropertyToID("_TgtOther");
+        private static readonly int PropTgtSH = Shader.PropertyToID("_TgtSH");
+        private static readonly int PropTgtColor = Shader.PropertyToID("_TgtColor");
+        private static readonly int PropTgtChunks = Shader.PropertyToID("_TgtChunks");
+        private static readonly int PropTgtFormat = Shader.PropertyToID("_TgtFormat");
+        private static readonly int PropTgtChunkCount = Shader.PropertyToID("_TgtChunkCount");
+        private static readonly int PropTgtSplatCount = Shader.PropertyToID("_TgtSplatCount");
 
-        static readonly int PropMorphWeight = Shader.PropertyToID("_MorphWeight");
-        static readonly int PropMorphOutput = Shader.PropertyToID("_MorphOutput");
+        private static readonly int PropMorphWeight = Shader.PropertyToID("_MorphWeight");
+        private static readonly int PropMorphOutput = Shader.PropertyToID("_MorphOutput");
+        private static readonly int PropMorphSHOutput = Shader.PropertyToID("_MorphSHOutput");
 
-        static readonly int PropCorrespondence = Shader.PropertyToID("_Correspondence");
-        static readonly int PropCorrespondenceOut = Shader.PropertyToID("_CorrespondenceOut");
-        static readonly int PropUseCorrespondence = Shader.PropertyToID("_UseCorrespondence");
+        private static readonly int PropCorrespondence = Shader.PropertyToID("_Correspondence");
+        private static readonly int PropCorrespondenceOut = Shader.PropertyToID("_CorrespondenceOut");
+        private static readonly int PropUseCorrespondence = Shader.PropertyToID("_UseCorrespondence");
 
-        static readonly int PropBoundsMin = Shader.PropertyToID("_BoundsMin");
-        static readonly int PropBoundsMax = Shader.PropertyToID("_BoundsMax");
-        static readonly int PropMortonCodes = Shader.PropertyToID("_MortonCodes");
-        static readonly int PropMortonIndices = Shader.PropertyToID("_MortonIndices");
-        static readonly int PropSrcSorted = Shader.PropertyToID("_SrcSorted");
-        static readonly int PropTgtSorted = Shader.PropertyToID("_TgtSorted");
+        private static readonly int PropBoundsMin = Shader.PropertyToID("_BoundsMin");
+        private static readonly int PropBoundsMax = Shader.PropertyToID("_BoundsMax");
+        private static readonly int PropMortonCodes = Shader.PropertyToID("_MortonCodes");
+        private static readonly int PropMortonIndices = Shader.PropertyToID("_MortonIndices");
+        private static readonly int PropSrcSorted = Shader.PropertyToID("_SrcSorted");
+        private static readonly int PropTgtSorted = Shader.PropertyToID("_TgtSorted");
 
-        static int FindKernelSafe(ComputeShader cs, string name)
+        private static int FindKernelSafe(ComputeShader cs, string name)
         {
             try { return cs.FindKernel(name); }
             catch { return -1; }
         }
 
-        void OnEnable()
+        private void OnEnable()
         {
-            m_Renderer = GetComponent<GaussianSplatRenderer>();
-            if (morphShader != null)
+            _renderer = GetComponent<GaussianSplatRenderer>();
+            if (_morphShader != null)
             {
-                m_KernelMorph = FindKernelSafe(morphShader, "CSMorphSplats");
-                m_KernelMorton = FindKernelSafe(morphShader, "CSComputeMorton");
-                m_KernelCorrespondence = FindKernelSafe(morphShader, "CSBuildCorrespondence");
+                _kernelMorph = FindKernelSafe(_morphShader, "CSMorphSplats");
+                _kernelMorton = FindKernelSafe(_morphShader, "CSComputeMorton");
+                _kernelCorrespondence = FindKernelSafe(_morphShader, "CSBuildCorrespondence");
             }
         }
 
-        void OnDisable()
+        private void OnDisable()
         {
             ReleaseAllResources();
-            if (m_Renderer != null)
-                m_Renderer.SetMorphData(null, 0, 0);
+            if (_renderer != null)
+                _renderer.SetMorphData(null, 0, 0);
         }
 
-        void LateUpdate()
+        private void LateUpdate()
         {
             // Early-out: invalid renderer or missing requirements
-            if (m_Renderer == null || !m_Renderer.HasValidAsset || !m_Renderer.HasValidRenderSetup)
+            if (_renderer == null || !_renderer.HasValidAsset || !_renderer.HasValidRenderSetup)
             {
                 DisableMorph();
                 return;
             }
 
-            if (targetAsset == null || morphShader == null || weight <= 0f)
+            if (_targetAsset == null || _morphShader == null || _weight <= 0f)
             {
                 DisableMorph();
                 return;
             }
 
             // Ensure kernel is found (shader reference may change at runtime)
-            if (m_KernelMorph < 0)
+            if (_kernelMorph < 0)
             {
-                m_KernelMorph = FindKernelSafe(morphShader, "CSMorphSplats");
-                if (m_KernelMorph < 0)
+                _kernelMorph = FindKernelSafe(_morphShader, "CSMorphSplats");
+                if (_kernelMorph < 0)
                 {
                     DisableMorph();
                     return;
@@ -151,44 +158,44 @@ namespace GaussianSplatting.Runtime
             EnsureMorphOutput();
             DispatchMorph();
 
-            m_Renderer.SetMorphData(m_MorphOutput, m_MorphedSplatCount, 1, weight);
+            _renderer.SetMorphData(_morphOutput, _morphedSplatCount, 1, _weight, _morphSHOutput);
         }
 
-        void DisableMorph()
+        private void DisableMorph()
         {
-            if (m_Renderer != null)
-                m_Renderer.SetMorphData(null, 0, 0);
+            if (_renderer != null)
+                _renderer.SetMorphData(null, 0, 0);
         }
 
-        void EnsureTargetBuffers()
+        private void EnsureTargetBuffers()
         {
-            if (m_CachedTarget == targetAsset && m_TgtPosData != null)
+            if (_cachedTarget == _targetAsset && _tgtPosData != null)
                 return;
 
             ReleaseTargetBuffers();
 
-            var tgt = targetAsset;
+            var tgt = _targetAsset;
 
             // Position data
-            m_TgtPosData = new GraphicsBuffer(
+            _tgtPosData = new GraphicsBuffer(
                 GraphicsBuffer.Target.Raw,
                 (int)(tgt.posData.dataSize / 4), 4)
             { name = "MorphTgtPosData" };
-            m_TgtPosData.SetData(tgt.posData.GetData<uint>());
+            _tgtPosData.SetData(tgt.posData.GetData<uint>());
 
             // Other data (rotation + scale)
-            m_TgtOtherData = new GraphicsBuffer(
+            _tgtOtherData = new GraphicsBuffer(
                 GraphicsBuffer.Target.Raw,
                 (int)(tgt.otherData.dataSize / 4), 4)
             { name = "MorphTgtOtherData" };
-            m_TgtOtherData.SetData(tgt.otherData.GetData<uint>());
+            _tgtOtherData.SetData(tgt.otherData.GetData<uint>());
 
             // SH data
-            m_TgtSHData = new GraphicsBuffer(
+            _tgtSHData = new GraphicsBuffer(
                 GraphicsBuffer.Target.Raw,
                 (int)(tgt.shData.dataSize / 4), 4)
             { name = "MorphTgtSHData" };
-            m_TgtSHData.SetData(tgt.shData.GetData<uint>());
+            _tgtSHData.SetData(tgt.shData.GetData<uint>());
 
             // Color texture
             var (texWidth, texHeight) = GaussianSplatAsset.CalcTextureSize(tgt.splatCount);
@@ -200,60 +207,60 @@ namespace GaussianSplatting.Runtime
             { name = "MorphTgtColorData" };
             tex.SetPixelData(tgt.colorData.GetData<byte>(), 0);
             tex.Apply(false, true);
-            m_TgtColorTex = tex;
+            _tgtColorTex = tex;
 
             // Chunks
             int chunkStride = UnsafeUtility.SizeOf<GaussianSplatAsset.ChunkInfo>();
             if (tgt.chunkData != null && tgt.chunkData.dataSize != 0)
             {
                 int chunkCount = (int)(tgt.chunkData.dataSize / chunkStride);
-                m_TgtChunks = new GraphicsBuffer(
+                _tgtChunks = new GraphicsBuffer(
                     GraphicsBuffer.Target.Structured,
                     chunkCount, chunkStride)
                 { name = "MorphTgtChunkData" };
-                m_TgtChunks.SetData(tgt.chunkData.GetData<GaussianSplatAsset.ChunkInfo>());
-                m_TgtChunksValid = true;
+                _tgtChunks.SetData(tgt.chunkData.GetData<GaussianSplatAsset.ChunkInfo>());
+                _tgtChunksValid = true;
             }
             else
             {
                 // Dummy chunk buffer to avoid null binding
-                m_TgtChunks = new GraphicsBuffer(
+                _tgtChunks = new GraphicsBuffer(
                     GraphicsBuffer.Target.Structured,
                     1, chunkStride)
                 { name = "MorphTgtChunkData" };
-                m_TgtChunksValid = false;
+                _tgtChunksValid = false;
             }
 
-            m_CachedTarget = targetAsset;
+            _cachedTarget = _targetAsset;
         }
 
-        void EnsureCorrespondence()
+        private void EnsureCorrespondence()
         {
-            if (!useNearestMatch)
+            if (!_useNearestMatch)
             {
-                m_CorrespondenceValid = false;
+                _correspondenceValid = false;
                 return;
             }
 
-            if (m_CorrespondenceValid)
+            if (_correspondenceValid)
                 return;
 
             BuildCorrespondence();
         }
 
-        void BuildCorrespondence()
+        private void BuildCorrespondence()
         {
-            using var prof = s_ProfCorrespondence.Auto();
+            using var prof = ProfCorrespondence.Auto();
 
-            if (m_Renderer == null || !m_Renderer.HasValidAsset || targetAsset == null)
+            if (_renderer == null || !_renderer.HasValidAsset || _targetAsset == null)
                 return;
 
             // Ensure Morton/correspondence kernels are found
-            if (m_KernelMorton < 0)
-                m_KernelMorton = FindKernelSafe(morphShader, "CSComputeMorton");
-            if (m_KernelCorrespondence < 0)
-                m_KernelCorrespondence = FindKernelSafe(morphShader, "CSBuildCorrespondence");
-            if (m_KernelMorton < 0 || m_KernelCorrespondence < 0)
+            if (_kernelMorton < 0)
+                _kernelMorton = FindKernelSafe(_morphShader, "CSComputeMorton");
+            if (_kernelCorrespondence < 0)
+                _kernelCorrespondence = FindKernelSafe(_morphShader, "CSBuildCorrespondence");
+            if (_kernelMorton < 0 || _kernelCorrespondence < 0)
             {
                 Debug.LogWarning("GaussianMorph: Morton/Correspondence kernels not found in compute shader. " +
                     "Check for shader compilation errors.");
@@ -261,28 +268,28 @@ namespace GaussianSplatting.Runtime
             }
 
             // Create sorter from renderer's radix sort compute shader
-            if (m_MortonSorter == null)
+            if (_mortonSorter == null)
             {
-                var sortCs = m_Renderer.m_CSSplatUtilities;
+                var sortCs = _renderer.m_CSSplatUtilities;
                 if (sortCs == null) return;
-                m_MortonSorter = new GpuSorting(sortCs);
+                _mortonSorter = new GpuSorting(sortCs);
             }
-            if (!m_MortonSorter.Valid) return;
+            if (!_mortonSorter.Valid) return;
 
-            int srcCount = m_Renderer.splatCount;
-            int tgtCount = targetAsset.splatCount;
+            int srcCount = _renderer.splatCount;
+            int tgtCount = _targetAsset.splatCount;
             if (srcCount == 0 || tgtCount == 0) return;
 
             // Combined AABB from both assets
-            var srcAsset = m_Renderer.asset;
-            Vector3 bmin = Vector3.Min(srcAsset.boundsMin, targetAsset.boundsMin);
-            Vector3 bmax = Vector3.Max(srcAsset.boundsMax, targetAsset.boundsMax);
+            var srcAsset = _renderer.asset;
+            Vector3 bmin = Vector3.Min(srcAsset.boundsMin, _targetAsset.boundsMin);
+            Vector3 bmax = Vector3.Max(srcAsset.boundsMax, _targetAsset.boundsMax);
 
             // Allocate correspondence buffer
-            if (m_Correspondence == null || m_Correspondence.count != srcCount)
+            if (_correspondence == null || _correspondence.count != srcCount)
             {
-                m_Correspondence?.Dispose();
-                m_Correspondence = new GraphicsBuffer(GraphicsBuffer.Target.Structured, srcCount, 4)
+                _correspondence?.Dispose();
+                _correspondence = new GraphicsBuffer(GraphicsBuffer.Target.Structured, srcCount, 4)
                     { name = "MorphCorrespondence" };
             }
 
@@ -302,8 +309,8 @@ namespace GaussianSplatting.Runtime
 
             var cmd = new CommandBuffer { name = "MorphBuildCorrespondence" };
 
-            int mk = m_KernelMorton;
-            var cs = morphShader;
+            int mk = _kernelMorton;
+            var cs = _morphShader;
 
             // Pack source format flags (same as morph kernel)
             uint srcFormat = (uint)srcAsset.posFormat |
@@ -311,41 +318,41 @@ namespace GaussianSplatting.Runtime
                              ((uint)srcAsset.shFormat << 16);
 
             // --- Compute Morton codes for source (bind source data to _Src* slots) ---
-            cmd.SetComputeBufferParam(cs, mk, PropSrcPos, m_Renderer.GpuPosData);
-            cmd.SetComputeBufferParam(cs, mk, PropSrcOther, m_Renderer.GpuOtherData);
-            cmd.SetComputeBufferParam(cs, mk, PropSrcSH, m_Renderer.GpuSHData);
-            cmd.SetComputeTextureParam(cs, mk, PropSrcColor, m_Renderer.GpuColorData);
-            cmd.SetComputeBufferParam(cs, mk, PropSrcChunks, m_Renderer.GpuChunksBuffer);
+            cmd.SetComputeBufferParam(cs, mk, PropSrcPos, _renderer.GpuPosData);
+            cmd.SetComputeBufferParam(cs, mk, PropSrcOther, _renderer.GpuOtherData);
+            cmd.SetComputeBufferParam(cs, mk, PropSrcSH, _renderer.GpuSHData);
+            cmd.SetComputeTextureParam(cs, mk, PropSrcColor, _renderer.GpuColorData);
+            cmd.SetComputeBufferParam(cs, mk, PropSrcChunks, _renderer.GpuChunksBuffer);
             cmd.SetComputeIntParam(cs, PropSrcFormat, (int)srcFormat);
             cmd.SetComputeIntParam(cs, PropSrcChunkCount,
-                m_Renderer.GpuChunksValid ? m_Renderer.GpuChunksBuffer.count : 0);
+                _renderer.GpuChunksValid ? _renderer.GpuChunksBuffer.count : 0);
             cmd.SetComputeIntParam(cs, PropSrcSplatCount, srcCount);
             cmd.SetComputeVectorParam(cs, PropBoundsMin, (Vector4)bmin);
             cmd.SetComputeVectorParam(cs, PropBoundsMax, (Vector4)bmax);
             cmd.SetComputeBufferParam(cs, mk, PropMortonCodes, srcMortonCodes);
             cmd.SetComputeBufferParam(cs, mk, PropMortonIndices, srcMortonIndices);
-            cmd.DispatchCompute(cs, mk, (srcCount + kGroupSize - 1) / kGroupSize, 1, 1);
+            cmd.DispatchCompute(cs, mk, (srcCount + GroupSize - 1) / GroupSize, 1, 1);
 
             // Pack target format flags
-            uint tgtFormat = (uint)targetAsset.posFormat |
-                             ((uint)targetAsset.scaleFormat << 8) |
-                             ((uint)targetAsset.shFormat << 16);
+            uint tgtFormat = (uint)_targetAsset.posFormat |
+                             ((uint)_targetAsset.scaleFormat << 8) |
+                             ((uint)_targetAsset.shFormat << 16);
 
             // --- Compute Morton codes for target (rebind target data to _Src* slots) ---
-            cmd.SetComputeBufferParam(cs, mk, PropSrcPos, m_TgtPosData);
-            cmd.SetComputeBufferParam(cs, mk, PropSrcOther, m_TgtOtherData);
-            cmd.SetComputeBufferParam(cs, mk, PropSrcSH, m_TgtSHData);
-            cmd.SetComputeTextureParam(cs, mk, PropSrcColor, m_TgtColorTex);
-            cmd.SetComputeBufferParam(cs, mk, PropSrcChunks, m_TgtChunks);
+            cmd.SetComputeBufferParam(cs, mk, PropSrcPos, _tgtPosData);
+            cmd.SetComputeBufferParam(cs, mk, PropSrcOther, _tgtOtherData);
+            cmd.SetComputeBufferParam(cs, mk, PropSrcSH, _tgtSHData);
+            cmd.SetComputeTextureParam(cs, mk, PropSrcColor, _tgtColorTex);
+            cmd.SetComputeBufferParam(cs, mk, PropSrcChunks, _tgtChunks);
             cmd.SetComputeIntParam(cs, PropSrcFormat, (int)tgtFormat);
             cmd.SetComputeIntParam(cs, PropSrcChunkCount,
-                m_TgtChunksValid ? m_TgtChunks.count : 0);
+                _tgtChunksValid ? _tgtChunks.count : 0);
             cmd.SetComputeIntParam(cs, PropSrcSplatCount, tgtCount);
             cmd.SetComputeBufferParam(cs, mk, PropMortonCodes, tgtMortonCodes);
             cmd.SetComputeBufferParam(cs, mk, PropMortonIndices, tgtMortonIndices);
-            cmd.DispatchCompute(cs, mk, (tgtCount + kGroupSize - 1) / kGroupSize, 1, 1);
+            cmd.DispatchCompute(cs, mk, (tgtCount + GroupSize - 1) / GroupSize, 1, 1);
 
-            // --- Sort source by Morton code (indices as payload) ---
+            // --- Sort source by Morton code ---
             var srcSortArgs = new GpuSorting.Args
             {
                 count = (uint)srcCount,
@@ -353,7 +360,7 @@ namespace GaussianSplatting.Runtime
                 inputValues = srcMortonIndices,
                 resources = srcSortRes
             };
-            m_MortonSorter.Dispatch(cmd, srcSortArgs);
+            _mortonSorter.Dispatch(cmd, srcSortArgs);
 
             // --- Sort target by Morton code (indices as payload) ---
             var tgtSortArgs = new GpuSorting.Args
@@ -363,16 +370,16 @@ namespace GaussianSplatting.Runtime
                 inputValues = tgtMortonIndices,
                 resources = tgtSortRes
             };
-            m_MortonSorter.Dispatch(cmd, tgtSortArgs);
+            _mortonSorter.Dispatch(cmd, tgtSortArgs);
 
             // --- Build correspondence from sorted ranks ---
-            int ck = m_KernelCorrespondence;
+            int ck = _kernelCorrespondence;
             cmd.SetComputeBufferParam(cs, ck, PropSrcSorted, srcMortonIndices);
             cmd.SetComputeBufferParam(cs, ck, PropTgtSorted, tgtMortonIndices);
             cmd.SetComputeIntParam(cs, PropSrcSplatCount, srcCount);
             cmd.SetComputeIntParam(cs, PropTgtSplatCount, tgtCount);
-            cmd.SetComputeBufferParam(cs, ck, PropCorrespondenceOut, m_Correspondence);
-            cmd.DispatchCompute(cs, ck, (srcCount + kGroupSize - 1) / kGroupSize, 1, 1);
+            cmd.SetComputeBufferParam(cs, ck, PropCorrespondenceOut, _correspondence);
+            cmd.DispatchCompute(cs, ck, (srcCount + GroupSize - 1) / GroupSize, 1, 1);
 
             // Execute all GPU commands
             Graphics.ExecuteCommandBuffer(cmd);
@@ -386,116 +393,127 @@ namespace GaussianSplatting.Runtime
             srcSortRes.Dispose();
             tgtSortRes.Dispose();
 
-            m_CorrespondenceValid = true;
+            _correspondenceValid = true;
         }
 
-        void EnsureMorphOutput()
+        private void EnsureMorphOutput()
         {
-            int srcCount = m_Renderer.splatCount;
-            int tgtCount = targetAsset.splatCount;
+            int srcCount = _renderer.splatCount;
+            int tgtCount = _targetAsset.splatCount;
             int maxCount = Mathf.Max(srcCount, tgtCount);
 
-            if (m_MorphOutput != null && m_MorphedSplatCount == maxCount)
+            if (_morphOutput != null && _morphedSplatCount == maxCount)
                 return;
 
-            m_MorphOutput?.Dispose();
-            m_MorphedSplatCount = maxCount;
+            _morphOutput?.Dispose();
+            _morphSHOutput?.Dispose();
+            _morphedSplatCount = maxCount;
 
             // 4 float4 per splat, stride = 16 bytes (sizeof float4)
-            m_MorphOutput = new GraphicsBuffer(
+            _morphOutput = new GraphicsBuffer(
                 GraphicsBuffer.Target.Structured,
                 maxCount * 4, 16)
             { name = "MorphOutput" };
+
+            // SH buffer: 96 bytes per splat (15 half3 in fp16 packed format)
+            // Using Raw target for ByteAddressBuffer access in compute shader
+            _morphSHOutput = new GraphicsBuffer(
+                GraphicsBuffer.Target.Raw,
+                maxCount * 24, 4)
+            { name = "MorphSHOutput" };
         }
 
-        void DispatchMorph()
+        private void DispatchMorph()
         {
-            using var prof = s_ProfMorph.Auto();
+            using var prof = ProfMorph.Auto();
 
-            var cs = morphShader;
-            int kernel = m_KernelMorph;
+            var cs = _morphShader;
+            int kernel = _kernelMorph;
 
-            var srcAsset = m_Renderer.asset;
+            var srcAsset = _renderer.asset;
 
             // Bind source buffers
-            cs.SetBuffer(kernel, PropSrcPos, m_Renderer.GpuPosData);
-            cs.SetBuffer(kernel, PropSrcOther, m_Renderer.GpuOtherData);
-            cs.SetBuffer(kernel, PropSrcSH, m_Renderer.GpuSHData);
-            cs.SetTexture(kernel, PropSrcColor, m_Renderer.GpuColorData);
-            cs.SetBuffer(kernel, PropSrcChunks, m_Renderer.GpuChunksBuffer);
+            cs.SetBuffer(kernel, PropSrcPos, _renderer.GpuPosData);
+            cs.SetBuffer(kernel, PropSrcOther, _renderer.GpuOtherData);
+            cs.SetBuffer(kernel, PropSrcSH, _renderer.GpuSHData);
+            cs.SetTexture(kernel, PropSrcColor, _renderer.GpuColorData);
+            cs.SetBuffer(kernel, PropSrcChunks, _renderer.GpuChunksBuffer);
 
             // Source format flags: posFormat | (scaleFormat << 8) | (shFormat << 16)
             uint srcFormat = (uint)srcAsset.posFormat |
                              ((uint)srcAsset.scaleFormat << 8) |
                              ((uint)srcAsset.shFormat << 16);
             cs.SetInt(PropSrcFormat, (int)srcFormat);
-            cs.SetInt(PropSrcChunkCount, m_Renderer.GpuChunksValid ? m_Renderer.GpuChunksBuffer.count : 0);
-            cs.SetInt(PropSrcSplatCount, m_Renderer.splatCount);
+            cs.SetInt(PropSrcChunkCount, _renderer.GpuChunksValid ? _renderer.GpuChunksBuffer.count : 0);
+            cs.SetInt(PropSrcSplatCount, _renderer.splatCount);
 
             // Bind target buffers
-            cs.SetBuffer(kernel, PropTgtPos, m_TgtPosData);
-            cs.SetBuffer(kernel, PropTgtOther, m_TgtOtherData);
-            cs.SetBuffer(kernel, PropTgtSH, m_TgtSHData);
-            cs.SetTexture(kernel, PropTgtColor, m_TgtColorTex);
-            cs.SetBuffer(kernel, PropTgtChunks, m_TgtChunks);
+            cs.SetBuffer(kernel, PropTgtPos, _tgtPosData);
+            cs.SetBuffer(kernel, PropTgtOther, _tgtOtherData);
+            cs.SetBuffer(kernel, PropTgtSH, _tgtSHData);
+            cs.SetTexture(kernel, PropTgtColor, _tgtColorTex);
+            cs.SetBuffer(kernel, PropTgtChunks, _tgtChunks);
 
             // Target format flags
-            uint tgtFormat = (uint)targetAsset.posFormat |
-                             ((uint)targetAsset.scaleFormat << 8) |
-                             ((uint)targetAsset.shFormat << 16);
+            uint tgtFormat = (uint)_targetAsset.posFormat |
+                             ((uint)_targetAsset.scaleFormat << 8) |
+                             ((uint)_targetAsset.shFormat << 16);
             cs.SetInt(PropTgtFormat, (int)tgtFormat);
-            cs.SetInt(PropTgtChunkCount, m_TgtChunksValid ? m_TgtChunks.count : 0);
-            cs.SetInt(PropTgtSplatCount, targetAsset.splatCount);
+            cs.SetInt(PropTgtChunkCount, _tgtChunksValid ? _tgtChunks.count : 0);
+            cs.SetInt(PropTgtSplatCount, _targetAsset.splatCount);
 
             // Morph parameters
-            cs.SetFloat(PropMorphWeight, weight);
-            cs.SetBuffer(kernel, PropMorphOutput, m_MorphOutput);
+            cs.SetFloat(PropMorphWeight, _weight);
+            cs.SetBuffer(kernel, PropMorphOutput, _morphOutput);
+            cs.SetBuffer(kernel, PropMorphSHOutput, _morphSHOutput);
 
             // Correspondence
-            bool useCor = useNearestMatch && m_CorrespondenceValid && m_Correspondence != null;
+            bool useCor = _useNearestMatch && _correspondenceValid && _correspondence != null;
             cs.SetInt(PropUseCorrespondence, useCor ? 1 : 0);
-            if (m_Correspondence == null)
-                m_Correspondence = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, 4)
+            if (_correspondence == null)
+                _correspondence = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, 4)
                     { name = "MorphCorrespondenceDummy" };
-            cs.SetBuffer(kernel, PropCorrespondence, m_Correspondence);
+            cs.SetBuffer(kernel, PropCorrespondence, _correspondence);
 
             // Dispatch
-            int threadGroups = (m_MorphedSplatCount + kGroupSize - 1) / kGroupSize;
+            int threadGroups = (_morphedSplatCount + GroupSize - 1) / GroupSize;
             cs.Dispatch(kernel, threadGroups, 1, 1);
         }
 
-        void ReleaseTargetBuffers()
+        private void ReleaseTargetBuffers()
         {
-            m_TgtPosData?.Dispose();
-            m_TgtPosData = null;
-            m_TgtOtherData?.Dispose();
-            m_TgtOtherData = null;
-            m_TgtSHData?.Dispose();
-            m_TgtSHData = null;
+            _tgtPosData?.Dispose();
+            _tgtPosData = null;
+            _tgtOtherData?.Dispose();
+            _tgtOtherData = null;
+            _tgtSHData?.Dispose();
+            _tgtSHData = null;
 
-            if (m_TgtColorTex != null)
+            if (_tgtColorTex != null)
             {
-                DestroyImmediate(m_TgtColorTex);
-                m_TgtColorTex = null;
+                DestroyImmediate(_tgtColorTex);
+                _tgtColorTex = null;
             }
 
-            m_TgtChunks?.Dispose();
-            m_TgtChunks = null;
-            m_TgtChunksValid = false;
+            _tgtChunks?.Dispose();
+            _tgtChunks = null;
+            _tgtChunksValid = false;
 
-            m_CachedTarget = null;
-            m_CorrespondenceValid = false;
+            _cachedTarget = null;
+            _correspondenceValid = false;
         }
 
-        void ReleaseAllResources()
+        private void ReleaseAllResources()
         {
             ReleaseTargetBuffers();
-            m_MorphOutput?.Dispose();
-            m_MorphOutput = null;
-            m_MorphedSplatCount = 0;
-            m_Correspondence?.Dispose();
-            m_Correspondence = null;
-            m_CorrespondenceValid = false;
+            _morphOutput?.Dispose();
+            _morphOutput = null;
+            _morphSHOutput?.Dispose();
+            _morphSHOutput = null;
+            _morphedSplatCount = 0;
+            _correspondence?.Dispose();
+            _correspondence = null;
+            _correspondenceValid = false;
         }
     }
 }

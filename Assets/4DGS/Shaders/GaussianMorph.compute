@@ -1,7 +1,5 @@
-// SPDX-License-Identifier: MIT
 // Gaussian Splat morph transition compute shader.
-// Decodes two assets and blends base splat properties into _MorphOutput buffer.
-// SH coefficients are not blended (CalcViewData reads from the dominant asset).
+// Decodes two assets and blends per-splat properties (including SH) into output buffers.
 // Includes Morton code computation and correspondence building for spatial matching.
 
 #define GROUP_SIZE 64
@@ -45,6 +43,9 @@ uint _UseCorrespondence;
 // [2]: scale.xyz, 0
 // [3]: color.rgb, 1
 RWStructuredBuffer<float4> _MorphOutput;
+
+// ── SH Output: 96 bytes per splat (15 half3 packed as fp16, 23 uints padded to 24) ──
+RWByteAddressBuffer _MorphSHOutput;
 
 // ── Morton code + correspondence buffers ──
 float4 _BoundsMin;
@@ -111,6 +112,58 @@ void CSBuildCorrespondence(uint3 id : SV_DispatchThreadID)
     _CorrespondenceOut[srcOrigIdx] = tgtOrigIdx;
 }
 
+// ── Write blended SH in fp16 packed format (96 bytes per splat) ──
+// Layout matches the fp16 SH format: 15 half3 stored as 23 sequential uints (2 halfs each).
+
+void WriteMorphSH(uint idx, half3 sh0, half3 sh1, half3 sh2, half3 sh3, half3 sh4,
+                  half3 sh5, half3 sh6, half3 sh7, half3 sh8, half3 sh9,
+                  half3 sh10, half3 sh11, half3 sh12, half3 sh13, half3 sh14)
+{
+    uint addr = idx * 96;
+
+    // uints 0-3: sh0.xyz, sh1.xyz, sh2.xy
+    _MorphSHOutput.Store4(addr, uint4(
+        f32tof16(sh0.x)  | (f32tof16(sh0.y)  << 16),
+        f32tof16(sh0.z)  | (f32tof16(sh1.x)  << 16),
+        f32tof16(sh1.y)  | (f32tof16(sh1.z)  << 16),
+        f32tof16(sh2.x)  | (f32tof16(sh2.y)  << 16)
+    ));
+    // uints 4-7: sh2.z, sh3.xyz, sh4.xyz, sh5.x
+    _MorphSHOutput.Store4(addr + 16, uint4(
+        f32tof16(sh2.z)  | (f32tof16(sh3.x)  << 16),
+        f32tof16(sh3.y)  | (f32tof16(sh3.z)  << 16),
+        f32tof16(sh4.x)  | (f32tof16(sh4.y)  << 16),
+        f32tof16(sh4.z)  | (f32tof16(sh5.x)  << 16)
+    ));
+    // uints 8-11: sh5.yz, sh6.xyz, sh7.xy
+    _MorphSHOutput.Store4(addr + 32, uint4(
+        f32tof16(sh5.y)  | (f32tof16(sh5.z)  << 16),
+        f32tof16(sh6.x)  | (f32tof16(sh6.y)  << 16),
+        f32tof16(sh6.z)  | (f32tof16(sh7.x)  << 16),
+        f32tof16(sh7.y)  | (f32tof16(sh7.z)  << 16)
+    ));
+    // uints 12-15: sh8.xyz, sh9.xyz, sh10.xy
+    _MorphSHOutput.Store4(addr + 48, uint4(
+        f32tof16(sh8.x)  | (f32tof16(sh8.y)  << 16),
+        f32tof16(sh8.z)  | (f32tof16(sh9.x)  << 16),
+        f32tof16(sh9.y)  | (f32tof16(sh9.z)  << 16),
+        f32tof16(sh10.x) | (f32tof16(sh10.y) << 16)
+    ));
+    // uints 16-19: sh10.z, sh11.xyz, sh12.xyz, sh13.x
+    _MorphSHOutput.Store4(addr + 64, uint4(
+        f32tof16(sh10.z) | (f32tof16(sh11.x) << 16),
+        f32tof16(sh11.y) | (f32tof16(sh11.z) << 16),
+        f32tof16(sh12.x) | (f32tof16(sh12.y) << 16),
+        f32tof16(sh12.z) | (f32tof16(sh13.x) << 16)
+    ));
+    // uints 20-22: sh13.yz, sh14.xyz
+    _MorphSHOutput.Store3(addr + 80, uint3(
+        f32tof16(sh13.y) | (f32tof16(sh13.z) << 16),
+        f32tof16(sh14.x) | (f32tof16(sh14.y) << 16),
+        f32tof16(sh14.z)
+    ));
+}
+
 // ── Kernel: Morph splats ──
 
 [numthreads(GROUP_SIZE, 1, 1)]
@@ -154,6 +207,17 @@ void CSMorphSplats(uint3 id : SV_DispatchThreadID)
         _MorphOutput[outBase + 1] = blendRot;
         _MorphOutput[outBase + 2] = float4(blendScale, 0);
         _MorphOutput[outBase + 3] = float4(blendCol, 1);
+
+        // Blend SH coefficients
+        WriteMorphSH(idx,
+            lerp(src.sh[0],  tgt.sh[0],  w), lerp(src.sh[1],  tgt.sh[1],  w),
+            lerp(src.sh[2],  tgt.sh[2],  w), lerp(src.sh[3],  tgt.sh[3],  w),
+            lerp(src.sh[4],  tgt.sh[4],  w), lerp(src.sh[5],  tgt.sh[5],  w),
+            lerp(src.sh[6],  tgt.sh[6],  w), lerp(src.sh[7],  tgt.sh[7],  w),
+            lerp(src.sh[8],  tgt.sh[8],  w), lerp(src.sh[9],  tgt.sh[9],  w),
+            lerp(src.sh[10], tgt.sh[10], w), lerp(src.sh[11], tgt.sh[11], w),
+            lerp(src.sh[12], tgt.sh[12], w), lerp(src.sh[13], tgt.sh[13], w),
+            lerp(src.sh[14], tgt.sh[14], w));
     }
     else if (hasSrc)
     {
@@ -168,6 +232,15 @@ void CSMorphSplats(uint3 id : SV_DispatchThreadID)
         _MorphOutput[outBase + 1] = src.rot;
         _MorphOutput[outBase + 2] = float4(src.scale, 0);
         _MorphOutput[outBase + 3] = float4((float3)src.color, 1);
+
+        // Fade source SH by (1-w)
+        half fade = (half)(1.0 - w);
+        WriteMorphSH(idx,
+            src.sh[0]  * fade, src.sh[1]  * fade, src.sh[2]  * fade,
+            src.sh[3]  * fade, src.sh[4]  * fade, src.sh[5]  * fade,
+            src.sh[6]  * fade, src.sh[7]  * fade, src.sh[8]  * fade,
+            src.sh[9]  * fade, src.sh[10] * fade, src.sh[11] * fade,
+            src.sh[12] * fade, src.sh[13] * fade, src.sh[14] * fade);
     }
     else if (hasTgt)
     {
@@ -182,5 +255,14 @@ void CSMorphSplats(uint3 id : SV_DispatchThreadID)
         _MorphOutput[outBase + 1] = tgt.rot;
         _MorphOutput[outBase + 2] = float4(tgt.scale, 0);
         _MorphOutput[outBase + 3] = float4((float3)tgt.color, 1);
+
+        // Fade target SH by w
+        half fade = (half)w;
+        WriteMorphSH(idx,
+            tgt.sh[0]  * fade, tgt.sh[1]  * fade, tgt.sh[2]  * fade,
+            tgt.sh[3]  * fade, tgt.sh[4]  * fade, tgt.sh[5]  * fade,
+            tgt.sh[6]  * fade, tgt.sh[7]  * fade, tgt.sh[8]  * fade,
+            tgt.sh[9]  * fade, tgt.sh[10] * fade, tgt.sh[11] * fade,
+            tgt.sh[12] * fade, tgt.sh[13] * fade, tgt.sh[14] * fade);
     }
 }
