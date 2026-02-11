@@ -103,6 +103,14 @@ uint _SplatCutoutsCount;
 StructuredBuffer<float4> _AnimOutputData;
 uint _AnimDataValid; // 0 = no animation, 1 = animation active
 
+// Morph data (set by GaussianMorph, 4 float4s per splat)
+// [0]: pos.xyz, opacity
+// [1]: rot.xyzw
+// [2]: scale.xyz, 0
+// [3]: color.rgb, 1
+StructuredBuffer<float4> _MorphedData;
+uint _MorphDataValid; // 0 = no morph, 1 = morph active
+
 #define SPLAT_CUTOUT_TYPE_ELLIPSOID 0
 #define SPLAT_CUTOUT_TYPE_BOX 1
 
@@ -206,7 +214,29 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID)
     if (idx >= _SplatCount)
         return;
 
-    SplatData splat = LoadSplatData(idx);
+    SplatData splat;
+    if (_MorphDataValid != 0)
+    {
+        uint mb = idx * 4;
+        float4 md0 = _MorphedData[mb + 0];
+        float4 md1 = _MorphedData[mb + 1];
+        float4 md2 = _MorphedData[mb + 2];
+        float4 md3 = _MorphedData[mb + 3];
+
+        // Load SH from original compressed buffers first
+        splat = LoadSplatData(idx);
+
+        // Override base properties with morphed data
+        splat.pos     = md0.xyz;
+        splat.rot     = md1;
+        splat.scale   = md2.xyz;
+        splat.opacity = (half)md0.w;
+        splat.sh.col  = (half3)md3.rgb;
+    }
+    else
+    {
+        splat = LoadSplatData(idx);
+    }
     SplatViewData view = (SplatViewData)0;
 
     // Apply animation position offset if available
