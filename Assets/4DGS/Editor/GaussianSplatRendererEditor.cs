@@ -97,7 +97,7 @@ namespace GaussianSplatting.Editor
 
             if (!gs.HasValidAsset)
             {
-                var msg = gs.asset != null && gs.asset.formatVersion != GaussianSplatAsset.kCurrentVersion
+                var msg = gs.asset != null && gs.asset.formatVersion != GaussianSplatAsset.CurrentVersion
                     ? "Gaussian Splat asset version is not compatible, please recreate the asset"
                     : "Gaussian Splat asset is not assigned or is empty";
                 EditorGUILayout.HelpBox(msg, MessageType.Error);
@@ -172,9 +172,9 @@ namespace GaussianSplatting.Editor
             CountTargetSplats(out var totalSplats, out var totalObjects);
             EditorGUILayout.LabelField("Total Objects", $"{totalObjects}");
             EditorGUILayout.LabelField("Total Splats", $"{totalSplats:N0}");
-            if (totalSplats > GaussianSplatAsset.kMaxSplats)
+            if (totalSplats > GaussianSplatAsset.MaxSplats)
             {
-                EditorGUILayout.HelpBox($"Can't merge, too many splats (max. supported {GaussianSplatAsset.kMaxSplats:N0})", MessageType.Warning);
+                EditorGUILayout.HelpBox($"Can't merge, too many splats (max. supported {GaussianSplatAsset.MaxSplats:N0})", MessageType.Warning);
                 return;
             }
 
@@ -213,7 +213,7 @@ namespace GaussianSplatting.Editor
         void MergeSplatObjects()
         {
             CountTargetSplats(out var totalSplats, out _);
-            if (totalSplats > GaussianSplatAsset.kMaxSplats)
+            if (totalSplats > GaussianSplatAsset.MaxSplats)
                 return;
             var targetGs = (GaussianSplatRenderer) target;
 
@@ -282,29 +282,29 @@ namespace GaussianSplatting.Editor
                 Transform cutoutTr = cutout.transform;
                 cutoutTr.SetParent(gs.transform, false);
                 cutoutTr.localScale = (gs.asset.boundsMax - gs.asset.boundsMin) * 0.25f;
-                gs.m_Cutouts ??= Array.Empty<GaussianCutout>();
-                ArrayUtility.Add(ref gs.m_Cutouts, cutout);
+                gs.cutouts ??= Array.Empty<GaussianCutout>();
+                ArrayUtility.Add(ref gs.cutouts, cutout);
                 gs.UpdateEditCountsAndBounds();
                 EditorUtility.SetDirty(gs);
                 Selection.activeGameObject = cutout.gameObject;
             }
             if (GUILayout.Button("Use All Cutouts"))
             {
-                gs.m_Cutouts = FindObjectsByType<GaussianCutout>(FindObjectsSortMode.InstanceID);
+                gs.cutouts = FindObjectsByType<GaussianCutout>(FindObjectsSortMode.InstanceID);
                 gs.UpdateEditCountsAndBounds();
                 EditorUtility.SetDirty(gs);
             }
 
             if (GUILayout.Button("No Cutouts"))
             {
-                gs.m_Cutouts = Array.Empty<GaussianCutout>();
+                gs.cutouts = Array.Empty<GaussianCutout>();
                 gs.UpdateEditCountsAndBounds();
                 EditorUtility.SetDirty(gs);
             }
             GUILayout.EndHorizontal();
             EditorGUILayout.PropertyField(m_PropCutouts);
 
-            bool hasCutouts = gs.m_Cutouts != null && gs.m_Cutouts.Length != 0;
+            bool hasCutouts = gs.cutouts != null && gs.cutouts.Length != 0;
             bool modifiedOrHasCutouts = gs.editModified || hasCutouts;
 
             var asset = gs.asset;

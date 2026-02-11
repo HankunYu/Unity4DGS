@@ -22,12 +22,12 @@ namespace GaussianSplatting.Runtime
         //Number of sorting passes required to sort a 32bit key, KEY_BITS / DEVICE_RADIX_SORT_BITS
         const uint DEVICE_RADIX_SORT_PASSES = 4;
 
-        //Keywords to enable for the shader
-        private LocalKeyword m_keyUintKeyword;
-        private LocalKeyword m_payloadUintKeyword;
-        private LocalKeyword m_ascendKeyword;
-        private LocalKeyword m_sortPairKeyword;
-        private LocalKeyword m_vulkanKeyword;
+        // Keywords to enable for the shader
+        private LocalKeyword _keyUintKeyword;
+        private LocalKeyword _payloadUintKeyword;
+        private LocalKeyword _ascendKeyword;
+        private LocalKeyword _sortPairKeyword;
+        private LocalKeyword _vulkanKeyword;
 
         public struct Args
         {
@@ -76,56 +76,56 @@ namespace GaussianSplatting.Runtime
             }
         }
 
-        readonly ComputeShader m_CS;
-        readonly int m_kernelInitDeviceRadixSort = -1;
-        readonly int m_kernelUpsweep = -1;
-        readonly int m_kernelScan = -1;
-        readonly int m_kernelDownsweep = -1;
+        private readonly ComputeShader _cs;
+        private readonly int _kernelInit = -1;
+        private readonly int _kernelUpsweep = -1;
+        private readonly int _kernelScan = -1;
+        private readonly int _kernelDownsweep = -1;
 
-        readonly bool m_Valid;
+        private readonly bool _valid;
 
-        public bool Valid => m_Valid;
+        public bool Valid => _valid;
 
         public GpuSorting(ComputeShader cs)
         {
-            m_CS = cs;
+            _cs = cs;
             if (cs)
             {
-                m_kernelInitDeviceRadixSort = cs.FindKernel("InitDeviceRadixSort");
-                m_kernelUpsweep = cs.FindKernel("Upsweep");
-                m_kernelScan = cs.FindKernel("Scan");
-                m_kernelDownsweep = cs.FindKernel("Downsweep");
+                _kernelInit = cs.FindKernel("InitDeviceRadixSort");
+                _kernelUpsweep = cs.FindKernel("Upsweep");
+                _kernelScan = cs.FindKernel("Scan");
+                _kernelDownsweep = cs.FindKernel("Downsweep");
             }
 
-            m_Valid = m_kernelInitDeviceRadixSort >= 0 &&
-                      m_kernelUpsweep >= 0 &&
-                      m_kernelScan >= 0 &&
-                      m_kernelDownsweep >= 0;
-            if (m_Valid)
+            _valid = _kernelInit >= 0 &&
+                      _kernelUpsweep >= 0 &&
+                      _kernelScan >= 0 &&
+                      _kernelDownsweep >= 0;
+            if (_valid)
             {
-                if (!cs.IsSupported(m_kernelInitDeviceRadixSort) ||
-                    !cs.IsSupported(m_kernelUpsweep) ||
-                    !cs.IsSupported(m_kernelScan) ||
-                    !cs.IsSupported(m_kernelDownsweep))
+                if (!cs.IsSupported(_kernelInit) ||
+                    !cs.IsSupported(_kernelUpsweep) ||
+                    !cs.IsSupported(_kernelScan) ||
+                    !cs.IsSupported(_kernelDownsweep))
                 {
-                    m_Valid = false;
+                    _valid = false;
                 }
             }
 
-            m_keyUintKeyword = new LocalKeyword(cs, "KEY_UINT");
-            m_payloadUintKeyword = new LocalKeyword(cs, "PAYLOAD_UINT");
-            m_ascendKeyword = new LocalKeyword(cs, "SHOULD_ASCEND");
-            m_sortPairKeyword = new LocalKeyword(cs, "SORT_PAIRS");
-            m_vulkanKeyword = new LocalKeyword(cs, "VULKAN");
+            _keyUintKeyword = new LocalKeyword(cs, "KEY_UINT");
+            _payloadUintKeyword = new LocalKeyword(cs, "PAYLOAD_UINT");
+            _ascendKeyword = new LocalKeyword(cs, "SHOULD_ASCEND");
+            _sortPairKeyword = new LocalKeyword(cs, "SORT_PAIRS");
+            _vulkanKeyword = new LocalKeyword(cs, "VULKAN");
 
-            cs.EnableKeyword(m_keyUintKeyword);
-            cs.EnableKeyword(m_payloadUintKeyword);
-            cs.EnableKeyword(m_ascendKeyword);
-            cs.EnableKeyword(m_sortPairKeyword);
+            cs.EnableKeyword(_keyUintKeyword);
+            cs.EnableKeyword(_payloadUintKeyword);
+            cs.EnableKeyword(_ascendKeyword);
+            cs.EnableKeyword(_sortPairKeyword);
             if (SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Vulkan)
-                cs.EnableKeyword(m_vulkanKeyword);
+                cs.EnableKeyword(_vulkanKeyword);
             else
-                cs.DisableKeyword(m_vulkanKeyword);
+                cs.DisableKeyword(_vulkanKeyword);
         }
 
         static uint DivRoundUp(uint x, uint y) => (x + y - 1) / y;
@@ -153,43 +153,43 @@ namespace GaussianSplatting.Runtime
             constants.threadBlocks = DivRoundUp(args.count, DEVICE_RADIX_SORT_PARTITION_SIZE);
 
             // Setup overall constants
-            cmd.SetComputeIntParam(m_CS, "e_numKeys", (int)constants.numKeys);
-            cmd.SetComputeIntParam(m_CS, "e_threadBlocks", (int)constants.threadBlocks);
+            cmd.SetComputeIntParam(_cs, "e_numKeys", (int)constants.numKeys);
+            cmd.SetComputeIntParam(_cs, "e_threadBlocks", (int)constants.threadBlocks);
 
             //Set statically located buffers
             //Upsweep
-            cmd.SetComputeBufferParam(m_CS, m_kernelUpsweep, "b_passHist", args.resources.passHistBuffer);
-            cmd.SetComputeBufferParam(m_CS, m_kernelUpsweep, "b_globalHist", args.resources.globalHistBuffer);
+            cmd.SetComputeBufferParam(_cs, _kernelUpsweep, "b_passHist", args.resources.passHistBuffer);
+            cmd.SetComputeBufferParam(_cs, _kernelUpsweep, "b_globalHist", args.resources.globalHistBuffer);
 
             //Scan
-            cmd.SetComputeBufferParam(m_CS, m_kernelScan, "b_passHist", args.resources.passHistBuffer);
+            cmd.SetComputeBufferParam(_cs, _kernelScan, "b_passHist", args.resources.passHistBuffer);
 
             //Downsweep
-            cmd.SetComputeBufferParam(m_CS, m_kernelDownsweep, "b_passHist", args.resources.passHistBuffer);
-            cmd.SetComputeBufferParam(m_CS, m_kernelDownsweep, "b_globalHist", args.resources.globalHistBuffer);
+            cmd.SetComputeBufferParam(_cs, _kernelDownsweep, "b_passHist", args.resources.passHistBuffer);
+            cmd.SetComputeBufferParam(_cs, _kernelDownsweep, "b_globalHist", args.resources.globalHistBuffer);
 
             //Clear the global histogram
-            cmd.SetComputeBufferParam(m_CS, m_kernelInitDeviceRadixSort, "b_globalHist", args.resources.globalHistBuffer);
-            cmd.DispatchCompute(m_CS, m_kernelInitDeviceRadixSort, 1, 1, 1);
+            cmd.SetComputeBufferParam(_cs, _kernelInit, "b_globalHist", args.resources.globalHistBuffer);
+            cmd.DispatchCompute(_cs, _kernelInit, 1, 1, 1);
 
             // Execute the sort algorithm in 8-bit increments
             for (constants.radixShift = 0; constants.radixShift < 32; constants.radixShift += DEVICE_RADIX_SORT_BITS)
             {
-                cmd.SetComputeIntParam(m_CS, "e_radixShift", (int)constants.radixShift);
+                cmd.SetComputeIntParam(_cs, "e_radixShift", (int)constants.radixShift);
 
                 //Upsweep
-                cmd.SetComputeBufferParam(m_CS, m_kernelUpsweep, "b_sort", srcKeyBuffer);
-                cmd.DispatchCompute(m_CS, m_kernelUpsweep, (int)constants.threadBlocks, 1, 1);
+                cmd.SetComputeBufferParam(_cs, _kernelUpsweep, "b_sort", srcKeyBuffer);
+                cmd.DispatchCompute(_cs, _kernelUpsweep, (int)constants.threadBlocks, 1, 1);
 
                 // Scan
-                cmd.DispatchCompute(m_CS, m_kernelScan, (int)DEVICE_RADIX_SORT_RADIX, 1, 1);
+                cmd.DispatchCompute(_cs, _kernelScan, (int)DEVICE_RADIX_SORT_RADIX, 1, 1);
 
                 // Downsweep
-                cmd.SetComputeBufferParam(m_CS, m_kernelDownsweep, "b_sort", srcKeyBuffer);
-                cmd.SetComputeBufferParam(m_CS, m_kernelDownsweep, "b_sortPayload", srcPayloadBuffer);
-                cmd.SetComputeBufferParam(m_CS, m_kernelDownsweep, "b_alt", dstKeyBuffer);
-                cmd.SetComputeBufferParam(m_CS, m_kernelDownsweep, "b_altPayload", dstPayloadBuffer);
-                cmd.DispatchCompute(m_CS, m_kernelDownsweep, (int)constants.threadBlocks, 1, 1);
+                cmd.SetComputeBufferParam(_cs, _kernelDownsweep, "b_sort", srcKeyBuffer);
+                cmd.SetComputeBufferParam(_cs, _kernelDownsweep, "b_sortPayload", srcPayloadBuffer);
+                cmd.SetComputeBufferParam(_cs, _kernelDownsweep, "b_alt", dstKeyBuffer);
+                cmd.SetComputeBufferParam(_cs, _kernelDownsweep, "b_altPayload", dstPayloadBuffer);
+                cmd.DispatchCompute(_cs, _kernelDownsweep, (int)constants.threadBlocks, 1, 1);
 
                 // Swap
                 (srcKeyBuffer, dstKeyBuffer) = (dstKeyBuffer, srcKeyBuffer);

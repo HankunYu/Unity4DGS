@@ -5,27 +5,28 @@ using Unity.Collections.LowLevel.Unsafe;
 using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
+using UnityEngine.Serialization;
 
 namespace GaussianSplatting.Runtime
 {
     public class GaussianSplatAsset : ScriptableObject
     {
-        public const int kCurrentVersion = 2023_10_20;
-        public const int kChunkSize = 256;
-        public const int kTextureWidth = 2048; // allows up to 32M splats on desktop GPU (2k width x 16k height)
-        public const int kMaxSplats = 8_600_000; // mostly due to 2GB GPU buffer size limit when exporting a splat (2GB / 248B is just over 8.6M)
+        public const int CurrentVersion = 2023_10_20;
+        public const int ChunkSize = 256;
+        public const int TextureWidth = 2048; // allows up to 32M splats on desktop GPU (2k width x 16k height)
+        public const int MaxSplats = 8_600_000; // mostly due to 2GB GPU buffer size limit when exporting a splat (2GB / 248B is just over 8.6M)
 
-        [SerializeField] int m_FormatVersion;
-        [SerializeField] int m_SplatCount;
-        [SerializeField] Vector3 m_BoundsMin;
-        [SerializeField] Vector3 m_BoundsMax;
-        [SerializeField] Hash128 m_DataHash;
+        [SerializeField, FormerlySerializedAs("m_FormatVersion")] private int _formatVersion;
+        [SerializeField, FormerlySerializedAs("m_SplatCount")] private int _splatCount;
+        [SerializeField, FormerlySerializedAs("m_BoundsMin")] private Vector3 _boundsMin;
+        [SerializeField, FormerlySerializedAs("m_BoundsMax")] private Vector3 _boundsMax;
+        [SerializeField, FormerlySerializedAs("m_DataHash")] private Hash128 _dataHash;
 
-        public int formatVersion => m_FormatVersion;
-        public int splatCount => m_SplatCount;
-        public Vector3 boundsMin => m_BoundsMin;
-        public Vector3 boundsMax => m_BoundsMax;
-        public Hash128 dataHash => m_DataHash;
+        public int formatVersion => _formatVersion;
+        public int splatCount => _splatCount;
+        public Vector3 boundsMin => _boundsMin;
+        public Vector3 boundsMax => _boundsMax;
+        public Hash128 dataHash => _dataHash;
 
         // Match VECTOR_FMT_* in HLSL
         public enum VectorFormat
@@ -102,29 +103,29 @@ namespace GaussianSplatting.Runtime
 
         public void Initialize(int splats, VectorFormat formatPos, VectorFormat formatScale, ColorFormat formatColor, SHFormat formatSh, Vector3 bMin, Vector3 bMax, CameraInfo[] cameraInfos)
         {
-            m_SplatCount = splats;
-            m_FormatVersion = kCurrentVersion;
-            m_PosFormat = formatPos;
-            m_ScaleFormat = formatScale;
-            m_ColorFormat = formatColor;
-            m_SHFormat = formatSh;
-            m_Cameras = cameraInfos;
-            m_BoundsMin = bMin;
-            m_BoundsMax = bMax;
+            _splatCount = splats;
+            _formatVersion = CurrentVersion;
+            _posFormat = formatPos;
+            _scaleFormat = formatScale;
+            _colorFormat = formatColor;
+            _shFormat = formatSh;
+            _cameras = cameraInfos;
+            _boundsMin = bMin;
+            _boundsMax = bMax;
         }
 
         public void SetDataHash(Hash128 hash)
         {
-            m_DataHash = hash;
+            _dataHash = hash;
         }
 
         public void SetAssetFiles(TextAsset dataChunk, TextAsset dataPos, TextAsset dataOther, TextAsset dataColor, TextAsset dataSh)
         {
-            m_ChunkData = dataChunk;
-            m_PosData = dataPos;
-            m_OtherData = dataOther;
-            m_ColorData = dataColor;
-            m_SHData = dataSh;
+            _chunkData = dataChunk;
+            _posData = dataPos;
+            _otherData = dataOther;
+            _colorData = dataColor;
+            _shData = dataSh;
         }
 
         public static int GetOtherSizeNoSHIndex(VectorFormat scaleFormat)
@@ -151,7 +152,7 @@ namespace GaussianSplatting.Runtime
 
         public static (int,int) CalcTextureSize(int splatCount)
         {
-            int width = kTextureWidth;
+            int width = TextureWidth;
             int height = math.max(1, (splatCount + width - 1) / width);
             // our swizzle tiles are 16x16, so make texture multiple of that height
             int blockHeight = 16;
@@ -198,35 +199,35 @@ namespace GaussianSplatting.Runtime
         }
         public static long CalcChunkDataSize(int splatCount)
         {
-            int chunkCount = (splatCount + kChunkSize - 1) / kChunkSize;
+            int chunkCount = (splatCount + ChunkSize - 1) / ChunkSize;
             return chunkCount * UnsafeUtility.SizeOf<ChunkInfo>();
         }
 
-        [SerializeField] VectorFormat m_PosFormat = VectorFormat.Norm11;
-        [SerializeField] VectorFormat m_ScaleFormat = VectorFormat.Norm11;
-        [SerializeField] SHFormat m_SHFormat = SHFormat.Norm11;
-        [SerializeField] ColorFormat m_ColorFormat;
+        [SerializeField, FormerlySerializedAs("m_PosFormat")] private VectorFormat _posFormat = VectorFormat.Norm11;
+        [SerializeField, FormerlySerializedAs("m_ScaleFormat")] private VectorFormat _scaleFormat = VectorFormat.Norm11;
+        [SerializeField, FormerlySerializedAs("m_SHFormat")] private SHFormat _shFormat = SHFormat.Norm11;
+        [SerializeField, FormerlySerializedAs("m_ColorFormat")] private ColorFormat _colorFormat;
 
-        [SerializeField] TextAsset m_PosData;
-        [SerializeField] TextAsset m_ColorData;
-        [SerializeField] TextAsset m_OtherData;
-        [SerializeField] TextAsset m_SHData;
+        [SerializeField, FormerlySerializedAs("m_PosData")] private TextAsset _posData;
+        [SerializeField, FormerlySerializedAs("m_ColorData")] private TextAsset _colorData;
+        [SerializeField, FormerlySerializedAs("m_OtherData")] private TextAsset _otherData;
+        [SerializeField, FormerlySerializedAs("m_SHData")] private TextAsset _shData;
         // Chunk data is optional (if data formats are fully lossless then there's no chunking)
-        [SerializeField] TextAsset m_ChunkData;
+        [SerializeField, FormerlySerializedAs("m_ChunkData")] private TextAsset _chunkData;
 
-        [SerializeField] CameraInfo[] m_Cameras;
+        [SerializeField, FormerlySerializedAs("m_Cameras")] private CameraInfo[] _cameras;
 
-        public VectorFormat posFormat => m_PosFormat;
-        public VectorFormat scaleFormat => m_ScaleFormat;
-        public SHFormat shFormat => m_SHFormat;
-        public ColorFormat colorFormat => m_ColorFormat;
+        public VectorFormat posFormat => _posFormat;
+        public VectorFormat scaleFormat => _scaleFormat;
+        public SHFormat shFormat => _shFormat;
+        public ColorFormat colorFormat => _colorFormat;
 
-        public TextAsset posData => m_PosData;
-        public TextAsset colorData => m_ColorData;
-        public TextAsset otherData => m_OtherData;
-        public TextAsset shData => m_SHData;
-        public TextAsset chunkData => m_ChunkData;
-        public CameraInfo[] cameras => m_Cameras;
+        public TextAsset posData => _posData;
+        public TextAsset colorData => _colorData;
+        public TextAsset otherData => _otherData;
+        public TextAsset shData => _shData;
+        public TextAsset chunkData => _chunkData;
+        public CameraInfo[] cameras => _cameras;
 
         public struct ChunkInfo
         {

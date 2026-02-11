@@ -270,7 +270,7 @@ namespace GaussianSplatting.Runtime
             // Create sorter from renderer's radix sort compute shader
             if (_mortonSorter == null)
             {
-                var sortCs = _renderer.m_CSSplatUtilities;
+                var sortCs = _renderer.csSplatUtilities;
                 if (sortCs == null) return;
                 _mortonSorter = new GpuSorting(sortCs);
             }

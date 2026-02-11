@@ -16,25 +16,25 @@ public class GaussianPlayer : MonoBehaviour
     public bool isPlaying = true;
 
     public GaussianSplatAsset[] assetList;
-    private GaussianSplatRenderer gsRender;
+    private GaussianSplatRenderer _gsRender;
     public int currentFrame = 0;
-    private float timer = 0f;
-    private float frameInterval;
+    private float _timer = 0f;
+    private float _frameInterval;
 
-    void Start()
+    private void Start()
     {
         Init();
     }
     public void Init()
     {
-        gsRender = GetComponent<GaussianSplatRenderer>();
-        frameInterval = 1f / frameRate;
+        _gsRender = GetComponent<GaussianSplatRenderer>();
+        _frameInterval = 1f / frameRate;
 
         // load assets
         if (resourceFolder != "")
         {
             assetList = Resources.LoadAll<GaussianSplatAsset>(resourceFolder);
-            Debug.Log($"Loaded {assetList.Length} frames from Resources/{resourceFolder}");
+            Debug.Log($"[GaussianPlayer] Loaded {assetList.Length} frames from Resources/{resourceFolder}");
             if (assetList.Length == 0)
             {
                 Debug.LogError("No frames found!");
@@ -57,12 +57,8 @@ public class GaussianPlayer : MonoBehaviour
                         chunkDataMaxSize = asset.chunkData.dataSize > chunkDataMaxSize ? asset.chunkData.dataSize : chunkDataMaxSize;
                     splatCountMaxSize = asset.splatCount > splatCountMaxSize ? asset.splatCount : posDataMaxSize;
                 }
-                Debug.Log($"posDataMaxSize: {posDataMaxSize}\n" +
-                    $"otherDataMaxSize: {otherDataMaxSize}\n" +
-                    $"shDataMaxSize: {shDataMaxSize}\n" +
-                    $"chunkDataMaxSize: {chunkDataMaxSize}\n" +
-                    $"splatCountMaxSize: {splatCountMaxSize}");
-                gsRender.InitResourcesForAssets(posDataMaxSize, otherDataMaxSize, shDataMaxSize, chunkDataMaxSize, splatCountMaxSize);
+                Debug.Log($"[GaussianPlayer] Max buffer sizes — pos:{posDataMaxSize} other:{otherDataMaxSize} sh:{shDataMaxSize} chunk:{chunkDataMaxSize} splats:{splatCountMaxSize}");
+                _gsRender.InitResourcesForAssets(posDataMaxSize, otherDataMaxSize, shDataMaxSize, chunkDataMaxSize, splatCountMaxSize);
             }
             if (endFrame < 0 || endFrame >= assetList.Length)
                 endFrame = assetList.Length - 1;
@@ -72,8 +68,8 @@ public class GaussianPlayer : MonoBehaviour
 
             if (assetList.Length > 0)
             {
-                gsRender.m_Asset = assetList[0];
-                gsRender.m_NextAsset = assetList[0];
+                _gsRender.splatAsset = assetList[0];
+                _gsRender.nextAsset = assetList[0];
             }
         }
         else
@@ -103,15 +99,15 @@ public class GaussianPlayer : MonoBehaviour
         Play();
     }
 
-    void Update()
+    private void Update()
     {
         if (isPlaying && assetList.Length>0)
         {
             if (endFrame == 0) return;
-            timer += Time.deltaTime;
-            if (timer >= frameInterval)
+            _timer += Time.deltaTime;
+            if (_timer >= _frameInterval)
             {
-                timer -= frameInterval;
+                _timer -= _frameInterval;
                 NextFrame();
             }
         }
@@ -120,7 +116,7 @@ public class GaussianPlayer : MonoBehaviour
     private void NextFrame()
     {
         //gsRender.m_Asset = assetList[currentFrame];
-        gsRender.m_NextAsset = assetList[currentFrame];
+        _gsRender.nextAsset = assetList[currentFrame];
 
         currentFrame++;
 

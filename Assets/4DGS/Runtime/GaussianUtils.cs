@@ -13,8 +13,8 @@ namespace GaussianSplatting.Runtime
 
         public static float3 SH0ToColor(float3 dc0)
         {
-            const float kSH_C0 = 0.2820948f;
-            return dc0 * kSH_C0 + 0.5f;
+            const float ShC0 = 0.2820948f;
+            return dc0 * ShC0 + 0.5f;
         }
 
         public static float3 LinearScale(float3 logScale)

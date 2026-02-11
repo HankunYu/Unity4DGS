@@ -1,10 +1,5 @@
-// SPDX-License-Identifier: MIT
-
-using System.Collections.Generic;
 using Unity.Collections;
-using Unity.Collections.LowLevel.Unsafe;
 using UnityEngine;
-using UnityEngine.Rendering;
 
 namespace GaussianSplatting.Runtime
 {
@@ -24,90 +19,90 @@ namespace GaussianSplatting.Runtime
         [Tooltip("Animation compute shader (GaussianAnimate.compute)")]
         public ComputeShader animateShader;
 
-        GaussianSplatRenderer m_Renderer;
-        GraphicsBuffer m_AnimOutputBuffer;
+        private GaussianSplatRenderer _renderer;
+        private GraphicsBuffer _animOutputBuffer;
 
         // Structured buffers for GPU upload
-        GraphicsBuffer m_VolumeBuffer;
-        GraphicsBuffer m_ModifierBuffer;
+        private GraphicsBuffer _volumeBuffer;
+        private GraphicsBuffer _modifierBuffer;
 
-        int m_KernelAnimate = -1;
-        int m_LastSplatCount;
+        private int _kernelAnimate = -1;
+        private int _lastSplatCount;
 
         // Cached shader property IDs
-        static readonly int PropAnimVolumes = Shader.PropertyToID("_AnimVolumes");
-        static readonly int PropAnimModifiers = Shader.PropertyToID("_AnimModifiers");
-        static readonly int PropAnimVolumeCount = Shader.PropertyToID("_AnimVolumeCount");
-        static readonly int PropAnimModifierCount = Shader.PropertyToID("_AnimModifierCount");
-        static readonly int PropAnimSplatCount = Shader.PropertyToID("_AnimSplatCount");
-        static readonly int PropAnimSplatFormat = Shader.PropertyToID("_AnimSplatFormat");
-        static readonly int PropAnimChunkCount = Shader.PropertyToID("_AnimChunkCount");
-        static readonly int PropAnimSplatPos = Shader.PropertyToID("_AnimSplatPos");
-        static readonly int PropAnimSplatChunks = Shader.PropertyToID("_AnimSplatChunks");
-        static readonly int PropAnimOutput = Shader.PropertyToID("_AnimOutput");
-        static readonly int PropAnimMatrixO2W = Shader.PropertyToID("_AnimMatrixObjectToWorld");
+        private static readonly int PropAnimVolumes = Shader.PropertyToID("_AnimVolumes");
+        private static readonly int PropAnimModifiers = Shader.PropertyToID("_AnimModifiers");
+        private static readonly int PropAnimVolumeCount = Shader.PropertyToID("_AnimVolumeCount");
+        private static readonly int PropAnimModifierCount = Shader.PropertyToID("_AnimModifierCount");
+        private static readonly int PropAnimSplatCount = Shader.PropertyToID("_AnimSplatCount");
+        private static readonly int PropAnimSplatFormat = Shader.PropertyToID("_AnimSplatFormat");
+        private static readonly int PropAnimChunkCount = Shader.PropertyToID("_AnimChunkCount");
+        private static readonly int PropAnimSplatPos = Shader.PropertyToID("_AnimSplatPos");
+        private static readonly int PropAnimSplatChunks = Shader.PropertyToID("_AnimSplatChunks");
+        private static readonly int PropAnimOutput = Shader.PropertyToID("_AnimOutput");
+        private static readonly int PropAnimMatrixO2W = Shader.PropertyToID("_AnimMatrixObjectToWorld");
 
         // Must match struct sizes in compute shader
-        const int kVolumeSizeBytes = 64 + 16 + 16; // float4x4 + float4 + float4 = 96
-        const int kModifierSizeBytes = 16 + 16 + 16 + 16 + 16; // 2 ints + 2 floats + 4 float4s = 80
+        const int VolumeSizeBytes = 64 + 16 + 16; // float4x4 + float4 + float4 = 96
+        const int ModifierSizeBytes = 16 + 16 + 16 + 16 + 16; // 2 ints + 2 floats + 4 float4s = 80
 
-        const int kMaxVolumes = 16;
-        const int kMaxModifiers = 64;
+        const int MaxVolumes = 16;
+        const int MaxModifiers = 64;
 
-        void OnEnable()
+        private void OnEnable()
         {
-            m_Renderer = GetComponent<GaussianSplatRenderer>();
+            _renderer = GetComponent<GaussianSplatRenderer>();
         }
 
-        void OnDisable()
+        private void OnDisable()
         {
             ReleaseBuffers();
-            if (m_Renderer != null)
-                m_Renderer.m_AnimOutputBuffer = null;
+            if (_renderer != null)
+                _renderer._animOutputBuffer = null;
         }
 
-        void ReleaseBuffers()
+        private void ReleaseBuffers()
         {
-            m_AnimOutputBuffer?.Dispose();
-            m_AnimOutputBuffer = null;
-            m_VolumeBuffer?.Dispose();
-            m_VolumeBuffer = null;
-            m_ModifierBuffer?.Dispose();
-            m_ModifierBuffer = null;
-            m_KernelAnimate = -1;
+            _animOutputBuffer?.Dispose();
+            _animOutputBuffer = null;
+            _volumeBuffer?.Dispose();
+            _volumeBuffer = null;
+            _modifierBuffer?.Dispose();
+            _modifierBuffer = null;
+            _kernelAnimate = -1;
         }
 
-        void LateUpdate()
+        private void LateUpdate()
         {
-            if (m_Renderer == null || !m_Renderer.HasValidAsset || !m_Renderer.HasValidRenderSetup)
+            if (_renderer == null || !_renderer.HasValidAsset || !_renderer.HasValidRenderSetup)
             {
-                if (m_Renderer != null)
-                    m_Renderer.m_AnimOutputBuffer = null;
+                if (_renderer != null)
+                    _renderer._animOutputBuffer = null;
                 return;
             }
 
             if (animateShader == null)
             {
-                m_Renderer.m_AnimOutputBuffer = null;
+                _renderer._animOutputBuffer = null;
                 return;
             }
 
             // Collect active volumes and their modifiers
             if (volumes == null || volumes.Length == 0)
             {
-                m_Renderer.m_AnimOutputBuffer = null;
+                _renderer._animOutputBuffer = null;
                 return;
             }
 
             // Count active volumes and modifiers
             int volumeCount = 0;
             int modifierCount = 0;
-            for (int i = 0; i < volumes.Length && volumeCount < kMaxVolumes; i++)
+            for (int i = 0; i < volumes.Length && volumeCount < MaxVolumes; i++)
             {
                 if (volumes[i] == null || !volumes[i].isActiveAndEnabled) continue;
                 volumeCount++;
                 var mods = volumes[i].GetModifiers();
-                for (int j = 0; j < mods.Length && modifierCount < kMaxModifiers; j++)
+                for (int j = 0; j < mods.Length && modifierCount < MaxModifiers; j++)
                 {
                     if (mods[j] != null && mods[j].isActiveAndEnabled)
                         modifierCount++;
@@ -116,14 +111,14 @@ namespace GaussianSplatting.Runtime
 
             if (volumeCount == 0 || modifierCount == 0)
             {
-                m_Renderer.m_AnimOutputBuffer = null;
+                _renderer._animOutputBuffer = null;
                 return;
             }
 
-            int splatCount = m_Renderer.splatCount;
+            int splatCount = _renderer.splatCount;
             EnsureBuffers(splatCount, volumeCount, modifierCount);
 
-            if (m_KernelAnimate < 0)
+            if (_kernelAnimate < 0)
                 return;
 
             // Upload volume data
@@ -133,52 +128,52 @@ namespace GaussianSplatting.Runtime
             DispatchAnimation(splatCount, volumeCount, modifierCount);
 
             // Set the output buffer on the renderer so CalcViewData can read it
-            m_Renderer.m_AnimOutputBuffer = m_AnimOutputBuffer;
+            _renderer._animOutputBuffer = _animOutputBuffer;
         }
 
-        void EnsureBuffers(int splatCount, int volumeCount, int modifierCount)
+        private void EnsureBuffers(int splatCount, int volumeCount, int modifierCount)
         {
             // Find kernel
-            if (m_KernelAnimate < 0)
+            if (_kernelAnimate < 0)
             {
                 if (!animateShader.HasKernel("CSAnimateSplats"))
                     return;
-                m_KernelAnimate = animateShader.FindKernel("CSAnimateSplats");
+                _kernelAnimate = animateShader.FindKernel("CSAnimateSplats");
             }
 
             // Animation output: 3 float4s per splat
-            if (m_AnimOutputBuffer == null || m_LastSplatCount < splatCount)
+            if (_animOutputBuffer == null || _lastSplatCount < splatCount)
             {
-                m_AnimOutputBuffer?.Dispose();
-                m_AnimOutputBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, splatCount * 3, 16)
+                _animOutputBuffer?.Dispose();
+                _animOutputBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, splatCount * 3, 16)
                 {
                     name = "GaussianAnimOutput"
                 };
-                m_LastSplatCount = splatCount;
+                _lastSplatCount = splatCount;
             }
 
             // Volume buffer
-            if (m_VolumeBuffer == null || m_VolumeBuffer.count < volumeCount)
+            if (_volumeBuffer == null || _volumeBuffer.count < volumeCount)
             {
-                m_VolumeBuffer?.Dispose();
-                m_VolumeBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Mathf.Max(volumeCount, 1), kVolumeSizeBytes)
+                _volumeBuffer?.Dispose();
+                _volumeBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Mathf.Max(volumeCount, 1), VolumeSizeBytes)
                 {
                     name = "GaussianAnimVolumes"
                 };
             }
 
             // Modifier buffer
-            if (m_ModifierBuffer == null || m_ModifierBuffer.count < modifierCount)
+            if (_modifierBuffer == null || _modifierBuffer.count < modifierCount)
             {
-                m_ModifierBuffer?.Dispose();
-                m_ModifierBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Mathf.Max(modifierCount, 1), kModifierSizeBytes)
+                _modifierBuffer?.Dispose();
+                _modifierBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, Mathf.Max(modifierCount, 1), ModifierSizeBytes)
                 {
                     name = "GaussianAnimModifiers"
                 };
             }
         }
 
-        void UploadVolumeAndModifierData(int volumeCount, int modifierCount)
+        private void UploadVolumeAndModifierData(int volumeCount, int modifierCount)
         {
             // Pack volume data
             var volData = new NativeArray<GaussianAnimVolume.ShaderData>(volumeCount, Allocator.Temp);
@@ -193,13 +188,13 @@ namespace GaussianSplatting.Runtime
 
             int vi = 0;
             int mi = 0;
-            for (int i = 0; i < volumes.Length && vi < kMaxVolumes; i++)
+            for (int i = 0; i < volumes.Length && vi < MaxVolumes; i++)
             {
                 if (volumes[i] == null || !volumes[i].isActiveAndEnabled) continue;
                 volData[vi] = volumes[i].GetShaderData();
 
                 var mods = volumes[i].GetModifiers();
-                for (int j = 0; j < mods.Length && mi < kMaxModifiers; j++)
+                for (int j = 0; j < mods.Length && mi < MaxModifiers; j++)
                 {
                     if (mods[j] == null || !mods[j].isActiveAndEnabled) continue;
                     mods[j].FillParams(time, out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3);
@@ -219,36 +214,36 @@ namespace GaussianSplatting.Runtime
                 vi++;
             }
 
-            m_VolumeBuffer.SetData(volData, 0, 0, volumeCount);
-            m_ModifierBuffer.SetData(modData, 0, 0, modifierCount);
+            _volumeBuffer.SetData(volData, 0, 0, volumeCount);
+            _modifierBuffer.SetData(modData, 0, 0, modifierCount);
 
             volData.Dispose();
             modData.Dispose();
         }
 
-        void DispatchAnimation(int splatCount, int volumeCount, int modifierCount)
+        private void DispatchAnimation(int splatCount, int volumeCount, int modifierCount)
         {
             var cs = animateShader;
-            int kernel = m_KernelAnimate;
+            int kernel = _kernelAnimate;
 
-            cs.SetBuffer(kernel, PropAnimVolumes, m_VolumeBuffer);
-            cs.SetBuffer(kernel, PropAnimModifiers, m_ModifierBuffer);
-            cs.SetBuffer(kernel, PropAnimOutput, m_AnimOutputBuffer);
+            cs.SetBuffer(kernel, PropAnimVolumes, _volumeBuffer);
+            cs.SetBuffer(kernel, PropAnimModifiers, _modifierBuffer);
+            cs.SetBuffer(kernel, PropAnimOutput, _animOutputBuffer);
             cs.SetInt(PropAnimVolumeCount, volumeCount);
             cs.SetInt(PropAnimModifierCount, modifierCount);
             cs.SetInt(PropAnimSplatCount, splatCount);
 
-            var asset = m_Renderer.asset;
+            var asset = _renderer.asset;
             uint format = (uint)asset.posFormat | ((uint)asset.scaleFormat << 8) | ((uint)asset.shFormat << 16);
             cs.SetInt(PropAnimSplatFormat, (int)format);
 
-            bool hasChunks = m_Renderer.m_GpuChunksValid;
-            int chunkCount = hasChunks ? m_Renderer.m_GpuChunks.count : 0;
+            bool hasChunks = _renderer._gpuChunksValid;
+            int chunkCount = hasChunks ? _renderer._gpuChunks.count : 0;
             cs.SetInt(PropAnimChunkCount, chunkCount);
 
             // Set original pos buffer and chunk data
-            cs.SetBuffer(kernel, PropAnimSplatPos, m_Renderer.GpuPosData);
-            cs.SetBuffer(kernel, PropAnimSplatChunks, m_Renderer.m_GpuChunks);
+            cs.SetBuffer(kernel, PropAnimSplatPos, _renderer.GpuPosData);
+            cs.SetBuffer(kernel, PropAnimSplatChunks, _renderer._gpuChunks);
 
             cs.SetMatrix(PropAnimMatrixO2W, transform.localToWorldMatrix);
 

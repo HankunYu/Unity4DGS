@@ -72,7 +72,7 @@ namespace GaussianSplatting.Runtime
         }
 
 #if UNITY_EDITOR
-        void OnDrawGizmos()
+        private void OnDrawGizmos()
         {
             Gizmos.matrix = transform.localToWorldMatrix;
             var color = Color.cyan;
