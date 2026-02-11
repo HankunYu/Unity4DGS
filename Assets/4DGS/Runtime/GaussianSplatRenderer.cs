@@ -525,6 +525,10 @@ namespace GaussianSplatting.Runtime
 
         // Set by GaussianAnimator: per-splat animation output (3 float4s per splat)
         internal GraphicsBuffer m_AnimOutputBuffer;
+        // Set by GaussianMorph: pre-blended splat data (4 float4s per splat)
+        internal GraphicsBuffer m_MorphedDataBuffer;
+        internal int m_MorphDataValid;
+        internal int m_MorphedSplatCount;
         Texture m_GpuColorData;
         internal GraphicsBuffer m_GpuChunks;
         internal bool m_GpuChunksValid;
@@ -610,6 +614,8 @@ namespace GaussianSplatting.Runtime
             public static readonly int CopyWriteKeys = Shader.PropertyToID("_CopyWriteKeys");
             public static readonly int AnimOutputData = Shader.PropertyToID("_AnimOutputData");
             public static readonly int AnimDataValid = Shader.PropertyToID("_AnimDataValid");
+            public static readonly int MorphedData = Shader.PropertyToID("_MorphedData");
+            public static readonly int MorphDataValid = Shader.PropertyToID("_MorphDataValid");
         }
 
         [field: NonSerialized] public bool editModified { get; private set; }
@@ -621,6 +627,19 @@ namespace GaussianSplatting.Runtime
         public GaussianSplatAsset asset => m_Asset;
         public int splatCount => m_SplatCount;
         internal GraphicsBuffer GpuPosData => m_GpuPosData;
+        internal GraphicsBuffer GpuOtherData => m_GpuOtherData;
+        internal GraphicsBuffer GpuSHData => m_GpuSHData;
+        internal Texture GpuColorData => m_GpuColorData;
+        internal GraphicsBuffer GpuChunksBuffer => m_GpuChunks;
+        internal bool GpuChunksValid => m_GpuChunksValid;
+
+        internal void SetMorphData(GraphicsBuffer morphedData, int splatCount, int valid)
+        {
+            m_MorphedDataBuffer = morphedData;
+            // Clamp to current view buffer capacity to avoid out-of-bounds
+            m_MorphedSplatCount = m_GpuView != null ? Mathf.Min(splatCount, m_GpuView.count) : splatCount;
+            m_MorphDataValid = valid;
+        }
 
         enum KernelIndices
         {
@@ -948,7 +967,9 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeIntParam(cs, Props.SplatBitsValid, m_GpuEditSelected != null && m_GpuEditDeleted != null ? 1 : 0);
             uint format = (uint)m_Asset.posFormat | ((uint)m_Asset.scaleFormat << 8) | ((uint)m_Asset.shFormat << 16);
             cmb.SetComputeIntParam(cs, Props.SplatFormat, (int)format);
-            cmb.SetComputeIntParam(cs, Props.SplatCount, m_SplatCount);
+            int effectiveSplatCount = (m_MorphedDataBuffer != null && m_MorphDataValid != 0 && m_MorphedSplatCount > 0)
+                ? m_MorphedSplatCount : m_SplatCount;
+            cmb.SetComputeIntParam(cs, Props.SplatCount, effectiveSplatCount);
             cmb.SetComputeIntParam(cs, Props.SplatChunkCount, m_GpuChunksValid ? m_GpuChunks.count : 0);
 
             UpdateCutoutsBuffer();
@@ -960,6 +981,11 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeIntParam(cs, Props.AnimDataValid, hasAnim ? 1 : 0);
             // Always bind a valid buffer to avoid shader errors
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.AnimOutputData, hasAnim ? m_AnimOutputBuffer : m_GpuView);
+
+            // Morph data binding
+            bool hasMorph = m_MorphedDataBuffer != null && m_MorphDataValid != 0;
+            cmb.SetComputeIntParam(cs, Props.MorphDataValid, hasMorph ? 1 : 0);
+            cmb.SetComputeBufferParam(cs, kernelIndex, Props.MorphedData, hasMorph ? m_MorphedDataBuffer : m_GpuView);
         }
 
         internal void SetAssetDataOnMaterial(MaterialPropertyBlock mat)
@@ -1061,7 +1087,8 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeIntParam(m_CSSplatUtilities, Props.SHOnly, m_SHOnly ? 1 : 0);
 
             m_CSSplatUtilities.GetKernelThreadGroupSizes(kernelIndex, out uint gsX, out _, out _);
-            cmb.DispatchCompute(m_CSSplatUtilities, kernelIndex, (m_GpuView.count + (int)gsX - 1)/(int)gsX, 1, 1);
+            int dispatchCount = (m_MorphDataValid != 0 && m_MorphedSplatCount > 0) ? m_MorphedSplatCount : m_GpuView.count;
+            cmb.DispatchCompute(m_CSSplatUtilities, kernelIndex, (dispatchCount + (int)gsX - 1)/(int)gsX, 1, 1);
             return true;
         }
 
