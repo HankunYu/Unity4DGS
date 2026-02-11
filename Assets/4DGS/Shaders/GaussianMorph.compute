@@ -46,45 +46,14 @@ uint _UseCorrespondence;
 // [3]: color.rgb, 1
 RWStructuredBuffer<float4> _MorphOutput;
 
-// ── Morton code kernel buffers (bound per-dispatch) ──
-ByteAddressBuffer _MortonPosBuf;
-StructuredBuffer<SplatChunkData> _MortonChunkBuf;
-uint _MortonFormat;
-uint _MortonChunkCount;
-uint _MortonSplatCount;
-float3 _BoundsMin;
-float3 _BoundsMax;
+// ── Morton code + correspondence buffers ──
+float4 _BoundsMin;
+float4 _BoundsMax;
 RWStructuredBuffer<uint> _MortonCodes;
 RWStructuredBuffer<uint> _MortonIndices;
-
-// ── Correspondence build buffers ──
 StructuredBuffer<uint> _SrcSorted;
 StructuredBuffer<uint> _TgtSorted;
 RWStructuredBuffer<uint> _CorrespondenceOut;
-
-// ── Position-only decode (lightweight, avoids full SplatDecodeFromBuffers) ──
-
-float3 DecodeSplatPosition(
-    ByteAddressBuffer posBuf,
-    StructuredBuffer<SplatChunkData> chunks,
-    uint chunkCount,
-    uint idx,
-    uint posFmt)
-{
-    uint posStride = SplatGetVectorStride(posFmt);
-    float3 pos = SplatDecodeVector(posBuf, idx * posStride, posFmt);
-
-    uint chunkIdx = idx / kSplatChunkSize;
-    if (chunkIdx < chunkCount)
-    {
-        SplatChunkData chunk = chunks[chunkIdx];
-        float3 posMin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
-        float3 posMax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
-        pos = lerp(posMin, posMax, pos);
-    }
-
-    return pos;
-}
 
 // ── Morton code helpers ──
 
@@ -99,25 +68,27 @@ uint MortonExpandBits(uint v)
 
 uint Morton3D(float3 pos, float3 bmin, float3 bmax)
 {
-    float3 n = saturate((pos - bmin) / max(bmax - bmin, 1e-6));
-    uint3 q = (uint3)(n * 1023.0);
+    float3 extent = max(bmax - bmin, 1e-6);
+    float3 n = saturate((pos - bmin) / extent);
+    uint3 q = min((uint3)(n * 1023.0), 1023);
     return MortonExpandBits(q.x) | (MortonExpandBits(q.y) << 1) | (MortonExpandBits(q.z) << 2);
 }
 
 // ── Kernel: Compute Morton codes for an asset ──
+// Reuses _Src* buffers: bind source data for first pass, target data for second pass.
 
 [numthreads(GROUP_SIZE, 1, 1)]
 void CSComputeMorton(uint3 id : SV_DispatchThreadID)
 {
     uint idx = id.x;
-    if (idx >= _MortonSplatCount)
+    if (idx >= _SrcSplatCount)
         return;
 
-    float3 pos = DecodeSplatPosition(
-        _MortonPosBuf, _MortonChunkBuf,
-        _MortonChunkCount, idx, _MortonFormat);
+    DecodedSplat s = SplatDecodeFromBuffers(
+        _SrcPos, _SrcOther, _SrcSH, _SrcColor, _SrcChunks,
+        _SrcChunkCount, idx, _SrcFormat);
 
-    _MortonCodes[idx] = Morton3D(pos, _BoundsMin, _BoundsMax);
+    _MortonCodes[idx] = Morton3D(s.pos, _BoundsMin.xyz, _BoundsMax.xyz);
     _MortonIndices[idx] = idx;
 }
 

@@ -89,11 +89,6 @@ namespace GaussianSplatting.Runtime
         static readonly int PropCorrespondenceOut = Shader.PropertyToID("_CorrespondenceOut");
         static readonly int PropUseCorrespondence = Shader.PropertyToID("_UseCorrespondence");
 
-        static readonly int PropMortonPosBuf = Shader.PropertyToID("_MortonPosBuf");
-        static readonly int PropMortonChunkBuf = Shader.PropertyToID("_MortonChunkBuf");
-        static readonly int PropMortonFormat = Shader.PropertyToID("_MortonFormat");
-        static readonly int PropMortonChunkCount = Shader.PropertyToID("_MortonChunkCount");
-        static readonly int PropMortonSplatCount = Shader.PropertyToID("_MortonSplatCount");
         static readonly int PropBoundsMin = Shader.PropertyToID("_BoundsMin");
         static readonly int PropBoundsMax = Shader.PropertyToID("_BoundsMax");
         static readonly int PropMortonCodes = Shader.PropertyToID("_MortonCodes");
@@ -101,14 +96,20 @@ namespace GaussianSplatting.Runtime
         static readonly int PropSrcSorted = Shader.PropertyToID("_SrcSorted");
         static readonly int PropTgtSorted = Shader.PropertyToID("_TgtSorted");
 
+        static int FindKernelSafe(ComputeShader cs, string name)
+        {
+            try { return cs.FindKernel(name); }
+            catch { return -1; }
+        }
+
         void OnEnable()
         {
             m_Renderer = GetComponent<GaussianSplatRenderer>();
             if (morphShader != null)
             {
-                m_KernelMorph = morphShader.FindKernel("CSMorphSplats");
-                m_KernelMorton = morphShader.FindKernel("CSComputeMorton");
-                m_KernelCorrespondence = morphShader.FindKernel("CSBuildCorrespondence");
+                m_KernelMorph = FindKernelSafe(morphShader, "CSMorphSplats");
+                m_KernelMorton = FindKernelSafe(morphShader, "CSComputeMorton");
+                m_KernelCorrespondence = FindKernelSafe(morphShader, "CSBuildCorrespondence");
             }
         }
 
@@ -137,7 +138,7 @@ namespace GaussianSplatting.Runtime
             // Ensure kernel is found (shader reference may change at runtime)
             if (m_KernelMorph < 0)
             {
-                m_KernelMorph = morphShader.FindKernel("CSMorphSplats");
+                m_KernelMorph = FindKernelSafe(morphShader, "CSMorphSplats");
                 if (m_KernelMorph < 0)
                 {
                     DisableMorph();
@@ -249,11 +250,15 @@ namespace GaussianSplatting.Runtime
 
             // Ensure Morton/correspondence kernels are found
             if (m_KernelMorton < 0)
-                m_KernelMorton = morphShader.FindKernel("CSComputeMorton");
+                m_KernelMorton = FindKernelSafe(morphShader, "CSComputeMorton");
             if (m_KernelCorrespondence < 0)
-                m_KernelCorrespondence = morphShader.FindKernel("CSBuildCorrespondence");
+                m_KernelCorrespondence = FindKernelSafe(morphShader, "CSBuildCorrespondence");
             if (m_KernelMorton < 0 || m_KernelCorrespondence < 0)
+            {
+                Debug.LogWarning("GaussianMorph: Morton/Correspondence kernels not found in compute shader. " +
+                    "Check for shader compilation errors.");
                 return;
+            }
 
             // Create sorter from renderer's radix sort compute shader
             if (m_MortonSorter == null)
@@ -300,26 +305,42 @@ namespace GaussianSplatting.Runtime
             int mk = m_KernelMorton;
             var cs = morphShader;
 
-            // --- Compute Morton codes for source ---
-            cmd.SetComputeBufferParam(cs, mk, PropMortonPosBuf, m_Renderer.GpuPosData);
-            cmd.SetComputeBufferParam(cs, mk, PropMortonChunkBuf, m_Renderer.GpuChunksBuffer);
-            cmd.SetComputeIntParam(cs, PropMortonFormat, (int)srcAsset.posFormat);
-            cmd.SetComputeIntParam(cs, PropMortonChunkCount,
+            // Pack source format flags (same as morph kernel)
+            uint srcFormat = (uint)srcAsset.posFormat |
+                             ((uint)srcAsset.scaleFormat << 8) |
+                             ((uint)srcAsset.shFormat << 16);
+
+            // --- Compute Morton codes for source (bind source data to _Src* slots) ---
+            cmd.SetComputeBufferParam(cs, mk, PropSrcPos, m_Renderer.GpuPosData);
+            cmd.SetComputeBufferParam(cs, mk, PropSrcOther, m_Renderer.GpuOtherData);
+            cmd.SetComputeBufferParam(cs, mk, PropSrcSH, m_Renderer.GpuSHData);
+            cmd.SetComputeTextureParam(cs, mk, PropSrcColor, m_Renderer.GpuColorData);
+            cmd.SetComputeBufferParam(cs, mk, PropSrcChunks, m_Renderer.GpuChunksBuffer);
+            cmd.SetComputeIntParam(cs, PropSrcFormat, (int)srcFormat);
+            cmd.SetComputeIntParam(cs, PropSrcChunkCount,
                 m_Renderer.GpuChunksValid ? m_Renderer.GpuChunksBuffer.count : 0);
-            cmd.SetComputeIntParam(cs, PropMortonSplatCount, srcCount);
+            cmd.SetComputeIntParam(cs, PropSrcSplatCount, srcCount);
             cmd.SetComputeVectorParam(cs, PropBoundsMin, (Vector4)bmin);
             cmd.SetComputeVectorParam(cs, PropBoundsMax, (Vector4)bmax);
             cmd.SetComputeBufferParam(cs, mk, PropMortonCodes, srcMortonCodes);
             cmd.SetComputeBufferParam(cs, mk, PropMortonIndices, srcMortonIndices);
             cmd.DispatchCompute(cs, mk, (srcCount + kGroupSize - 1) / kGroupSize, 1, 1);
 
-            // --- Compute Morton codes for target ---
-            cmd.SetComputeBufferParam(cs, mk, PropMortonPosBuf, m_TgtPosData);
-            cmd.SetComputeBufferParam(cs, mk, PropMortonChunkBuf, m_TgtChunks);
-            cmd.SetComputeIntParam(cs, PropMortonFormat, (int)targetAsset.posFormat);
-            cmd.SetComputeIntParam(cs, PropMortonChunkCount,
+            // Pack target format flags
+            uint tgtFormat = (uint)targetAsset.posFormat |
+                             ((uint)targetAsset.scaleFormat << 8) |
+                             ((uint)targetAsset.shFormat << 16);
+
+            // --- Compute Morton codes for target (rebind target data to _Src* slots) ---
+            cmd.SetComputeBufferParam(cs, mk, PropSrcPos, m_TgtPosData);
+            cmd.SetComputeBufferParam(cs, mk, PropSrcOther, m_TgtOtherData);
+            cmd.SetComputeBufferParam(cs, mk, PropSrcSH, m_TgtSHData);
+            cmd.SetComputeTextureParam(cs, mk, PropSrcColor, m_TgtColorTex);
+            cmd.SetComputeBufferParam(cs, mk, PropSrcChunks, m_TgtChunks);
+            cmd.SetComputeIntParam(cs, PropSrcFormat, (int)tgtFormat);
+            cmd.SetComputeIntParam(cs, PropSrcChunkCount,
                 m_TgtChunksValid ? m_TgtChunks.count : 0);
-            cmd.SetComputeIntParam(cs, PropMortonSplatCount, tgtCount);
+            cmd.SetComputeIntParam(cs, PropSrcSplatCount, tgtCount);
             cmd.SetComputeBufferParam(cs, mk, PropMortonCodes, tgtMortonCodes);
             cmd.SetComputeBufferParam(cs, mk, PropMortonIndices, tgtMortonIndices);
             cmd.DispatchCompute(cs, mk, (tgtCount + kGroupSize - 1) / kGroupSize, 1, 1);
