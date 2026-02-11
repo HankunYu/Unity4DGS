@@ -48,6 +48,16 @@ int _SelectionMode;
 RWStructuredBuffer<uint> _SplatSortDistances;
 RWStructuredBuffer<uint> _SplatSortKeys;
 uint _SplatCount;
+uint _SrcSplatCount; // original source asset splat count (for morph OOB guard)
+
+// Morph data (set by GaussianMorph, 4 float4s per splat)
+// [0]: pos.xyz, opacity
+// [1]: rot.xyzw
+// [2]: scale.xyz, 0
+// [3]: color.rgb, 1
+StructuredBuffer<float4> _MorphedData;
+uint _MorphDataValid; // 0 = no morph, 1 = morph active
+float _MorphWeight;   // morph blend weight (0 = source, 1 = target)
 
 // radix sort etc. friendly, see http://stereopsis.com/radix.html
 uint FloatToSortableUint(float f)
@@ -76,7 +86,12 @@ void CSCalcDistances (uint3 id : SV_DispatchThreadID)
 
     uint origIdx = _SplatSortKeys[idx];
 
-    float3 pos = LoadSplatPos(origIdx);
+    // Use morphed position when morph is active, otherwise decode from source
+    float3 pos;
+    if (_MorphDataValid != 0)
+        pos = _MorphedData[origIdx * 4].xyz;
+    else
+        pos = LoadSplatPos(origIdx);
     pos = mul(_MatrixMV, float4(pos.xyz, 1)).xyz;
 
     _SplatSortDistances[idx] = FloatToSortableUint(pos.z);
@@ -102,14 +117,6 @@ uint _SplatCutoutsCount;
 // [2]: colorTint.rgb, 1
 StructuredBuffer<float4> _AnimOutputData;
 uint _AnimDataValid; // 0 = no animation, 1 = animation active
-
-// Morph data (set by GaussianMorph, 4 float4s per splat)
-// [0]: pos.xyz, opacity
-// [1]: rot.xyzw
-// [2]: scale.xyz, 0
-// [3]: color.rgb, 1
-StructuredBuffer<float4> _MorphedData;
-uint _MorphDataValid; // 0 = no morph, 1 = morph active
 
 #define SPLAT_CUTOUT_TYPE_ELLIPSOID 0
 #define SPLAT_CUTOUT_TYPE_BOX 1
@@ -223,8 +230,24 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID)
         float4 md2 = _MorphedData[mb + 2];
         float4 md3 = _MorphedData[mb + 3];
 
-        // Load SH from original compressed buffers first
-        splat = LoadSplatData(idx);
+        // Load SH from source only for indices within source range;
+        // target-only splats (idx >= _SrcSplatCount) get zeroed SH.
+        // Fade source SH by (1 - weight) since source SH doesn't match
+        // target geometry — at weight=1 only blended DC color is used.
+        if (idx < _SrcSplatCount)
+        {
+            splat = LoadSplatData(idx);
+            half shFade = (half)(1.0 - _MorphWeight);
+            splat.sh.sh1  *= shFade; splat.sh.sh2  *= shFade; splat.sh.sh3  *= shFade;
+            splat.sh.sh4  *= shFade; splat.sh.sh5  *= shFade; splat.sh.sh6  *= shFade;
+            splat.sh.sh7  *= shFade; splat.sh.sh8  *= shFade; splat.sh.sh9  *= shFade;
+            splat.sh.sh10 *= shFade; splat.sh.sh11 *= shFade; splat.sh.sh12 *= shFade;
+            splat.sh.sh13 *= shFade; splat.sh.sh14 *= shFade; splat.sh.sh15 *= shFade;
+        }
+        else
+        {
+            splat = (SplatData)0;
+        }
 
         // Override base properties with morphed data
         splat.pos     = md0.xyz;
@@ -342,7 +365,12 @@ void CSCopyViewDataAndDistances(uint3 id : SV_DispatchThreadID)
 
     _CopyDstViewData[dstIdx] = _SplatViewData[srcIdx];
 
-    float3 pos = LoadSplatPos(srcIdx);
+    // Use morphed position when morph is active, otherwise decode from source
+    float3 pos;
+    if (_MorphDataValid != 0)
+        pos = _MorphedData[srcIdx * 4].xyz;
+    else
+        pos = LoadSplatPos(srcIdx);
     pos = mul(_MatrixMV, float4(pos.xyz, 1)).xyz;
     _CopyDstSortDistances[dstIdx] = FloatToSortableUint(pos.z);
     if (_CopyWriteKeys != 0)

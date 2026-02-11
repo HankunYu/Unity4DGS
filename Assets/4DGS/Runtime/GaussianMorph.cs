@@ -117,7 +117,7 @@ namespace GaussianSplatting.Runtime
             EnsureMorphOutput();
             DispatchMorph();
 
-            m_Renderer.SetMorphData(m_MorphOutput, m_MorphedSplatCount, 1);
+            m_Renderer.SetMorphData(m_MorphOutput, m_MorphedSplatCount, 1, weight);
         }
 
         void DisableMorph()

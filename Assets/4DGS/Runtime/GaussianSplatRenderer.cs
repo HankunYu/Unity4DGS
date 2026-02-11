@@ -260,10 +260,10 @@ namespace GaussianSplatting.Runtime
             {
                 int order = m_ActiveSplats[groupStart].Item1.m_RenderOrder;
                 int groupEnd = groupStart + 1;
-                int groupSplatCount = m_ActiveSplats[groupStart].Item1.splatCount;
+                int groupSplatCount = m_ActiveSplats[groupStart].Item1.EffectiveSplatCount;
                 while (groupEnd < m_ActiveSplats.Count && m_ActiveSplats[groupEnd].Item1.m_RenderOrder == order)
                 {
-                    groupSplatCount += m_ActiveSplats[groupEnd].Item1.splatCount;
+                    groupSplatCount += m_ActiveSplats[groupEnd].Item1.EffectiveSplatCount;
                     ++groupEnd;
                 }
 
@@ -285,7 +285,7 @@ namespace GaussianSplatting.Runtime
                 {
                     var gs = m_ActiveSplats[i].Item1;
                     groupSignature = groupSignature * 31 + gs.GetInstanceID();
-                    groupSignature = groupSignature * 31 + gs.splatCount;
+                    groupSignature = groupSignature * 31 + gs.EffectiveSplatCount;
                     int nth = Mathf.Max(1, gs.m_SortNthFrame);
                     if (gs.m_FrameCounter % nth == 0)
                         groupSortNeeded = true;
@@ -322,14 +322,14 @@ namespace GaussianSplatting.Runtime
 
                     bool copySuccess = gs.CopyViewDataAndDistances(cmb, cam, gs.transform.localToWorldMatrix,
                         groupCache.viewData, groupCache.sortDistances, groupCache.sortKeys,
-                        0, dstOffset, gs.splatCount, groupSortNeeded || !groupCache.hasSortedKeys);
+                        0, dstOffset, gs.EffectiveSplatCount, groupSortNeeded || !groupCache.hasSortedKeys);
                     if (!copySuccess)
                     {
                         groupValid = false;
                         break;
                     }
 
-                    dstOffset += gs.splatCount;
+                    dstOffset += gs.EffectiveSplatCount;
                     ++gs.m_FrameCounter;
                 }
 
@@ -416,7 +416,7 @@ namespace GaussianSplatting.Runtime
 
                 // draw
                 int indexCount = 6;
-                int instanceCount = gs.splatCount;
+                int instanceCount = gs.EffectiveSplatCount;
                 MeshTopology topology = MeshTopology.Triangles;
                 if (gs.m_RenderMode is GaussianSplatRenderer.RenderMode.DebugBoxes or GaussianSplatRenderer.RenderMode.DebugChunkBounds)
                     indexCount = 36;
@@ -529,6 +529,7 @@ namespace GaussianSplatting.Runtime
         internal GraphicsBuffer m_MorphedDataBuffer;
         internal int m_MorphDataValid;
         internal int m_MorphedSplatCount;
+        internal float m_MorphWeight;
         Texture m_GpuColorData;
         internal GraphicsBuffer m_GpuChunks;
         internal bool m_GpuChunksValid;
@@ -616,6 +617,8 @@ namespace GaussianSplatting.Runtime
             public static readonly int AnimDataValid = Shader.PropertyToID("_AnimDataValid");
             public static readonly int MorphedData = Shader.PropertyToID("_MorphedData");
             public static readonly int MorphDataValid = Shader.PropertyToID("_MorphDataValid");
+            public static readonly int MorphWeight = Shader.PropertyToID("_MorphWeight");
+            public static readonly int SrcSplatCount = Shader.PropertyToID("_SrcSplatCount");
         }
 
         [field: NonSerialized] public bool editModified { get; private set; }
@@ -626,6 +629,12 @@ namespace GaussianSplatting.Runtime
 
         public GaussianSplatAsset asset => m_Asset;
         public int splatCount => m_SplatCount;
+
+        // Effective count considering morph: max(source, target) when morph is active
+        internal int EffectiveSplatCount =>
+            (m_MorphedDataBuffer != null && m_MorphDataValid != 0 && m_MorphedSplatCount > 0)
+            ? m_MorphedSplatCount : m_SplatCount;
+
         internal GraphicsBuffer GpuPosData => m_GpuPosData;
         internal GraphicsBuffer GpuOtherData => m_GpuOtherData;
         internal GraphicsBuffer GpuSHData => m_GpuSHData;
@@ -633,15 +642,25 @@ namespace GaussianSplatting.Runtime
         internal GraphicsBuffer GpuChunksBuffer => m_GpuChunks;
         internal bool GpuChunksValid => m_GpuChunksValid;
 
-        internal void SetMorphData(GraphicsBuffer morphedData, int splatCount, int valid)
+        internal void SetMorphData(GraphicsBuffer morphedData, int splatCount, int valid, float weight = 0f)
         {
             m_MorphedDataBuffer = morphedData;
-            // Clamp to current view buffer capacity to avoid out-of-bounds
-            int clamped = m_GpuView != null ? Mathf.Min(splatCount, m_GpuView.count) : splatCount;
-            if (valid != 0 && clamped < splatCount)
-                Debug.LogWarning($"GaussianMorph: target has more splats ({splatCount}) than source ({m_GpuView?.count ?? 0}); extra splats will be ignored.");
-            m_MorphedSplatCount = clamped;
+            m_MorphedSplatCount = splatCount;
             m_MorphDataValid = valid;
+            m_MorphWeight = weight;
+
+            // Always check buffer capacity — CreateResourcesForAsset may have
+            // rebuilt sort buffers at source count since our last call.
+            int needed = EffectiveSplatCount;
+            if (m_GpuView != null && m_GpuView.count < needed)
+            {
+                m_GpuView.Dispose();
+                m_GpuView = new GraphicsBuffer(GraphicsBuffer.Target.Structured, needed, kGpuViewDataSize);
+            }
+            if (m_GpuSortDistances != null && m_GpuSortDistances.count < needed)
+            {
+                InitSortBuffers(needed);
+            }
         }
 
         enum KernelIndices
@@ -970,9 +989,8 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeIntParam(cs, Props.SplatBitsValid, m_GpuEditSelected != null && m_GpuEditDeleted != null ? 1 : 0);
             uint format = (uint)m_Asset.posFormat | ((uint)m_Asset.scaleFormat << 8) | ((uint)m_Asset.shFormat << 16);
             cmb.SetComputeIntParam(cs, Props.SplatFormat, (int)format);
-            int effectiveSplatCount = (m_MorphedDataBuffer != null && m_MorphDataValid != 0 && m_MorphedSplatCount > 0)
-                ? m_MorphedSplatCount : m_SplatCount;
-            cmb.SetComputeIntParam(cs, Props.SplatCount, effectiveSplatCount);
+            cmb.SetComputeIntParam(cs, Props.SplatCount, EffectiveSplatCount);
+            cmb.SetComputeIntParam(cs, Props.SrcSplatCount, m_SplatCount);
             cmb.SetComputeIntParam(cs, Props.SplatChunkCount, m_GpuChunksValid ? m_GpuChunks.count : 0);
 
             UpdateCutoutsBuffer();
@@ -988,6 +1006,7 @@ namespace GaussianSplatting.Runtime
             // Morph data binding
             bool hasMorph = m_MorphedDataBuffer != null && m_MorphDataValid != 0;
             cmb.SetComputeIntParam(cs, Props.MorphDataValid, hasMorph ? 1 : 0);
+            cmb.SetComputeFloatParam(cs, Props.MorphWeight, hasMorph ? m_MorphWeight : 0f);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.MorphedData, hasMorph ? m_MorphedDataBuffer : m_GpuView);
         }
 
@@ -1090,7 +1109,7 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeIntParam(m_CSSplatUtilities, Props.SHOnly, m_SHOnly ? 1 : 0);
 
             m_CSSplatUtilities.GetKernelThreadGroupSizes(kernelIndex, out uint gsX, out _, out _);
-            int dispatchCount = (m_MorphDataValid != 0 && m_MorphedSplatCount > 0) ? m_MorphedSplatCount : m_GpuView.count;
+            int dispatchCount = EffectiveSplatCount;
             cmb.DispatchCompute(m_CSSplatUtilities, kernelIndex, (dispatchCount + (int)gsX - 1)/(int)gsX, 1, 1);
             return true;
         }
@@ -1153,13 +1172,21 @@ namespace GaussianSplatting.Runtime
             cmd.SetComputeBufferParam(m_CSSplatUtilities, kernelIndex, Props.SplatPos, m_GpuPosData);
             cmd.SetComputeIntParam(m_CSSplatUtilities, Props.SplatFormat, (int)m_Asset.posFormat);
             cmd.SetComputeMatrixParam(m_CSSplatUtilities, Props.MatrixMV, worldToCamMatrix * matrix);
-            cmd.SetComputeIntParam(m_CSSplatUtilities, Props.SplatCount, m_SplatCount);
+            cmd.SetComputeIntParam(m_CSSplatUtilities, Props.SplatCount, EffectiveSplatCount);
             cmd.SetComputeIntParam(m_CSSplatUtilities, Props.SplatChunkCount, m_GpuChunksValid ? m_GpuChunks.count : 0);
-            m_CSSplatUtilities.GetKernelThreadGroupSizes(kernelIndex, out uint gsX, out _, out _);
-            cmd.DispatchCompute(m_CSSplatUtilities, kernelIndex, (m_GpuSortDistances.count + (int)gsX - 1)/(int)gsX, 1, 1);
 
-            // sort the splats
+            // Bind morph data so CalcDistances can use morphed positions
+            bool hasMorph = m_MorphedDataBuffer != null && m_MorphDataValid != 0;
+            cmd.SetComputeIntParam(m_CSSplatUtilities, Props.MorphDataValid, hasMorph ? 1 : 0);
+            cmd.SetComputeBufferParam(m_CSSplatUtilities, kernelIndex, Props.MorphedData, hasMorph ? m_MorphedDataBuffer : m_GpuSortDistances);
+
+            m_CSSplatUtilities.GetKernelThreadGroupSizes(kernelIndex, out uint gsX, out _, out _);
+            cmd.DispatchCompute(m_CSSplatUtilities, kernelIndex, (EffectiveSplatCount + (int)gsX - 1)/(int)gsX, 1, 1);
+
+            // sort the splats — use effective count, not buffer size,
+            // to avoid sorting stale entries from pre-allocated buffers
             EnsureSorterAndRegister();
+            m_SorterArgs.count = (uint)EffectiveSplatCount;
             m_Sorter.Dispatch(cmd, m_SorterArgs);
             cmd.EndSample(s_ProfSort);
         }
