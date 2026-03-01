@@ -523,6 +523,14 @@ namespace GaussianSplatting.Runtime
         GraphicsBuffer m_GpuOtherData;
         GraphicsBuffer m_GpuSHData;
 
+        // Texture2D reuse: track last color format & size to avoid recreation
+        int m_GpuColorTexWidth;
+        int m_GpuColorTexHeight;
+        GraphicsFormat m_GpuColorTexFormat;
+
+        // Sort buffer reuse: track last splatCount to skip InitSortBuffers when unchanged
+        int m_LastSortBufferSplatCount = -1;
+
         // Double-buffering: back buffers for async upload (4DGS mode)
         GraphicsBuffer m_GpuPosDataBack;
         GraphicsBuffer m_GpuOtherDataBack;
@@ -773,10 +781,31 @@ namespace GaussianSplatting.Runtime
 
             var (texWidth, texHeight) = GaussianSplatAsset.CalcTextureSize(asset.splatCount);
             var texFormat = GaussianSplatAsset.ColorFormatToGraphics(asset.colorFormat);
-            var tex = new Texture2D(texWidth, texHeight, texFormat, TextureCreationFlags.DontInitializePixels | TextureCreationFlags.IgnoreMipmapLimit | TextureCreationFlags.DontUploadUponCreate) { name = "GaussianColorData" };
-            tex.SetPixelData(asset.colorData.GetData<byte>(), 0);
-            tex.Apply(false, true);
-            m_GpuColorData = tex;
+
+            // Reuse existing Texture2D if dimensions and format match (avoids alloc + GPU upload overhead).
+            if (m_GpuColorData == null
+                || texWidth  != m_GpuColorTexWidth
+                || texHeight != m_GpuColorTexHeight
+                || texFormat != m_GpuColorTexFormat)
+            {
+                var tex = new Texture2D(texWidth, texHeight, texFormat,
+                    TextureCreationFlags.DontInitializePixels | TextureCreationFlags.IgnoreMipmapLimit | TextureCreationFlags.DontUploadUponCreate)
+                    { name = "GaussianColorData" };
+                tex.SetPixelData(asset.colorData.GetData<byte>(), 0);
+                tex.Apply(false, true);
+                m_GpuColorData = tex;
+                m_GpuColorTexWidth  = texWidth;
+                m_GpuColorTexHeight = texHeight;
+                m_GpuColorTexFormat = texFormat;
+            }
+            else
+            {
+                // Same format/size — update pixels in place (no new allocation).
+                var tex = (Texture2D)m_GpuColorData;
+                tex.SetPixelData(asset.colorData.GetData<byte>(), 0);
+                tex.Apply(false, false); // false = don't make no-longer-readable, keep updateable
+            }
+
             if (asset.chunkData != null && asset.chunkData.dataSize != 0)
             {
                 m_GpuChunks.SetData(asset.chunkData.GetData<GaussianSplatAsset.ChunkInfo>());
@@ -788,7 +817,12 @@ namespace GaussianSplatting.Runtime
                 m_GpuChunksValid = false;
             }
 
-            InitSortBuffers(splatCount);
+            // Only recreate sort buffers when splatCount changes (expensive: alloc + init).
+            if (splatCount != m_LastSortBufferSplatCount)
+            {
+                InitSortBuffers(splatCount);
+                m_LastSortBufferSplatCount = splatCount;
+            }
         }
 
         /// <summary>Swap front and back GPU buffers (double-buffer rotation).</summary>
@@ -1026,6 +1060,8 @@ namespace GaussianSplatting.Runtime
             DisposeBuffer(ref m_GpuOtherDataBack);
             DisposeBuffer(ref m_GpuSHDataBack);
             m_DoubleBufferingEnabled = false;
+            m_LastSortBufferSplatCount = -1;
+            m_GpuColorTexWidth = m_GpuColorTexHeight = 0;
             DisposeBuffer(ref m_GpuChunks);
 
             DisposeBuffer(ref m_GpuView);
