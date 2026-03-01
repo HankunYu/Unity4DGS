@@ -304,7 +304,8 @@ namespace GaussianSplatting.Runtime
                 // If so, skip the entire CalcViewData + CopyViewDataAndDistances + Sort pipeline
                 // and just re-render from the existing group buffers.
                 Matrix4x4 curCamMatrix = cam.worldToCameraMatrix;
-                bool groupCacheHit = groupCache.hasSortedKeys && !groupSortNeeded;
+                // Cache hit overrides groupSortNeeded: if camera+frame unchanged, no need to re-sort
+                bool groupCacheHit = groupCache.hasSortedKeys;
                 if (groupCacheHit)
                 {
                     for (int i = groupStart; i < groupEnd; ++i)
