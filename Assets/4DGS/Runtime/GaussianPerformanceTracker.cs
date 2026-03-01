@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Performance tracker for 4DGS/3DGS benchmarking.
-// Attach to any GameObject in the scene to measure FPS and frame-switch timing.
+// Works both in-Editor (manual) and as a standalone build (automated CI).
+//
+// Standalone CLI args (passed to the built player):
+//   -benchmark-duration <seconds>   override benchmarkDuration
+//   -benchmark-warmup   <seconds>   override warmupDuration
+//   -benchmark-output   <path>      override CSV export path
+//   -benchmark-quit                 quit the player after benchmark (auto-enabled in batch/headless)
 
 using System;
 using System.Collections.Generic;
@@ -10,30 +16,16 @@ using UnityEngine;
 
 namespace GaussianSplatting.Runtime
 {
-    /// <summary>
-    /// Tracks and reports FPS, frame-switch latency, and GPU upload costs.
-    ///
-    /// Usage:
-    ///   1. Attach this component to any GameObject.
-    ///   2. (Optional) Assign the GaussianPlayer to playerRef.
-    ///   3. Set benchmarkDuration and hit Play — results auto-logged after the run.
-    ///   4. Use the on-screen HUD (showHUD = true) for live monitoring.
-    ///   5. Call ExportCSV() or use the context-menu item to save a CSV report.
-    /// </summary>
     public class GaussianPerformanceTracker : MonoBehaviour
     {
         [Header("References")]
-        [Tooltip("The GaussianPlayer driving the 4DGS sequence (optional, enables frame-switch metrics)")]
         public GaussianPlayer playerRef;
 
         [Header("Benchmark Settings")]
-        [Tooltip("How many seconds to run the benchmark (0 = run indefinitely)")]
+        [Tooltip("Seconds to run (0 = manual stop). Overridable via -benchmark-duration")]
         public float benchmarkDuration = 30f;
-
-        [Tooltip("Warm-up seconds before recording starts")]
+        [Tooltip("Warm-up seconds before recording. Overridable via -benchmark-warmup")]
         public float warmupDuration = 3f;
-
-        [Tooltip("Sample window for rolling-average FPS display (seconds)")]
         public float rollingWindowSec = 1f;
 
         [Header("HUD")]
@@ -41,41 +33,39 @@ namespace GaussianSplatting.Runtime
         public int hudFontSize = 18;
         public Color hudColor = Color.yellow;
 
-        [Header("Export")]
-        [Tooltip("Auto-export CSV when benchmark finishes")]
+        [Header("Export & Automation")]
         public bool autoExportCSV = true;
-        public string exportPath = ""; // empty = Application.persistentDataPath
+        [Tooltip("CSV output directory. Overridable via -benchmark-output")]
+        public string exportPath = "";
+        [Tooltip("Quit the application after benchmark. Auto-set when -benchmark-quit flag is present.")]
+        public bool quitWhenDone = false;
 
-        // -- Internal state --
+        // ── Internal ──────────────────────────────────────────────────────────────
 
         enum Phase { Warmup, Benchmarking, Done }
         Phase m_Phase = Phase.Warmup;
-
         float m_PhaseTimer = 0f;
-        int m_TotalFrames = 0;
 
-        // Rolling window
         readonly Queue<float> m_RollingFrameTimes = new();
         float m_RollingSum = 0f;
 
-        // Per-frame stats (recorded during benchmark)
         readonly List<float> m_FrameTimes = new();
-        readonly List<int> m_GsFrameIndices = new();
+        readonly List<int>   m_GsFrameIndices = new();
         readonly List<float> m_FrameSwitchLatencies = new();
 
-        // Frame-switch detection
-        int m_LastGsFrame = -1;
+        int   m_LastGsFrame = -1;
         float m_LastGsFrameTime = 0f;
 
-        // ProfilerRecorder
-        ProfilerRecorder m_RecDraw;
-        ProfilerRecorder m_RecCompose;
-        ProfilerRecorder m_RecCalcView;
-        ProfilerRecorder m_RecSort;
+        ProfilerRecorder m_RecDraw, m_RecCompose, m_RecCalcView, m_RecSort;
 
         BenchmarkResult m_Result;
 
-        // -- Lifecycle --
+        // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+        void Awake()
+        {
+            ParseCommandLineArgs();
+        }
 
         void OnEnable()
         {
@@ -83,9 +73,8 @@ namespace GaussianSplatting.Runtime
             m_RecCompose  = ProfilerRecorder.StartNew(new ProfilerCategory("Render"), "GaussianSplat.Compose",  15);
             m_RecCalcView = ProfilerRecorder.StartNew(new ProfilerCategory("Render"), "GaussianSplat.CalcView", 15);
             m_RecSort     = ProfilerRecorder.StartNew(new ProfilerCategory("Render"), "GaussianSplat.Sort",     15);
-
             ResetStats();
-            Debug.Log("[GaussianPerf] Tracker enabled. Warm-up phase started.");
+            Debug.Log("[GaussianPerf] Started. Warm-up phase.");
         }
 
         void OnDisable()
@@ -101,7 +90,6 @@ namespace GaussianSplatting.Runtime
             float dt = Time.unscaledDeltaTime;
             m_PhaseTimer += dt;
 
-            // Rolling window (always update)
             m_RollingFrameTimes.Enqueue(dt);
             m_RollingSum += dt;
             while (m_RollingSum - m_RollingFrameTimes.Peek() > rollingWindowSec)
@@ -119,19 +107,14 @@ namespace GaussianSplatting.Runtime
                 return;
             }
 
-            if (m_Phase == Phase.Done)
-                return;
+            if (m_Phase == Phase.Done) return;
 
-            // Record frame
-            m_TotalFrames++;
             m_FrameTimes.Add(dt);
 
-            // 4DGS frame-switch tracking
             if (playerRef != null)
             {
                 int gsFrame = playerRef.currentFrame;
                 m_GsFrameIndices.Add(gsFrame);
-
                 if (gsFrame != m_LastGsFrame)
                 {
                     if (m_LastGsFrame >= 0)
@@ -145,7 +128,7 @@ namespace GaussianSplatting.Runtime
                 FinishBenchmark();
         }
 
-        // -- HUD --
+        // ── HUD ───────────────────────────────────────────────────────────────────
 
         void OnGUI()
         {
@@ -154,15 +137,13 @@ namespace GaussianSplatting.Runtime
             var style = new GUIStyle(GUI.skin.label)
             {
                 fontSize = hudFontSize,
-                normal = { textColor = hudColor }
+                normal   = { textColor = hudColor }
             };
 
-            float rollingFPS = m_RollingSum > 0f
-                ? m_RollingFrameTimes.Count / m_RollingSum : 0f;
-            float instFPS = Time.unscaledDeltaTime > 0f
-                ? 1f / Time.unscaledDeltaTime : 0f;
+            float rollingFPS = m_RollingSum > 0f ? m_RollingFrameTimes.Count / m_RollingSum : 0f;
+            float instFPS    = Time.unscaledDeltaTime > 0f ? 1f / Time.unscaledDeltaTime : 0f;
 
-            string phaseLabel = m_Phase switch
+            string phase = m_Phase switch
             {
                 Phase.Warmup       => $"WARM-UP ({warmupDuration - m_PhaseTimer:F1}s)",
                 Phase.Benchmarking => $"BENCHMARKING ({(benchmarkDuration > 0 ? $"{benchmarkDuration - m_PhaseTimer:F1}s left" : "inf")})",
@@ -170,38 +151,42 @@ namespace GaussianSplatting.Runtime
                 _                  => ""
             };
 
-            string gsInfo = playerRef != null
-                ? $"\n4DGS Frame: {playerRef.currentFrame}  |  Splats: {GetSplatCount()}"
-                : "";
-
-            string drawMs   = m_RecDraw.Valid     ? $"{m_RecDraw.LastValue / 1e6f:F2}ms"     : "n/a";
-            string compMs   = m_RecCompose.Valid   ? $"{m_RecCompose.LastValue / 1e6f:F2}ms"  : "n/a";
+            string gsInfo   = playerRef != null ? $"\n4DGS Frame: {playerRef.currentFrame}  Splats: {GetSplatCount()}" : "";
+            string drawMs   = m_RecDraw.Valid     ? $"{m_RecDraw.LastValue     / 1e6f:F2}ms" : "n/a";
+            string compMs   = m_RecCompose.Valid   ? $"{m_RecCompose.LastValue  / 1e6f:F2}ms" : "n/a";
             string calcMs   = m_RecCalcView.Valid  ? $"{m_RecCalcView.LastValue / 1e6f:F2}ms" : "n/a";
-            string sortMs   = m_RecSort.Valid      ? $"{m_RecSort.LastValue / 1e6f:F2}ms"     : "n/a";
+            string sortMs   = m_RecSort.Valid      ? $"{m_RecSort.LastValue     / 1e6f:F2}ms" : "n/a";
 
-            string text =
-                $"[GaussianPerf] {phaseLabel}\n" +
-                $"FPS (instant): {instFPS:F1}  |  FPS ({rollingWindowSec:F0}s avg): {rollingFPS:F1}\n" +
-                $"Draw: {drawMs}  Compose: {compMs}  CalcView: {calcMs}  Sort: {sortMs}" +
-                gsInfo;
-
-            GUI.Label(new Rect(10, 10, 800, 200), text, style);
+            GUI.Label(new Rect(10, 10, 820, 200), style: style,
+                text: $"[GaussianPerf] {phase}\n" +
+                      $"FPS (instant): {instFPS:F1}  FPS ({rollingWindowSec:F0}s avg): {rollingFPS:F1}\n" +
+                      $"Draw: {drawMs}  Compose: {compMs}  CalcView: {calcMs}  Sort: {sortMs}" +
+                      gsInfo);
 
             if (m_Phase == Phase.Benchmarking && benchmarkDuration <= 0f)
                 if (GUI.Button(new Rect(10, 220, 160, 30), "Finish Benchmark"))
                     FinishBenchmark();
         }
 
-        // -- Finish & report --
+        // ── Finish ────────────────────────────────────────────────────────────────
 
         void FinishBenchmark()
         {
-            m_Phase = Phase.Done;
+            m_Phase  = Phase.Done;
             m_Result = ComputeResult();
             PrintResult(m_Result);
+
             if (autoExportCSV)
                 ExportCSV();
+
+            if (quitWhenDone)
+            {
+                Debug.Log("[GaussianPerf] Quitting application.");
+                Application.Quit(0);
+            }
         }
+
+        // ── Compute ───────────────────────────────────────────────────────────────
 
         BenchmarkResult ComputeResult()
         {
@@ -213,10 +198,11 @@ namespace GaussianSplatting.Runtime
 
             float totalTime = 0f;
             foreach (var t in sorted) totalTime += t;
+
             float avgFT = totalTime / n;
-            float p50 = sorted[Mathf.Clamp((int)(n * 0.50f), 0, n - 1)];
-            float p95 = sorted[Mathf.Clamp((int)(n * 0.95f), 0, n - 1)];
-            float p99 = sorted[Mathf.Clamp((int)(n * 0.99f), 0, n - 1)];
+            float p50   = sorted[Mathf.Clamp((int)(n * 0.50f), 0, n - 1)];
+            float p95   = sorted[Mathf.Clamp((int)(n * 0.95f), 0, n - 1)];
+            float p99   = sorted[Mathf.Clamp((int)(n * 0.99f), 0, n - 1)];
 
             float avgSwitch = 0f;
             foreach (var s in m_FrameSwitchLatencies) avgSwitch += s;
@@ -240,32 +226,32 @@ namespace GaussianSplatting.Runtime
         void PrintResult(BenchmarkResult r)
         {
             Debug.Log(
-                $"[GaussianPerf] == BENCHMARK RESULT ==\n" +
-                $"  Frames recorded : {r.TotalFrames}\n" +
-                $"  Total time      : {r.TotalTimeSec:F2}s\n" +
-                $"  Avg FPS         : {r.AvgFPS:F2}\n" +
-                $"  Min FPS         : {r.MinFPS:F2}\n" +
-                $"  Max FPS         : {r.MaxFPS:F2}\n" +
-                $"  Frame time p50  : {r.P50FrameMs:F2} ms\n" +
-                $"  Frame time p95  : {r.P95FrameMs:F2} ms\n" +
-                $"  Frame time p99  : {r.P99FrameMs:F2} ms\n" +
-                $"  4DGS switches   : {r.Switch4DCount}\n" +
-                $"  Avg switch lat  : {r.Avg4DSwitchMs:F2} ms"
+                $"[GaussianPerf] === BENCHMARK RESULT ===\n" +
+                $"  Frames    : {r.TotalFrames}  ({r.TotalTimeSec:F2}s)\n" +
+                $"  Avg FPS   : {r.AvgFPS:F2}\n" +
+                $"  Min FPS   : {r.MinFPS:F2}\n" +
+                $"  Max FPS   : {r.MaxFPS:F2}\n" +
+                $"  p50 ms    : {r.P50FrameMs:F2}\n" +
+                $"  p95 ms    : {r.P95FrameMs:F2}\n" +
+                $"  p99 ms    : {r.P99FrameMs:F2}\n" +
+                $"  4D switch : {r.Switch4DCount} switches, avg {r.Avg4DSwitchMs:F2}ms"
             );
         }
 
-        // -- CSV export --
+        // ── CSV ───────────────────────────────────────────────────────────────────
 
         [ContextMenu("Export CSV Now")]
         public void ExportCSV()
         {
             string dir = string.IsNullOrEmpty(exportPath)
                 ? Application.persistentDataPath : exportPath;
+            Directory.CreateDirectory(dir);
+
             string ts   = DateTime.Now.ToString("yyyyMMdd_HHmmss");
             string path = Path.Combine(dir, $"gaussian_perf_{ts}.csv");
 
             using var sw = new StreamWriter(path);
-            sw.WriteLine("# GaussianPerf Benchmark Summary");
+            sw.WriteLine("# GaussianPerf Benchmark");
             sw.WriteLine($"# Date,{DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             sw.WriteLine($"# AvgFPS,{m_Result.AvgFPS:F2}");
             sw.WriteLine($"# MinFPS,{m_Result.MinFPS:F2}");
@@ -273,25 +259,53 @@ namespace GaussianSplatting.Runtime
             sw.WriteLine($"# P50_ms,{m_Result.P50FrameMs:F2}");
             sw.WriteLine($"# P95_ms,{m_Result.P95FrameMs:F2}");
             sw.WriteLine($"# P99_ms,{m_Result.P99FrameMs:F2}");
-            sw.WriteLine($"# 4DGS_SwitchCount,{m_Result.Switch4DCount}");
-            sw.WriteLine($"# 4DGS_AvgSwitchLatency_ms,{m_Result.Avg4DSwitchMs:F2}");
+            sw.WriteLine($"# 4DGS_Switches,{m_Result.Switch4DCount}");
+            sw.WriteLine($"# 4DGS_AvgSwitchMs,{m_Result.Avg4DSwitchMs:F2}");
             sw.WriteLine();
             sw.WriteLine("frame_index,frame_time_ms,gs_frame_index");
             for (int i = 0; i < m_FrameTimes.Count; i++)
             {
-                string gsFrame = i < m_GsFrameIndices.Count ? m_GsFrameIndices[i].ToString() : "";
-                sw.WriteLine($"{i},{m_FrameTimes[i] * 1000f:F3},{gsFrame}");
+                string gs = i < m_GsFrameIndices.Count ? m_GsFrameIndices[i].ToString() : "";
+                sw.WriteLine($"{i},{m_FrameTimes[i] * 1000f:F3},{gs}");
             }
 
-            Debug.Log($"[GaussianPerf] CSV exported -> {path}");
+            Debug.Log($"[GaussianPerf] CSV saved: {path}");
         }
 
-        // -- Helpers --
+        // ── CLI args ──────────────────────────────────────────────────────────────
+
+        void ParseCommandLineArgs()
+        {
+            var args = System.Environment.GetCommandLineArgs();
+            for (int i = 0; i < args.Length; i++)
+            {
+                switch (args[i])
+                {
+                    case "-benchmark-duration" when i + 1 < args.Length:
+                        if (float.TryParse(args[++i], out var dur))
+                            benchmarkDuration = dur;
+                        break;
+                    case "-benchmark-warmup" when i + 1 < args.Length:
+                        if (float.TryParse(args[++i], out var wu))
+                            warmupDuration = wu;
+                        break;
+                    case "-benchmark-output" when i + 1 < args.Length:
+                        exportPath = args[++i];
+                        break;
+                    case "-benchmark-quit":
+                        quitWhenDone = true;
+                        break;
+                }
+            }
+
+            Debug.Log($"[GaussianPerf] Config — duration:{benchmarkDuration}s  warmup:{warmupDuration}s  output:{exportPath}  quit:{quitWhenDone}");
+        }
+
+        // ── Helpers ───────────────────────────────────────────────────────────────
 
         void ResetStats()
         {
-            m_TotalFrames = 0;
-            m_PhaseTimer  = 0f;
+            m_PhaseTimer = 0f;
             m_RollingFrameTimes.Clear();
             m_RollingSum = 0f;
             ResetBenchmarkData();
@@ -308,10 +322,11 @@ namespace GaussianSplatting.Runtime
 
         int GetSplatCount()
         {
-            if (playerRef == null) return 0;
-            var r = playerRef.GetComponent<GaussianSplatRenderer>();
+            var r = playerRef?.GetComponent<GaussianSplatRenderer>();
             return r != null ? r.splatCount : 0;
         }
+
+        // ── Data struct ───────────────────────────────────────────────────────────
 
         struct BenchmarkResult
         {
