@@ -60,12 +60,12 @@ fi
 
 if [[ "$(uname)" == "Darwin" ]]; then
   APP=$(find "$BUILD_DIR" -name "*.app" -maxdepth 1 | head -1)
-  EXECUTABLE="$APP/Contents/MacOS/$(basename "${APP%.app}")"
+  EXECUTABLE=$(find "$APP/Contents/MacOS" -maxdepth 1 -type f | head -1)
 else
   EXECUTABLE=$(find "$BUILD_DIR" -maxdepth 1 -type f -executable | head -1)
 fi
 
-[[ ! -f "$EXECUTABLE" ]] && { echo "Executable not found in $BUILD_DIR"; exit 1; }
+[[ -z "$EXECUTABLE" || ! -f "$EXECUTABLE" ]] && { echo "Executable not found in $BUILD_DIR"; exit 1; }
 
 echo "Running: $(basename "$EXECUTABLE")  duration=${DURATION}s warmup=${WARMUP}s"
 LOG_RUN="$OUTPUT_DIR/run_$(date +%Y%m%d_%H%M%S).log"
