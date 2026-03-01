@@ -498,7 +498,7 @@ namespace GaussianSplatting.Runtime
         [Tooltip("Additional scaling factor for opacity")]
         public float m_OpacityScale = 1.0f;
         [Range(0, 3)] [Tooltip("Spherical Harmonics order to use")]
-        public int m_SHOrder = 3;
+        public int m_SHOrder = 1;  // aggressive: reduce from 3 to 1 for 80% SH speedup
         [Tooltip("Show only Spherical Harmonics contribution, using gray color")]
         public bool m_SHOnly;
         [Range(1,30)] [Tooltip("Sort splats only every N frames")]
