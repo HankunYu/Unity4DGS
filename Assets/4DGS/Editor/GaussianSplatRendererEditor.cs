@@ -60,21 +60,21 @@ namespace GaussianSplatting.Editor
         {
             m_ExportBakeTransform = EditorPrefs.GetBool(kPrefExportBake, false);
 
-            m_PropAsset = serializedObject.FindProperty("m_Asset");
-            m_PropRenderOrder = serializedObject.FindProperty("m_RenderOrder");
-            m_PropSplatScale = serializedObject.FindProperty("m_SplatScale");
-            m_PropOpacityScale = serializedObject.FindProperty("m_OpacityScale");
-            m_PropSHOrder = serializedObject.FindProperty("m_SHOrder");
-            m_PropSHOnly = serializedObject.FindProperty("m_SHOnly");
-            m_PropSortNthFrame = serializedObject.FindProperty("m_SortNthFrame");
-            m_PropRenderMode = serializedObject.FindProperty("m_RenderMode");
-            m_PropPointDisplaySize = serializedObject.FindProperty("m_PointDisplaySize");
-            m_PropCutouts = serializedObject.FindProperty("m_Cutouts");
-            m_PropShaderSplats = serializedObject.FindProperty("m_ShaderSplats");
-            m_PropShaderComposite = serializedObject.FindProperty("m_ShaderComposite");
-            m_PropShaderDebugPoints = serializedObject.FindProperty("m_ShaderDebugPoints");
-            m_PropShaderDebugBoxes = serializedObject.FindProperty("m_ShaderDebugBoxes");
-            m_PropCSSplatUtilities = serializedObject.FindProperty("m_CSSplatUtilities");
+            m_PropAsset = serializedObject.FindProperty("splatAsset");
+            m_PropRenderOrder = serializedObject.FindProperty("renderOrder");
+            m_PropSplatScale = serializedObject.FindProperty("splatScale");
+            m_PropOpacityScale = serializedObject.FindProperty("opacityScale");
+            m_PropSHOrder = serializedObject.FindProperty("shOrder");
+            m_PropSHOnly = serializedObject.FindProperty("shOnly");
+            m_PropSortNthFrame = serializedObject.FindProperty("sortNthFrame");
+            m_PropRenderMode = serializedObject.FindProperty("renderMode");
+            m_PropPointDisplaySize = serializedObject.FindProperty("pointDisplaySize");
+            m_PropCutouts = serializedObject.FindProperty("cutouts");
+            m_PropShaderSplats = serializedObject.FindProperty("shaderSplats");
+            m_PropShaderComposite = serializedObject.FindProperty("shaderComposite");
+            m_PropShaderDebugPoints = serializedObject.FindProperty("shaderDebugPoints");
+            m_PropShaderDebugBoxes = serializedObject.FindProperty("shaderDebugBoxes");
+            m_PropCSSplatUtilities = serializedObject.FindProperty("csSplatUtilities");
 
             s_AllEditors.Add(this);
         }
