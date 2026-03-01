@@ -523,6 +523,12 @@ namespace GaussianSplatting.Runtime
         GraphicsBuffer m_GpuOtherData;
         GraphicsBuffer m_GpuSHData;
 
+        // Double-buffering: back buffers for async upload (4DGS mode)
+        GraphicsBuffer m_GpuPosDataBack;
+        GraphicsBuffer m_GpuOtherDataBack;
+        GraphicsBuffer m_GpuSHDataBack;
+        bool m_DoubleBufferingEnabled = false;
+
         // Set by GaussianAnimator: per-splat animation output (3 float4s per splat)
         internal GraphicsBuffer m_AnimOutputBuffer;
         Texture m_GpuColorData;
@@ -552,7 +558,7 @@ namespace GaussianSplatting.Runtime
         internal int m_FrameCounter;
         GaussianSplatAsset m_PrevAsset;
         private int m_DeferAssetFrames = 0;
-        private const int kDeferFrames = 1;
+        private const int kDeferFrames = 0;
         Hash128 m_PrevHash;
         bool m_Registered;
 
@@ -679,6 +685,11 @@ namespace GaussianSplatting.Runtime
             m_GpuPosData = new GraphicsBuffer(GraphicsBuffer.Target.Raw | GraphicsBuffer.Target.CopySource, (int)(posDataMaxSize / 4), 4) { name = "GaussianPosData" };
             m_GpuOtherData = new GraphicsBuffer(GraphicsBuffer.Target.Raw | GraphicsBuffer.Target.CopySource, (int)(otherDataMaxSize / 4), 4) { name = "GaussianOtherData" };
             m_GpuSHData = new GraphicsBuffer(GraphicsBuffer.Target.Raw, (int)(shDataMaxSize / 4), 4) { name = "GaussianSHData" };
+            // Back buffers for double-buffered upload
+            m_GpuPosDataBack   = new GraphicsBuffer(GraphicsBuffer.Target.Raw | GraphicsBuffer.Target.CopySource, (int)(posDataMaxSize / 4), 4) { name = "GaussianPosDataBack" };
+            m_GpuOtherDataBack = new GraphicsBuffer(GraphicsBuffer.Target.Raw | GraphicsBuffer.Target.CopySource, (int)(otherDataMaxSize / 4), 4) { name = "GaussianOtherDataBack" };
+            m_GpuSHDataBack    = new GraphicsBuffer(GraphicsBuffer.Target.Raw, (int)(shDataMaxSize / 4), 4) { name = "GaussianSHDataBack" };
+            m_DoubleBufferingEnabled = true;
             if (asset.chunkData != null && asset.chunkData.dataSize != 0)
                 m_GpuChunks = new GraphicsBuffer(GraphicsBuffer.Target.Structured,
                     (int)(chunkDataMaxSize / UnsafeUtility.SizeOf<GaussianSplatAsset.ChunkInfo>()),
@@ -743,9 +754,22 @@ namespace GaussianSplatting.Runtime
             }
 
             m_SplatCount = asset.splatCount;
-            m_GpuPosData.SetData(asset.posData.GetData<uint>());
-            m_GpuOtherData.SetData(asset.otherData.GetData<uint>());
-            m_GpuSHData.SetData(asset.shData.GetData<uint>());
+
+            if (m_DoubleBufferingEnabled && m_GpuPosDataBack != null)
+            {
+                // Double-buffer path: upload to back buffer, then swap.
+                // The GPU reads from front; we write to back — no sync stall.
+                m_GpuPosDataBack.SetData(asset.posData.GetData<uint>());
+                m_GpuOtherDataBack.SetData(asset.otherData.GetData<uint>());
+                m_GpuSHDataBack.SetData(asset.shData.GetData<uint>());
+                SwapBuffers();
+            }
+            else
+            {
+                m_GpuPosData.SetData(asset.posData.GetData<uint>());
+                m_GpuOtherData.SetData(asset.otherData.GetData<uint>());
+                m_GpuSHData.SetData(asset.shData.GetData<uint>());
+            }
 
             var (texWidth, texHeight) = GaussianSplatAsset.CalcTextureSize(asset.splatCount);
             var texFormat = GaussianSplatAsset.ColorFormatToGraphics(asset.colorFormat);
@@ -765,6 +789,14 @@ namespace GaussianSplatting.Runtime
             }
 
             InitSortBuffers(splatCount);
+        }
+
+        /// <summary>Swap front and back GPU buffers (double-buffer rotation).</summary>
+        void SwapBuffers()
+        {
+            (m_GpuPosData,   m_GpuPosDataBack)   = (m_GpuPosDataBack,   m_GpuPosData);
+            (m_GpuOtherData, m_GpuOtherDataBack) = (m_GpuOtherDataBack, m_GpuOtherData);
+            (m_GpuSHData,    m_GpuSHDataBack)    = (m_GpuSHDataBack,    m_GpuSHData);
         }
 
         void CreateResourcesForAssetV0()
@@ -990,6 +1022,10 @@ namespace GaussianSplatting.Runtime
             DisposeBuffer(ref m_GpuPosData);
             DisposeBuffer(ref m_GpuOtherData);
             DisposeBuffer(ref m_GpuSHData);
+            DisposeBuffer(ref m_GpuPosDataBack);
+            DisposeBuffer(ref m_GpuOtherDataBack);
+            DisposeBuffer(ref m_GpuSHDataBack);
+            m_DoubleBufferingEnabled = false;
             DisposeBuffer(ref m_GpuChunks);
 
             DisposeBuffer(ref m_GpuView);
