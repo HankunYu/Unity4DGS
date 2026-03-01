@@ -52,8 +52,6 @@ namespace GaussianSplatting.Runtime
             public GraphicsBuffer sortDistances;
             public GraphicsBuffer sortKeys;
             public GpuSorting.Args sorterArgs;
-            public GraphicsBuffer visibleCount;    // 1 uint: how many splats are visible this frame
-            public GraphicsBuffer drawArgs;         // 5 uints: indirect draw arguments
 
             public void Dispose()
             {
@@ -61,22 +59,12 @@ namespace GaussianSplatting.Runtime
                 sortDistances?.Dispose();
                 sortKeys?.Dispose();
                 sorterArgs.resources.Dispose();
-                visibleCount?.Dispose();
-                drawArgs?.Dispose();
                 viewData = null;
                 sortDistances = null;
                 sortKeys = null;
-                visibleCount = null;
-                drawArgs = null;
             }
         }
 
-
-        static bool TryGetKernelIdx(ComputeShader cs, string name, out int idx)
-        {
-            try { idx = cs.FindKernel(name); return idx >= 0; }
-            catch { idx = -1; return false; }
-        }
         void DisposeGlobalResources()
         {
             foreach (var kvp in m_GlobalGroups)
@@ -211,8 +199,6 @@ namespace GaussianSplatting.Runtime
                 cache.viewData?.Dispose();
                 cache.sortDistances?.Dispose();
                 cache.sortKeys?.Dispose();
-                cache.visibleCount?.Dispose();
-                cache.drawArgs?.Dispose();
                 cache.viewData = new GraphicsBuffer(GraphicsBuffer.Target.Structured, splatCount, GaussianSplatRenderer.kGpuViewDataSize)
                 {
                     name = $"GaussianGlobalViewData_{renderOrder}"
@@ -225,16 +211,6 @@ namespace GaussianSplatting.Runtime
                 {
                     name = $"GaussianGlobalSortIndices_{renderOrder}"
                 };
-                cache.visibleCount = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, 4)
-                {
-                    name = $"GaussianGlobalVisibleCount_{renderOrder}"
-                };
-                cache.drawArgs = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments, 5, 4)
-                {
-                    name = $"GaussianGlobalDrawArgs_{renderOrder}"
-                };
-                // Initialize draw args with safe defaults
-                cache.drawArgs.SetData(new uint[] { 6, 0, 0, 0, 0 });
                 cache.splatCapacity = splatCount;
                 cache.hasSortedKeys = false;
             }
@@ -323,14 +299,6 @@ namespace GaussianSplatting.Runtime
                 Material groupDisplayMat = null;
                 int dstOffset = 0;
                 bool groupValid = true;
-
-                // Clear visible splat counter before accumulating across all renderers in this group
-                if (groupCache.visibleCount != null && TryGetKernelIdx(reference.m_CSSplatUtilities, "CSClearVisible", out int clearKernelIdx))
-                {
-                    cmb.SetComputeBufferParam(reference.m_CSSplatUtilities, clearKernelIdx, GaussianSplatRenderer.Props.SplatVisibleCount, groupCache.visibleCount);
-                    cmb.DispatchCompute(reference.m_CSSplatUtilities, clearKernelIdx, 1, 1, 1);
-                }
-
                 for (int i = groupStart; i < groupEnd; ++i)
                 {
                     var gs = m_ActiveSplats[i].Item1;
@@ -354,8 +322,7 @@ namespace GaussianSplatting.Runtime
 
                     bool copySuccess = gs.CopyViewDataAndDistances(cmb, cam, gs.transform.localToWorldMatrix,
                         groupCache.viewData, groupCache.sortDistances, groupCache.sortKeys,
-                        0, dstOffset, gs.splatCount, groupSortNeeded || !groupCache.hasSortedKeys,
-                        groupCache.visibleCount);
+                        0, dstOffset, gs.splatCount, groupSortNeeded || !groupCache.hasSortedKeys);
                     if (!copySuccess)
                     {
                         groupValid = false;
@@ -390,20 +357,7 @@ namespace GaussianSplatting.Runtime
                 m_GlobalMpb.SetBuffer(GaussianSplatRenderer.Props.OrderBuffer, groupCache.sortKeys);
 
                 cmb.BeginSample(s_ProfDraw);
-                // Write indirect draw args from the GPU visible count, then draw only visible splats
-                if (groupCache.visibleCount != null && groupCache.drawArgs != null &&
-                    TryGetKernelIdx(reference.m_CSSplatUtilities, "CSWriteDrawArgs", out int writeArgsKernelIdx))
-                {
-                    cmb.SetComputeBufferParam(reference.m_CSSplatUtilities, writeArgsKernelIdx, GaussianSplatRenderer.Props.SplatVisibleCount, groupCache.visibleCount);
-                    cmb.SetComputeBufferParam(reference.m_CSSplatUtilities, writeArgsKernelIdx, GaussianSplatRenderer.Props.DrawArgsBuffer, groupCache.drawArgs);
-                    cmb.DispatchCompute(reference.m_CSSplatUtilities, writeArgsKernelIdx, 1, 1, 1);
-                    cmb.DrawProceduralIndirect(reference.m_GpuIndexBuffer, Matrix4x4.identity, groupDisplayMat, 0, MeshTopology.Triangles, groupCache.drawArgs, 0, m_GlobalMpb);
-                }
-                else
-                {
-                    // Fallback: draw all splats (no culling)
-                    cmb.DrawProcedural(reference.m_GpuIndexBuffer, Matrix4x4.identity, groupDisplayMat, 0, MeshTopology.Triangles, 6, dstOffset, m_GlobalMpb);
-                }
+                cmb.DrawProcedural(reference.m_GpuIndexBuffer, Matrix4x4.identity, groupDisplayMat, 0, MeshTopology.Triangles, 6, dstOffset, m_GlobalMpb);
                 cmb.EndSample(s_ProfDraw);
 
                 hasRenderedAGroup = true;
@@ -648,8 +602,6 @@ namespace GaussianSplatting.Runtime
             public static readonly int VecScreenParams = Shader.PropertyToID("_VecScreenParams");
             public static readonly int VecWorldSpaceCameraPos = Shader.PropertyToID("_VecWorldSpaceCameraPos");
             public static readonly int CameraTargetTexture = Shader.PropertyToID("_CameraTargetTexture");
-            public static readonly int SplatVisibleCount  = Shader.PropertyToID("_SplatVisibleCount");
-            public static readonly int DrawArgsBuffer     = Shader.PropertyToID("_DrawArgsBuffer");
             public static readonly int SelectionCenter = Shader.PropertyToID("_SelectionCenter");
             public static readonly int SelectionDelta = Shader.PropertyToID("_SelectionDelta");
             public static readonly int SelectionDeltaRot = Shader.PropertyToID("_SelectionDeltaRot");
@@ -1172,8 +1124,7 @@ namespace GaussianSplatting.Runtime
 
         internal bool CopyViewDataAndDistances(CommandBuffer cmb, Camera cam, Matrix4x4 matrix,
             GraphicsBuffer dstViewData, GraphicsBuffer dstSortDistances, GraphicsBuffer dstSortKeys,
-            int srcStartIndex, int dstStartIndex, int copyCount, bool writeSortKeys,
-            GraphicsBuffer visibleCountBuf = null)
+            int srcStartIndex, int dstStartIndex, int copyCount, bool writeSortKeys)
         {
             if (copyCount <= 0)
                 return true;
@@ -1190,8 +1141,6 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeBufferParam(m_CSSplatUtilities, kernelIndex, Props.CopyDstViewData, dstViewData);
             cmb.SetComputeBufferParam(m_CSSplatUtilities, kernelIndex, Props.CopyDstSortDistances, dstSortDistances);
             cmb.SetComputeBufferParam(m_CSSplatUtilities, kernelIndex, Props.CopyDstSortKeys, dstSortKeys);
-            if (visibleCountBuf != null)
-                cmb.SetComputeBufferParam(m_CSSplatUtilities, kernelIndex, Props.SplatVisibleCount, visibleCountBuf);
             cmb.SetComputeIntParam(m_CSSplatUtilities, Props.CopySrcStartIndex, srcStartIndex);
             cmb.SetComputeIntParam(m_CSSplatUtilities, Props.CopyDstStartIndex, dstStartIndex);
             cmb.SetComputeIntParam(m_CSSplatUtilities, Props.CopyKernelCount, copyCount);
