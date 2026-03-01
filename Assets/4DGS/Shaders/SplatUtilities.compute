@@ -5,6 +5,8 @@
 #pragma kernel CSCalcDistances
 #pragma kernel CSCalcViewData
 #pragma kernel CSCopyViewDataAndDistances
+#pragma kernel CSClearVisible
+#pragma kernel CSWriteDrawArgs
 #pragma kernel CSUpdateEditData
 #pragma kernel CSInitEditData
 #pragma kernel CSClearBuffer
@@ -88,6 +90,10 @@ RWStructuredBuffer<uint> _CopyDstSortDistances;
 RWStructuredBuffer<uint> _CopyDstSortKeys;
 uint _CopySrcStartIndex, _CopyDstStartIndex, _CopyKernelCount;
 uint _CopyWriteKeys;
+
+// Culling: visible splat counter and draw args buffer
+RWStructuredBuffer<uint> _SplatVisibleCount;
+RWStructuredBuffer<uint> _DrawArgsBuffer;
 
 float _SplatScale;
 float _SplatOpacityScale;
@@ -310,13 +316,45 @@ void CSCopyViewDataAndDistances(uint3 id : SV_DispatchThreadID)
     if (srcIdx >= _SplatCount)
         return;
 
-    _CopyDstViewData[dstIdx] = _SplatViewData[srcIdx];
+    SplatViewData viewSrc = _SplatViewData[srcIdx];
+    _CopyDstViewData[dstIdx] = viewSrc;
 
-    float3 pos = LoadSplatPos(srcIdx);
-    pos = mul(_MatrixMV, float4(pos.xyz, 1)).xyz;
-    _CopyDstSortDistances[dstIdx] = FloatToSortableUint(pos.z);
+    if (viewSrc.pos.w > 0)
+    {
+        // Visible splat: compute sort distance normally and count it
+        float3 pos = LoadSplatPos(srcIdx);
+        pos = mul(_MatrixMV, float4(pos.xyz, 1)).xyz;
+        _CopyDstSortDistances[dstIdx] = FloatToSortableUint(pos.z);
+        uint ignored;
+        InterlockedAdd(_SplatVisibleCount[0], 1, ignored);
+    }
+    else
+    {
+        // Invisible splat (behind camera / deleted / cut): sort to END so it's skipped by indirect draw
+        _CopyDstSortDistances[dstIdx] = 0xFFFFFFFF;
+    }
+
     if (_CopyWriteKeys != 0)
         _CopyDstSortKeys[dstIdx] = dstIdx;
+}
+
+// Clear the visible splat counter (dispatch 1 thread before copy pass)
+[numthreads(1,1,1)]
+void CSClearVisible(uint3 id : SV_DispatchThreadID)
+{
+    _SplatVisibleCount[0] = 0;
+}
+
+// Write draw-indirect args from the visible count (dispatch 1 thread after copy pass)
+// _DrawArgsBuffer layout: { indexCountPerInstance, instanceCount, startIndex, baseVertex, startInstance }
+[numthreads(1,1,1)]
+void CSWriteDrawArgs(uint3 id : SV_DispatchThreadID)
+{
+    _DrawArgsBuffer[0] = 6;                      // indexCountPerInstance (one quad = 2 triangles = 6 indices)
+    _DrawArgsBuffer[1] = _SplatVisibleCount[0];  // instanceCount = visible splats only
+    _DrawArgsBuffer[2] = 0;
+    _DrawArgsBuffer[3] = 0;
+    _DrawArgsBuffer[4] = 0;
 }
 
 
