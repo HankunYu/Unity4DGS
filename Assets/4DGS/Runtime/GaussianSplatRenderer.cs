@@ -299,38 +299,88 @@ namespace GaussianSplatting.Runtime
                 Material groupDisplayMat = null;
                 int dstOffset = 0;
                 bool groupValid = true;
-                for (int i = groupStart; i < groupEnd; ++i)
+
+                // --- Group view cache: check if camera + all assets unchanged ---
+                // If so, skip the entire CalcViewData + CopyViewDataAndDistances + Sort pipeline
+                // and just re-render from the existing group buffers.
+                Matrix4x4 curCamMatrix = cam.worldToCameraMatrix;
+                bool groupCacheHit = groupCache.hasSortedKeys && !groupSortNeeded;
+                if (groupCacheHit)
                 {
-                    var gs = m_ActiveSplats[i].Item1;
-                    gs.EnsureMaterials();
-                    matComposite = gs.m_MatComposite;
-                    groupDisplayMat ??= gs.m_MatSplats;
-                    if (gs.m_MatSplats == null)
+                    for (int i = groupStart; i < groupEnd; ++i)
                     {
-                        groupValid = false;
-                        break;
+                        var gs = m_ActiveSplats[i].Item1;
+                        if (!gs.m_GroupViewCacheValid ||
+                            gs.m_Asset != gs.m_CachedGroupAsset ||
+                            curCamMatrix != gs.m_CachedGroupCamMatrix)
+                        {
+                            groupCacheHit = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (groupCacheHit)
+                {
+                    // Fast path: nothing changed — skip all GPU compute and re-use last frame's results
+                    for (int i = groupStart; i < groupEnd; ++i)
+                    {
+                        var gs = m_ActiveSplats[i].Item1;
+                        gs.EnsureMaterials();
+                        matComposite = gs.m_MatComposite;
+                        groupDisplayMat ??= gs.m_MatSplats;
+                        dstOffset += gs.splatCount;
+                        ++gs.m_FrameCounter;
+                    }
+                }
+                else
+                {
+                    // Slow path: run the full compute pipeline
+                    for (int i = groupStart; i < groupEnd; ++i)
+                    {
+                        var gs = m_ActiveSplats[i].Item1;
+                        gs.EnsureMaterials();
+                        matComposite = gs.m_MatComposite;
+                        groupDisplayMat ??= gs.m_MatSplats;
+                        if (gs.m_MatSplats == null)
+                        {
+                            groupValid = false;
+                            break;
+                        }
+
+                        cmb.BeginSample(s_ProfCalcView);
+                        bool calcSuccess = gs.CalcViewData(cmb, cam);
+                        cmb.EndSample(s_ProfCalcView);
+                        if (!calcSuccess)
+                        {
+                            groupValid = false;
+                            break;
+                        }
+
+                        bool copySuccess = gs.CopyViewDataAndDistances(cmb, cam, gs.transform.localToWorldMatrix,
+                            groupCache.viewData, groupCache.sortDistances, groupCache.sortKeys,
+                            0, dstOffset, gs.splatCount, groupSortNeeded || !groupCache.hasSortedKeys);
+                        if (!copySuccess)
+                        {
+                            groupValid = false;
+                            break;
+                        }
+
+                        dstOffset += gs.splatCount;
+                        ++gs.m_FrameCounter;
                     }
 
-                    cmb.BeginSample(s_ProfCalcView);
-                    bool calcSuccess = gs.CalcViewData(cmb, cam);
-                    cmb.EndSample(s_ProfCalcView);
-                    if (!calcSuccess)
+                    // Update group view cache after successful compute
+                    if (groupValid)
                     {
-                        groupValid = false;
-                        break;
+                        for (int i = groupStart; i < groupEnd; ++i)
+                        {
+                            var gs = m_ActiveSplats[i].Item1;
+                            gs.m_CachedGroupAsset = gs.m_Asset;
+                            gs.m_CachedGroupCamMatrix = curCamMatrix;
+                            gs.m_GroupViewCacheValid = true;
+                        }
                     }
-
-                    bool copySuccess = gs.CopyViewDataAndDistances(cmb, cam, gs.transform.localToWorldMatrix,
-                        groupCache.viewData, groupCache.sortDistances, groupCache.sortKeys,
-                        0, dstOffset, gs.splatCount, groupSortNeeded || !groupCache.hasSortedKeys);
-                    if (!copySuccess)
-                    {
-                        groupValid = false;
-                        break;
-                    }
-
-                    dstOffset += gs.splatCount;
-                    ++gs.m_FrameCounter;
                 }
 
                 if (!groupValid || groupDisplayMat == null || dstOffset == 0)
@@ -488,6 +538,11 @@ namespace GaussianSplatting.Runtime
             DebugChunkBounds,
         }
         public GaussianSplatAsset m_Asset;
+
+        // Group-level view cache: skip CalcView+Copy+Sort when camera+frame both unchanged
+        internal bool m_GroupViewCacheValid = false;
+        internal GaussianSplatAsset m_CachedGroupAsset = null;
+        internal Matrix4x4 m_CachedGroupCamMatrix;
         public GaussianSplatAsset m_NextAsset;
 
         [Tooltip("Rendering order compared to other splats. Within same order splats are sorted by distance. Higher order splats render 'on top of' lower order splats.")]
