@@ -562,7 +562,7 @@ namespace GaussianSplatting.Runtime
         internal int m_FrameCounter;
         GaussianSplatAsset m_PrevAsset;
         private int m_DeferAssetFrames = 0;
-        private const int kDeferFrames = 0;
+        private const int kDeferFrames = 1;  // must be >=1 for deferred asset switch logic to work
         Hash128 m_PrevHash;
         bool m_Registered;
 
