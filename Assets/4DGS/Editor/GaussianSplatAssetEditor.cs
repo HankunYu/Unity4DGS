@@ -41,7 +41,7 @@ namespace GaussianSplatting.Editor
             var splatCount = gs.splatCount;
             EditorGUILayout.TextField("Splats", $"{splatCount:N0}");
             var prevBackColor = GUI.backgroundColor;
-            if (gs.formatVersion != GaussianSplatAsset.kCurrentVersion)
+            if (gs.formatVersion != GaussianSplatAsset.CurrentVersion)
                 GUI.backgroundColor *= Color.red;
             EditorGUILayout.IntField("Version", gs.formatVersion);
             GUI.backgroundColor = prevBackColor;

@@ -14,8 +14,8 @@ namespace GaussianSplatting.Runtime
             Box
         }
 
-        public Type m_Type = Type.Ellipsoid;
-        public bool m_Invert = false;
+        public Type cutoutType = Type.Ellipsoid;
+        public bool invert = false;
 
         public struct ShaderData // match GaussianCutoutShaderData in CS
         {
@@ -30,7 +30,7 @@ namespace GaussianSplatting.Runtime
             {
                 var tr = self.transform;
                 sd.matrix = tr.worldToLocalMatrix * rendererMatrix;
-                sd.typeAndFlags = ((uint)self.m_Type) | (self.m_Invert ? 0x100u : 0u);
+                sd.typeAndFlags = ((uint)self.cutoutType) | (self.invert ? 0x100u : 0u);
             }
             else
             {
@@ -40,7 +40,7 @@ namespace GaussianSplatting.Runtime
         }
 
 #if UNITY_EDITOR
-        public void OnDrawGizmos()
+        private void OnDrawGizmos()
         {
             Gizmos.matrix = transform.localToWorldMatrix;
             var color = Color.magenta;
@@ -56,18 +56,18 @@ namespace GaussianSplatting.Runtime
                     var activeSplat = activeGo.GetComponent<GaussianSplatRenderer>();
                     if (activeSplat != null)
                     {
-                        if (activeSplat.m_Cutouts != null && activeSplat.m_Cutouts.Contains(this))
+                        if (activeSplat.cutouts != null && activeSplat.cutouts.Contains(this))
                             color.a = 0.5f;
                     }
                 }
             }
 
             Gizmos.color = color;
-            if (m_Type == Type.Ellipsoid)
+            if (cutoutType == Type.Ellipsoid)
             {
                 Gizmos.DrawWireSphere(Vector3.zero, 1.0f);
             }
-            if (m_Type == Type.Box)
+            if (cutoutType == Type.Box)
             {
                 Gizmos.DrawWireCube(Vector3.zero, Vector3.one * 2);
             }

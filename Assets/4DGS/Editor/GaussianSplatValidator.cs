@@ -91,7 +91,7 @@ namespace GaussianSplatting.Editor
                 var captureTexture = new Texture2D(width, height, GraphicsFormat.R8G8B8A8_SRGB, TextureCreationFlags.None);
                 NativeArray<Color32> diffPixels = new(width * height, Allocator.Persistent);
 
-                gaussians.m_Asset = gs;
+                gaussians.splatAsset = gs;
                 gaussians.Update();
                 gaussians.ActivateCamera(item.cameraIndex);
                 cam.Render();
@@ -147,7 +147,7 @@ namespace GaussianSplatting.Editor
             }
 
             cam.targetTexture = null;
-            gaussians.m_Asset = oldAsset;
+            gaussians.splatAsset = oldAsset;
             gaussians.Update();
             cam.transform.localPosition = oldCamPos;
             cam.transform.localRotation = oldCamRot;

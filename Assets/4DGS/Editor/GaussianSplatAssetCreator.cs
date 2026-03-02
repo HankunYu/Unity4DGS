@@ -573,8 +573,8 @@ namespace GaussianSplatting.Editor
                 float4 chunkMaxcol = float.NegativeInfinity;
                 float3 chunkMaxshs = float.NegativeInfinity;
 
-                int splatBegin = math.min(chunkIdx * GaussianSplatAsset.kChunkSize, splatData.Length);
-                int splatEnd = math.min((chunkIdx + 1) * GaussianSplatAsset.kChunkSize, splatData.Length);
+                int splatBegin = math.min(chunkIdx * GaussianSplatAsset.ChunkSize, splatData.Length);
+                int splatEnd = math.min((chunkIdx + 1) * GaussianSplatAsset.ChunkSize, splatData.Length);
 
                 // calculate data bounds inside the chunk
                 for (int i = splatBegin; i < splatEnd; ++i)
@@ -679,7 +679,7 @@ namespace GaussianSplatting.Editor
 
         static void CreateChunkData(NativeArray<InputSplatData> splatData, string filePath, ref Hash128 dataHash)
         {
-            int chunkCount = (splatData.Length + GaussianSplatAsset.kChunkSize - 1) / GaussianSplatAsset.kChunkSize;
+            int chunkCount = (splatData.Length + GaussianSplatAsset.ChunkSize - 1) / GaussianSplatAsset.ChunkSize;
             CalcChunkDataJob job = new CalcChunkDataJob
             {
                 splatData = splatData,
@@ -902,11 +902,11 @@ namespace GaussianSplatting.Editor
         static int SplatIndexToTextureIndex(uint idx)
         {
             uint2 xy = GaussianUtils.DecodeMorton2D_16x16(idx);
-            uint width = GaussianSplatAsset.kTextureWidth / 16;
+            uint width = GaussianSplatAsset.TextureWidth / 16;
             idx >>= 8;
             uint x = (idx % width) * 16 + xy.x;
             uint y = (idx / width) * 16 + xy.y;
-            return (int)(y * GaussianSplatAsset.kTextureWidth + x);
+            return (int)(y * GaussianSplatAsset.TextureWidth + x);
         }
 
         [BurstCompile]
