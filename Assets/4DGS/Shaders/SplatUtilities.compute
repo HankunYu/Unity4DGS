@@ -313,8 +313,8 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID)
     half opacityScale = _SplatOpacityScale;
     float splatScale = _SplatScale;
 
-    // deleted?
-    if (_SplatBitsValid)
+    // deleted? (guard against OOB for target-only extra splats during morph)
+    if (_SplatBitsValid && idx < _SrcSplatCount)
     {
         uint wordIdx = idx / 32;
         uint bitIdx = idx & 31;
