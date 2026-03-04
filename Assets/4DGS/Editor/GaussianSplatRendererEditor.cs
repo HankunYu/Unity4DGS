@@ -35,6 +35,7 @@ namespace GaussianSplatting.Editor
         SerializedProperty m_PropShaderDebugPoints;
         SerializedProperty m_PropShaderDebugBoxes;
         SerializedProperty m_PropCSSplatUtilities;
+        SerializedProperty m_PropCSTileRender;
 
         bool m_ResourcesExpanded = false;
         int m_CameraIndex = 0;
@@ -75,6 +76,7 @@ namespace GaussianSplatting.Editor
             m_PropShaderDebugPoints = serializedObject.FindProperty("shaderDebugPoints");
             m_PropShaderDebugBoxes = serializedObject.FindProperty("shaderDebugBoxes");
             m_PropCSSplatUtilities = serializedObject.FindProperty("csSplatUtilities");
+            m_PropCSTileRender = serializedObject.FindProperty("csTileRender");
 
             s_AllEditors.Add(this);
         }
@@ -127,6 +129,7 @@ namespace GaussianSplatting.Editor
                 EditorGUILayout.PropertyField(m_PropShaderDebugPoints);
                 EditorGUILayout.PropertyField(m_PropShaderDebugBoxes);
                 EditorGUILayout.PropertyField(m_PropCSSplatUtilities);
+                EditorGUILayout.PropertyField(m_PropCSTileRender);
             }
             bool validAndEnabled = gs && gs.enabled && gs.gameObject.activeInHierarchy && gs.HasValidAsset;
             if (validAndEnabled && !gs.HasValidRenderSetup)
