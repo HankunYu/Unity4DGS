@@ -40,6 +40,9 @@ namespace GaussianSplatting.Runtime
         // ── Tile renderer ─────────────────────────────────────────────
         GpuSorting _tileSorter;
         ComputeShader _tileCs;
+        // Set by URP/HDRP feature before SortAndRenderSplats; tile renderer
+        // writes directly here (avoids SetRenderTarget/Blit inside render graph).
+        public RenderTargetIdentifier TileOutputTarget;
         int _kernelTileAssign  = -1;
         int _kernelBuildRanges = -1;
         int _kernelRenderTiles = -1;
@@ -86,7 +89,6 @@ namespace GaussianSplatting.Runtime
             public GraphicsBuffer tileValues;       // splatId per pair
             public GraphicsBuffer tileRanges;       // uint2[numTiles]: (start,end) per tile
             public GraphicsBuffer tilePairCounter;  // 4-byte atomic counter
-            public RenderTexture  tileOutputRT;     // RWTexture2D<float4> output
             public GpuSorting.Args tileSorterArgs;
             public int tileCountX, tileCountY;      // current tile grid dimensions
 
@@ -104,7 +106,6 @@ namespace GaussianSplatting.Runtime
                 tileValues?.Dispose();     tileValues = null;
                 tileRanges?.Dispose();     tileRanges = null;
                 tilePairCounter?.Dispose(); tilePairCounter = null;
-                if (tileOutputRT != null) { tileOutputRT.Release(); tileOutputRT = null; }
                 tileSorterArgs.resources.Dispose();
             }
         }
@@ -345,21 +346,6 @@ namespace GaussianSplatting.Runtime
                 cache.tilePairCounter = new GraphicsBuffer(
                     GraphicsBuffer.Target.Raw, 1, 4) { name = "TilePairCounter" };
 
-            // Output RenderTexture — random write enabled
-            if (cache.tileOutputRT == null ||
-                cache.tileOutputRT.width  != screenW ||
-                cache.tileOutputRT.height != screenH)
-            {
-                if (cache.tileOutputRT != null) cache.tileOutputRT.Release();
-                cache.tileOutputRT = new RenderTexture(screenW, screenH, 0,
-                    RenderTextureFormat.ARGBFloat)
-                {
-                    enableRandomWrite = true,
-                    name = "GaussianTileOutput"
-                };
-                cache.tileOutputRT.Create();
-            }
-
             // Sorter for tile pairs
             if (cache.tileSorterArgs.resources.altBuffer == null ||
                 cache.tileSorterArgs.count < (uint)GlobalOrderGroupCache.MaxTilePairs)
@@ -441,11 +427,10 @@ namespace GaussianSplatting.Runtime
             cmb.DispatchCompute(_tileCs, _kernelBuildRanges, buildGroups, 1, 1);
 
             renderOnly:
-            // ── Clear output texture ──────────────────────────────────
-            cmb.SetRenderTarget(cache.tileOutputRT);
-            cmb.ClearRenderTarget(false, true, Color.clear);
-
             // ── Kernel 3: tile-based alpha composite ──────────────────
+            // Write directly into GaussianSplatRT (enableRandomWrite=true, set by URP feature).
+            // GaussianSplatRT was cleared by CoreUtils.SetRenderTarget before this dispatch,
+            // so no explicit clear needed. Tiles with no splats leave pixels as (0,0,0,0).
             cmb.SetComputeIntParam   (_tileCs, TileProps.TileCountX,    tileX);
             cmb.SetComputeIntParam   (_tileCs, TileProps.TileCountY,    tileY);
             cmb.SetComputeVectorParam(_tileCs, TileProps.ScreenParams,
@@ -453,11 +438,9 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeBufferParam(_tileCs, _kernelRenderTiles, TileProps.SplatViewData,    cache.viewData);
             cmb.SetComputeBufferParam(_tileCs, _kernelRenderTiles, TileProps.SortedTileValues, cache.tileValues);
             cmb.SetComputeBufferParam(_tileCs, _kernelRenderTiles, TileProps.TileRangesRead,   cache.tileRanges);
-            cmb.SetComputeTextureParam(_tileCs, _kernelRenderTiles, TileProps.OutputTexture,   cache.tileOutputRT);
+            // Bind GaussianSplatRT as UAV output (passed from URP feature via TileOutputTarget)
+            cmb.SetComputeTextureParam(_tileCs, _kernelRenderTiles, TileProps.OutputTexture, TileOutputTarget);
             cmb.DispatchCompute(_tileCs, _kernelRenderTiles, tileX, tileY, 1);
-
-            // ── Blit tile output into current render target (GaussianSplatRT) ──
-            cmb.Blit(cache.tileOutputRT, BuiltinRenderTextureType.CurrentActive);
         }
 
         Material SortAndRenderSplatsGlobal(Camera cam, CommandBuffer cmb)
