@@ -310,14 +310,17 @@ void CSRenderTiles(uint3 groupId : SV_GroupID, uint3 threadId : SV_GroupThreadID
             done = (accum.a >= 0.99);
         }
 
-        // ── Group-level early termination ─────────────────────────────
-        // Use atomic operation to safely aggregate across all threads.
-        if (threadIdx == 0) gs_TileDone = 1;    // assume all done
+        // ── Group-level early termination (2 barriers, no atomics) ─────
+        // Thread 0 sets the flag; barrier ensures all threads see it.
+        // Any still-active thread clears it via plain store (safe: all
+        // writers store the same value 0, well-defined on modern GPUs).
+        // Second barrier ensures the final value is visible to all threads.
+        if (threadIdx == 0) gs_TileDone = 1;
         GroupMemoryBarrierWithGroupSync();
         if (!done && validPixel)
-            InterlockedAnd(gs_TileDone, 0);      // any active thread clears
+            gs_TileDone = 0;
         GroupMemoryBarrierWithGroupSync();
-        if (gs_TileDone != 0) break;             // uniform break: all threads exit together
+        if (gs_TileDone != 0) break;
     }
 
     if (validPixel)

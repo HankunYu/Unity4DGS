@@ -331,6 +331,21 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID)
         centerClipPos.w = 0;
     }
 
+    // Conservative frustum cull: max scale as bounding radius → clip-space margin
+    if (centerClipPos.w > 0)
+    {
+        float maxScale = max(max(abs(splat.scale.x), abs(splat.scale.y)), abs(splat.scale.z))
+                       * splatScale * animScaleMul;
+        float clipMargin = maxScale * abs(UNITY_MATRIX_P._m00);
+        float w = centerClipPos.w;
+        bool outsideFrustum = (centerClipPos.x < -(w + clipMargin)) ||
+                              (centerClipPos.x >  (w + clipMargin)) ||
+                              (centerClipPos.y < -(w + clipMargin)) ||
+                              (centerClipPos.y >  (w + clipMargin));
+        if (outsideFrustum)
+            centerClipPos.w = 0;
+    }
+
     view.pos = centerClipPos;
     bool behindCam = centerClipPos.w <= 0;
     if (!behindCam)
