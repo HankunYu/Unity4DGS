@@ -306,7 +306,9 @@ namespace GaussianSplatting.Runtime
         {
             if (_tileCs == null)
             {
-                _tileCs = reference.csTileRender;
+                // Prefer Inspector-assigned shader; fall back to Resources auto-load
+                _tileCs = reference.csTileRender
+                    ?? Resources.Load<ComputeShader>("GaussianTileRender");
                 if (_tileCs == null) return false;
                 _kernelTileAssign  = _tileCs.FindKernel("CSGaussianTileAssign");
                 _kernelBuildRanges = _tileCs.FindKernel("CSBuildTileRanges");
