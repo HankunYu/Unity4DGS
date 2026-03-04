@@ -373,13 +373,17 @@ namespace GaussianSplatting.Runtime
         }
 
         void DispatchTileRender(CommandBuffer cmb, Camera cam,
-                                GlobalOrderGroupCache cache, int splatCount)
+                                GlobalOrderGroupCache cache, int splatCount, bool sortNeeded)
         {
             int screenW = cam.pixelWidth;
             int screenH = cam.pixelHeight;
             int tileX   = cache.tileCountX;
             int tileY   = cache.tileCountY;
             int numTiles = tileX * tileY;
+
+            // ── On hit frames skip assign/sort/build; only re-render ─────
+            if (!sortNeeded && cache.tileRanges != null)
+                goto renderOnly;
 
             // ── Read PREVIOUS frame's pair count (before submitting GPU work) ─
             // GetData stalls until the GPU counter buffer is ready.
@@ -434,6 +438,7 @@ namespace GaussianSplatting.Runtime
             int buildGroups = ((int)sortCount + 1023) / 1024;
             cmb.DispatchCompute(_tileCs, _kernelBuildRanges, buildGroups, 1, 1);
 
+            renderOnly:
             // ── Clear output texture ──────────────────────────────────
             cmb.SetRenderTarget(cache.tileOutputRT);
             cmb.ClearRenderTarget(false, true, Color.clear);
@@ -563,7 +568,8 @@ namespace GaussianSplatting.Runtime
                     EnsureTileResources(reference, groupCache,
                         cam.pixelWidth, cam.pixelHeight, dstOffset))
                 {
-                    DispatchTileRender(cmb, cam, groupCache, dstOffset);
+                    DispatchTileRender(cmb, cam, groupCache, dstOffset,
+                        groupSortNeeded || !groupCache.hasSortedKeys);
                     usedTile = true;
                 }
 
