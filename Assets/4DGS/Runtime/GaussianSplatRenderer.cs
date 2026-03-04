@@ -1168,6 +1168,9 @@ namespace GaussianSplatting.Runtime
                 _matDebugPoints = new Material(shaderDebugPoints) {name = "GaussianDebugPoints"};
                 _matDebugBoxes = new Material(shaderDebugBoxes) {name = "GaussianDebugBoxes"};
             }
+            // Auto-load tile render compute shader if not assigned in Inspector
+            if (csTileRender == null)
+                csTileRender = Resources.Load<ComputeShader>("GaussianTileRender");
         }
 
         public void EnsureSorterAndRegister()
