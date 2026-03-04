@@ -42,6 +42,14 @@ namespace GaussianSplatting.Runtime
         ComputeShader _globalSorterShader;
         int _globalFrameId;
 
+        // ── Cross-camera GPU synchronisation ─────────────────────────
+        // On D3D12/Vulkan, render graph does not insert UAV barriers for
+        // manually-managed GraphicsBuffers between different cameras' passes.
+        // A GraphicsFence at the end of each camera's splat work ensures the
+        // next camera waits for completion before reusing shared buffers.
+        GraphicsFence _lastRenderFence;
+        bool _hasRenderFence;
+
         // ── Tile renderer ─────────────────────────────────────────────
         int _lastRetiredCleanupFrame = -1;
         GpuSorting _tileSorter;
@@ -155,6 +163,7 @@ namespace GaussianSplatting.Runtime
             _tileSorter = null;
             _tileCs = null;
             _kernelClearTileData = _kernelTileAssign = _kernelBuildRanges = _kernelRenderTiles = -1;
+            _hasRenderFence = false;
         }
 
         public void RegisterSplat(GaussianSplatRenderer r)
@@ -234,9 +243,23 @@ namespace GaussianSplatting.Runtime
         // ReSharper disable once MemberCanBePrivate.Global - used by HDRP/URP features that are not always compiled
         public Material SortAndRenderSplats(Camera cam, CommandBuffer cmb)
         {
-            if (CanUseGlobalSortPath())
-                return SortAndRenderSplatsGlobal(cam, cmb);
-            return SortAndRenderSplatsPerObject(cam, cmb);
+            // Wait for the previous camera's GPU work on shared buffers to
+            // complete.  Required on D3D12/Vulkan where the render graph does
+            // not insert UAV barriers for our manually-managed GraphicsBuffers.
+            // On Metal/OpenGL this is a no-op (already signaled).
+            if (_hasRenderFence)
+                cmb.WaitOnAsyncGraphicsFence(_lastRenderFence);
+
+            Material result = CanUseGlobalSortPath()
+                ? SortAndRenderSplatsGlobal(cam, cmb)
+                : SortAndRenderSplatsPerObject(cam, cmb);
+
+            // Fence after all compute/draw commands so the next camera can
+            // synchronise on our completion.
+            _lastRenderFence = cmb.CreateAsyncGraphicsFence();
+            _hasRenderFence = true;
+
+            return result;
         }
 
         private bool CanUseGlobalSortPath()
