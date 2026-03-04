@@ -43,27 +43,38 @@ namespace GaussianSplatting.Runtime
         // Set by URP/HDRP feature before SortAndRenderSplats; tile renderer
         // writes directly here (avoids SetRenderTarget/Blit inside render graph).
         public RenderTargetIdentifier TileOutputTarget;
-        int _kernelTileAssign  = -1;
-        int _kernelBuildRanges = -1;
-        int _kernelRenderTiles = -1;
+        // Actual render target dimensions (may differ from cam.pixelWidth/Height
+        // when URP render scale != 1 or dynamic resolution is active).
+        // Set by URP/HDRP feature; (0,0) means fall back to cam.pixelWidth/Height.
+        public Vector2Int TileRenderSize;
+        int _kernelClearTileData = -1;
+        int _kernelTileAssign    = -1;
+        int _kernelBuildRanges   = -1;
+        int _kernelRenderTiles   = -1;
 
         static class TileProps
         {
-            public static readonly int SplatCount      = Shader.PropertyToID("_SplatCount");
-            public static readonly int TileCountX      = Shader.PropertyToID("_TileCountX");
-            public static readonly int TileCountY      = Shader.PropertyToID("_TileCountY");
-            public static readonly int MaxTilePairs    = Shader.PropertyToID("_MaxTilePairs");
-            public static readonly int ScreenParams    = Shader.PropertyToID("_ScreenParams");
-            public static readonly int SplatViewData   = Shader.PropertyToID("_SplatViewData");
-            public static readonly int TilePairCounter = Shader.PropertyToID("_TilePairCounter");
-            public static readonly int TileKeys        = Shader.PropertyToID("_TileKeys");
-            public static readonly int TileValues      = Shader.PropertyToID("_TileValues");
-            public static readonly int TilePairCount   = Shader.PropertyToID("_TilePairCount");
-            public static readonly int SortedTileKeys  = Shader.PropertyToID("_SortedTileKeys");
-            public static readonly int TileRanges      = Shader.PropertyToID("_TileRanges");
-            public static readonly int SortedTileValues= Shader.PropertyToID("_SortedTileValues");
-            public static readonly int TileRangesRead  = Shader.PropertyToID("_TileRangesRead");
-            public static readonly int OutputTexture   = Shader.PropertyToID("_OutputTexture");
+            public static readonly int SplatCount       = Shader.PropertyToID("_SplatCount");
+            public static readonly int TileCountX       = Shader.PropertyToID("_TileCountX");
+            public static readonly int TileCountY       = Shader.PropertyToID("_TileCountY");
+            public static readonly int MaxTilePairs     = Shader.PropertyToID("_MaxTilePairs");
+            public static readonly int ScreenParams     = Shader.PropertyToID("_TileScreenParams");
+            public static readonly int SplatViewData    = Shader.PropertyToID("_SplatViewData");
+            public static readonly int TilePairCounter  = Shader.PropertyToID("_TilePairCounter");
+            public static readonly int TileKeys         = Shader.PropertyToID("_TileKeys");
+            public static readonly int TileValues       = Shader.PropertyToID("_TileValues");
+            public static readonly int TilePairCount    = Shader.PropertyToID("_TilePairCount");
+            public static readonly int NumTiles         = Shader.PropertyToID("_NumTiles");
+            public static readonly int SortedTileKeys   = Shader.PropertyToID("_SortedTileKeys");
+            public static readonly int TileRanges       = Shader.PropertyToID("_TileRanges");
+            public static readonly int SortedTileValues = Shader.PropertyToID("_SortedTileValues");
+            public static readonly int TileRangesRead   = Shader.PropertyToID("_TileRangesRead");
+            public static readonly int OutputTexture    = Shader.PropertyToID("_OutputTexture");
+            public static readonly int ClearTileKeys    = Shader.PropertyToID("_ClearTileKeys");
+            public static readonly int ClearTileRanges  = Shader.PropertyToID("_ClearTileRanges");
+            public static readonly int ClearKeyCount    = Shader.PropertyToID("_ClearKeyCount");
+            public static readonly int ClearRangeCount  = Shader.PropertyToID("_ClearRangeCount");
+            public static readonly int TileShift       = Shader.PropertyToID("_TileShift");
         }
 
         private static void DisposeBuffer(ref GraphicsBuffer buf)
@@ -85,12 +96,14 @@ namespace GaussianSplatting.Runtime
 
             // ── Tile-based rendering buffers ──────────────────────────────
             public const int MaxTilePairs = 8 * 1024 * 1024; // 8M (tile,splat) pairs
-            public GraphicsBuffer tileKeys;         // sort key per pair: (tile_id<<18)|depth
+            public GraphicsBuffer tileKeys;         // sort key per pair: (tile_id<<16)|depth
             public GraphicsBuffer tileValues;       // splatId per pair
             public GraphicsBuffer tileRanges;       // uint2[numTiles]: (start,end) per tile
             public GraphicsBuffer tilePairCounter;  // 4-byte atomic counter
             public GpuSorting.Args tileSorterArgs;
             public int tileCountX, tileCountY;      // current tile grid dimensions
+            public bool hasTileRanges;              // true after first tile sort+build
+            public int lastTileCameraId;            // instance ID of last camera that built tile ranges
 
             public void Dispose()
             {
@@ -107,6 +120,7 @@ namespace GaussianSplatting.Runtime
                 tileRanges?.Dispose();     tileRanges = null;
                 tilePairCounter?.Dispose(); tilePairCounter = null;
                 tileSorterArgs.resources.Dispose();
+                hasTileRanges = false;
             }
         }
 
@@ -119,7 +133,7 @@ namespace GaussianSplatting.Runtime
             _globalSorterShader = null;
             _tileSorter = null;
             _tileCs = null;
-            _kernelTileAssign = _kernelBuildRanges = _kernelRenderTiles = -1;
+            _kernelClearTileData = _kernelTileAssign = _kernelBuildRanges = _kernelRenderTiles = -1;
         }
 
         public void RegisterSplat(GaussianSplatRenderer r)
@@ -299,21 +313,20 @@ namespace GaussianSplatting.Runtime
 
         // ── Tile rendering helpers ────────────────────────────────────────
 
-        static readonly uint[] s_ZeroUint = new uint[1];
-        uint[] _tileRangesClearBuf;  // reused per-frame clear buffer for tileRanges
+        static readonly uint[] s_CounterReadback = new uint[1];
 
         bool EnsureTileResources(GaussianSplatRenderer reference, GlobalOrderGroupCache cache,
-                                 int screenW, int screenH, int splatCount)
+                                 int screenW, int screenH)
         {
             if (_tileCs == null)
             {
-                // Prefer Inspector-assigned shader; fall back to Resources auto-load
                 _tileCs = reference.csTileRender
                     ?? Resources.Load<ComputeShader>("GaussianTileRender");
                 if (_tileCs == null) return false;
-                _kernelTileAssign  = _tileCs.FindKernel("CSGaussianTileAssign");
-                _kernelBuildRanges = _tileCs.FindKernel("CSBuildTileRanges");
-                _kernelRenderTiles = _tileCs.FindKernel("CSRenderTiles");
+                _kernelClearTileData = _tileCs.FindKernel("CSClearTileData");
+                _kernelTileAssign    = _tileCs.FindKernel("CSGaussianTileAssign");
+                _kernelBuildRanges   = _tileCs.FindKernel("CSBuildTileRanges");
+                _kernelRenderTiles   = _tileCs.FindKernel("CSRenderTiles");
             }
             if (_tileCs == null) return false;
 
@@ -321,7 +334,6 @@ namespace GaussianSplatting.Runtime
             int tileY = (screenH + 15) / 16;
             int numTiles = tileX * tileY;
 
-            // Allocate / reallocate tile pair buffers when splat count changes
             if (cache.tileKeys == null || cache.tileKeys.count < GlobalOrderGroupCache.MaxTilePairs)
             {
                 cache.tileKeys?.Dispose();
@@ -332,21 +344,20 @@ namespace GaussianSplatting.Runtime
                     GlobalOrderGroupCache.MaxTilePairs, 4) { name = "TileValues" };
             }
 
-            // Reallocate tile ranges when screen resolution changes
             if (cache.tileRanges == null || cache.tileCountX != tileX || cache.tileCountY != tileY)
             {
                 cache.tileRanges?.Dispose();
                 cache.tileRanges = new GraphicsBuffer(GraphicsBuffer.Target.Structured,
-                    numTiles, 8) { name = "TileRanges" };   // uint2 per tile
+                    numTiles, 8) { name = "TileRanges" };
                 cache.tileCountX = tileX;
                 cache.tileCountY = tileY;
+                cache.hasTileRanges = false;
             }
 
             if (cache.tilePairCounter == null)
                 cache.tilePairCounter = new GraphicsBuffer(
                     GraphicsBuffer.Target.Raw, 1, 4) { name = "TilePairCounter" };
 
-            // Sorter for tile pairs
             if (cache.tileSorterArgs.resources.altBuffer == null ||
                 cache.tileSorterArgs.count < (uint)GlobalOrderGroupCache.MaxTilePairs)
             {
@@ -354,91 +365,120 @@ namespace GaussianSplatting.Runtime
                 cache.tileSorterArgs.resources =
                     GpuSorting.SupportResources.Load((uint)GlobalOrderGroupCache.MaxTilePairs);
             }
-            // GpuSorting requires the csSplatUtilities shader (contains radix sort kernels)
             _tileSorter ??= new GpuSorting(reference.csSplatUtilities);
 
             return true;
         }
 
-        void DispatchTileRender(CommandBuffer cmb, Camera cam,
-                                GlobalOrderGroupCache cache, int splatCount, bool sortNeeded)
+        // Compute the optimal bit-split for tile sort keys:
+        // tileIdBits = ceil(log2(numTiles)), depthBits = 32 - tileIdBits.
+        // Maximises depth precision for the actual screen resolution.
+        private static int CalcTileShift(int numTiles)
         {
-            int screenW = cam.pixelWidth;
-            int screenH = cam.pixelHeight;
-            int tileX   = cache.tileCountX;
-            int tileY   = cache.tileCountY;
+            if (numTiles <= 1) return 28;
+            // Integer ceil(log2): find smallest k such that (1 << k) >= numTiles
+            int tileIdBits = 0;
+            int v = numTiles - 1;
+            while (v > 0) { v >>= 1; tileIdBits++; }
+            int depthBits = 32 - tileIdBits;
+            return Mathf.Clamp(depthBits, 8, 28);
+        }
+
+        void DispatchTileRender(CommandBuffer cmb, Camera cam,
+                                GlobalOrderGroupCache cache, int splatCount, bool sortNeeded,
+                                int screenW, int screenH)
+        {
+            int tileX    = cache.tileCountX;
+            int tileY    = cache.tileCountY;
             int numTiles = tileX * tileY;
+            int tileShift = CalcTileShift(numTiles);
 
-            // ── On hit frames skip assign/sort/build; only re-render ─────
-            if (!sortNeeded && cache.tileRanges != null)
-                goto renderOnly;
+            // Set _TileShift globally — used by assign, build-ranges, and render kernels.
+            cmb.SetComputeIntParam(_tileCs, TileProps.TileShift, tileShift);
 
-            // ── Read PREVIOUS frame's pair count (before submitting GPU work) ─
-            // GetData stalls until the GPU counter buffer is ready.
-            // Since this runs at the start of frame N's CB recording,
-            // the GPU has already finished frame N-1's work, so the counter
-            // holds frame N-1's result. We use it to sort frame N's pairs
-            // (1-frame lag — acceptable for stable scenes).
-            var counterBuf = new uint[1];
-            cache.tilePairCounter.GetData(counterBuf);
-            uint sortCount = counterBuf[0];
-            if (sortCount == 0)
-                sortCount = (uint)(splatCount * 2);  // frame-0 estimate
-            sortCount = (uint)Mathf.Min((int)sortCount, GlobalOrderGroupCache.MaxTilePairs);
+            // Invalidate tile ranges when the camera changes (e.g. Scene View vs Game
+            // camera) — stale tile assignments from a different projection are wrong.
+            int camId = cam.GetInstanceID();
+            if (cache.lastTileCameraId != camId)
+            {
+                cache.hasTileRanges = false;
+                cache.lastTileCameraId = camId;
+            }
 
-            // ── Clear counter and tile ranges for this frame ──────────
-            cmb.SetBufferData(cache.tilePairCounter, s_ZeroUint, 0, 0, 1);
-            // Clear tile ranges (uint2 per tile = 2 uints, init to 0)
-            // Reuse a static buffer to avoid per-frame allocation
-            if (_tileRangesClearBuf == null || _tileRangesClearBuf.Length < numTiles * 2)
-                _tileRangesClearBuf = new uint[numTiles * 2];
-            System.Array.Clear(_tileRangesClearBuf, 0, numTiles * 2);
-            cmb.SetBufferData(cache.tileRanges, _tileRangesClearBuf, 0, 0, numTiles * 2);
+            // On hit frames (no sort needed), skip assign/sort/build — just re-render.
+            // Always run full pipeline if tile ranges haven't been built yet.
+            if (sortNeeded || !cache.hasTileRanges)
+            {
+                // ── Read previous frame's pair count for sort budget ──────
+                // GetData reads the GPU counter written by last frame's assign.
+                // We add headroom so the sort covers pair-count growth.
+                // With buffer cleared to 0xFFFFFFFF, unwritten slots are sentinel
+                // and sort to the end harmlessly. If current frame exceeds
+                // sortCount, excess pairs are invisible for one frame (self-correcting).
+                s_CounterReadback[0] = 0;
+                cache.tilePairCounter.GetData(s_CounterReadback);
+                uint prevCount = s_CounterReadback[0];
+                uint sortCount;
+                if (prevCount == 0)
+                    sortCount = (uint)Mathf.Min((long)splatCount * 8, GlobalOrderGroupCache.MaxTilePairs);
+                else
+                    sortCount = (uint)Mathf.Min((long)prevCount * 2 + 16384, GlobalOrderGroupCache.MaxTilePairs);
 
-            // ── Kernel 1: assign each Gaussian to tiles ───────────────
-            cmb.SetComputeIntParam   (_tileCs, TileProps.SplatCount,    splatCount);
-            cmb.SetComputeIntParam   (_tileCs, TileProps.TileCountX,    tileX);
-            cmb.SetComputeIntParam   (_tileCs, TileProps.TileCountY,    tileY);
-            cmb.SetComputeIntParam   (_tileCs, TileProps.MaxTilePairs,  GlobalOrderGroupCache.MaxTilePairs);
-            cmb.SetComputeVectorParam(_tileCs, TileProps.ScreenParams,
-                new Vector4(screenW, screenH, 1f / screenW, 1f / screenH));
-            cmb.SetComputeBufferParam(_tileCs, _kernelTileAssign, TileProps.SplatViewData,   cache.viewData);
-            cmb.SetComputeBufferParam(_tileCs, _kernelTileAssign, TileProps.TilePairCounter, cache.tilePairCounter);
-            cmb.SetComputeBufferParam(_tileCs, _kernelTileAssign, TileProps.TileKeys,        cache.tileKeys);
-            cmb.SetComputeBufferParam(_tileCs, _kernelTileAssign, TileProps.TileValues,      cache.tileValues);
-            int tileAssignGroups = (splatCount + 1023) / 1024;
-            cmb.DispatchCompute(_tileCs, _kernelTileAssign, tileAssignGroups, 1, 1);
+                // ── GPU clear: keys → 0xFFFFFFFF, ranges → (0,0) ─────────
+                // Prevents stale data from previous frames creating ghost splats.
+                int clearCount = Mathf.Max((int)sortCount, numTiles);
+                int clearGroups = (clearCount + 1023) / 1024;
+                cmb.SetComputeIntParam   (_tileCs, TileProps.ClearKeyCount,   (int)sortCount);
+                cmb.SetComputeIntParam   (_tileCs, TileProps.ClearRangeCount, numTiles);
+                cmb.SetComputeBufferParam(_tileCs, _kernelClearTileData, TileProps.ClearTileKeys,  cache.tileKeys);
+                cmb.SetComputeBufferParam(_tileCs, _kernelClearTileData, TileProps.ClearTileRanges, cache.tileRanges);
+                cmb.DispatchCompute(_tileCs, _kernelClearTileData, clearGroups, 1, 1);
 
-            // ── Sort tile pairs by (tile_id | depth) ──────────────────
-            // We sort 'sortCount' elements (previous frame's pair count).
-            // Frame N writes pairs in slots [0, N-count), while this sorts
-            // [0, (N-1)-count) — a 1-frame lag that's stable for typical scenes.
-            cache.tileSorterArgs.inputKeys   = cache.tileKeys;
-            cache.tileSorterArgs.inputValues = cache.tileValues;
-            cache.tileSorterArgs.count       = sortCount;
-            _tileSorter.Dispatch(cmb, cache.tileSorterArgs);
+                // ── Clear atomic counter ──────────────────────────────────
+                s_CounterReadback[0] = 0;
+                cmb.SetBufferData(cache.tilePairCounter, s_CounterReadback, 0, 0, 1);
 
-            // ── Kernel 2: build tile ranges from sorted keys ──────────
-            cmb.SetComputeIntParam   (_tileCs, TileProps.TilePairCount,  (int)sortCount);
-            cmb.SetComputeIntParam   (_tileCs, TileProps.TileCountX,     tileX);
-            cmb.SetComputeBufferParam(_tileCs, _kernelBuildRanges, TileProps.SortedTileKeys, cache.tileKeys);
-            cmb.SetComputeBufferParam(_tileCs, _kernelBuildRanges, TileProps.TileRanges,     cache.tileRanges);
-            int buildGroups = ((int)sortCount + 1023) / 1024;
-            cmb.DispatchCompute(_tileCs, _kernelBuildRanges, buildGroups, 1, 1);
+                // ── Kernel 1: assign each Gaussian to tiles ───────────────
+                cmb.SetComputeIntParam   (_tileCs, TileProps.SplatCount,   splatCount);
+                cmb.SetComputeIntParam   (_tileCs, TileProps.TileCountX,   tileX);
+                cmb.SetComputeIntParam   (_tileCs, TileProps.TileCountY,   tileY);
+                cmb.SetComputeIntParam   (_tileCs, TileProps.MaxTilePairs, GlobalOrderGroupCache.MaxTilePairs);
+                cmb.SetComputeVectorParam(_tileCs, TileProps.ScreenParams,
+                    new Vector4(screenW, screenH, 1f / screenW, 1f / screenH));
+                cmb.SetComputeBufferParam(_tileCs, _kernelTileAssign, TileProps.SplatViewData,   cache.viewData);
+                cmb.SetComputeBufferParam(_tileCs, _kernelTileAssign, TileProps.TilePairCounter, cache.tilePairCounter);
+                cmb.SetComputeBufferParam(_tileCs, _kernelTileAssign, TileProps.TileKeys,        cache.tileKeys);
+                cmb.SetComputeBufferParam(_tileCs, _kernelTileAssign, TileProps.TileValues,      cache.tileValues);
+                int tileAssignGroups = (splatCount + 1023) / 1024;
+                cmb.DispatchCompute(_tileCs, _kernelTileAssign, tileAssignGroups, 1, 1);
 
-            renderOnly:
-            // ── Kernel 3: tile-based alpha composite ──────────────────
-            // Write directly into GaussianSplatRT (enableRandomWrite=true, set by URP feature).
-            // GaussianSplatRT was cleared by CoreUtils.SetRenderTarget before this dispatch,
-            // so no explicit clear needed. Tiles with no splats leave pixels as (0,0,0,0).
-            cmb.SetComputeIntParam   (_tileCs, TileProps.TileCountX,    tileX);
-            cmb.SetComputeIntParam   (_tileCs, TileProps.TileCountY,    tileY);
+                // ── Sort tile pairs ───────────────────────────────────────
+                // Sort up to sortCount (padded previous count). Cleared sentinel
+                // keys (0xFFFFFFFF) sort to the end, skipped by BuildTileRanges.
+                cache.tileSorterArgs.inputKeys   = cache.tileKeys;
+                cache.tileSorterArgs.inputValues = cache.tileValues;
+                cache.tileSorterArgs.count       = sortCount;
+                _tileSorter.Dispatch(cmb, cache.tileSorterArgs);
+
+                // ── Kernel 2: build tile ranges from sorted keys ──────────
+                cmb.SetComputeIntParam   (_tileCs, TileProps.TilePairCount, (int)sortCount);
+                cmb.SetComputeIntParam   (_tileCs, TileProps.NumTiles,      numTiles);
+                cmb.SetComputeIntParam   (_tileCs, TileProps.TileCountX,    tileX);
+                cmb.SetComputeBufferParam(_tileCs, _kernelBuildRanges, TileProps.SortedTileKeys, cache.tileKeys);
+                cmb.SetComputeBufferParam(_tileCs, _kernelBuildRanges, TileProps.TileRanges,     cache.tileRanges);
+                int buildGroups = ((int)sortCount + 1023) / 1024;
+                cmb.DispatchCompute(_tileCs, _kernelBuildRanges, buildGroups, 1, 1);
+                cache.hasTileRanges = true;
+            }
+
+            // ── Kernel 3: tile-based front-to-back alpha composite ────
+            cmb.SetComputeIntParam   (_tileCs, TileProps.TileCountX, tileX);
+            cmb.SetComputeIntParam   (_tileCs, TileProps.TileCountY, tileY);
             cmb.SetComputeVectorParam(_tileCs, TileProps.ScreenParams,
                 new Vector4(screenW, screenH, 1f / screenW, 1f / screenH));
             cmb.SetComputeBufferParam(_tileCs, _kernelRenderTiles, TileProps.SplatViewData,    cache.viewData);
             cmb.SetComputeBufferParam(_tileCs, _kernelRenderTiles, TileProps.SortedTileValues, cache.tileValues);
             cmb.SetComputeBufferParam(_tileCs, _kernelRenderTiles, TileProps.TileRangesRead,   cache.tileRanges);
-            // Bind GaussianSplatRT as UAV output (passed from URP feature via TileOutputTarget)
             cmb.SetComputeTextureParam(_tileCs, _kernelRenderTiles, TileProps.OutputTexture, TileOutputTarget);
             cmb.DispatchCompute(_tileCs, _kernelRenderTiles, tileX, tileY, 1);
         }
@@ -538,24 +578,30 @@ namespace GaussianSplatting.Runtime
                     continue;
                 }
 
-                if (groupSortNeeded || !groupCache.hasSortedKeys)
-                {
-                    groupCache.sorterArgs.count = (uint)dstOffset;
-                    _globalSorter.Dispatch(cmb, groupCache.sorterArgs);
-                    groupCache.hasSortedKeys = true;
-                }
                 groupCache.groupSignature = groupSignature;
 
                 cmb.BeginSample(ProfDraw);
                 // ── Tile-based rendering path ──────────────────────────
                 bool usedTile = false;
+                // Use cam.pixelWidth/Height for the tile grid — this matches the
+                // coordinate space used by CalcViewData's focal-length computation.
+                // TileRenderSize is kept for future render-scale support.
+                int tileW = cam.pixelWidth;
+                int tileH = cam.pixelHeight;
                 if (reference.csTileRender != null &&
-                    EnsureTileResources(reference, groupCache,
-                        cam.pixelWidth, cam.pixelHeight, dstOffset))
+                    EnsureTileResources(reference, groupCache, tileW, tileH))
                 {
-                    DispatchTileRender(cmb, cam, groupCache, dstOffset,
-                        groupSortNeeded || !groupCache.hasSortedKeys);
+                    DispatchTileRender(cmb, cam, groupCache, dstOffset, groupSortNeeded, tileW, tileH);
                     usedTile = true;
+                }
+
+                // Global distance sort is only needed for the DrawProcedural
+                // fallback path; tile path does its own per-tile sort.
+                if (!usedTile && (groupSortNeeded || !groupCache.hasSortedKeys))
+                {
+                    groupCache.sorterArgs.count = (uint)dstOffset;
+                    _globalSorter.Dispatch(cmb, groupCache.sorterArgs);
+                    groupCache.hasSortedKeys = true;
                 }
 
                 // ── Fallback: traditional DrawProcedural ───────────────
@@ -1004,7 +1050,7 @@ namespace GaussianSplatting.Runtime
 
             var (texWidth, texHeight) = GaussianSplatAsset.CalcTextureSize(asset.splatCount);
             var texFormat = GaussianSplatAsset.ColorFormatToGraphics(asset.colorFormat);
-            var tex = new Texture2D(texWidth, texHeight, texFormat, TextureCreationFlags.DontInitializePixels | TextureCreationFlags.IgnoreMipmapLimit | TextureCreationFlags.DontUploadUponCreate) { name = "GaussianColorData" };
+            var tex = new Texture2D(texWidth, texHeight, texFormat, TextureCreationFlags.DontInitializePixels | TextureCreationFlags.DontUploadUponCreate) { name = "GaussianColorData" };
             tex.SetPixelData(asset.colorData.GetData<byte>(), 0);
             tex.Apply(false, true);
             _gpuColorData = tex;
@@ -1036,7 +1082,7 @@ namespace GaussianSplatting.Runtime
             _gpuSHData.SetData(asset.shData.GetData<uint>());
             var (texWidth, texHeight) = GaussianSplatAsset.CalcTextureSize(asset.splatCount);
             var texFormat = GaussianSplatAsset.ColorFormatToGraphics(asset.colorFormat);
-            var tex = new Texture2D(texWidth, texHeight, texFormat, TextureCreationFlags.DontInitializePixels | TextureCreationFlags.IgnoreMipmapLimit | TextureCreationFlags.DontUploadUponCreate) { name = "GaussianColorData" };
+            var tex = new Texture2D(texWidth, texHeight, texFormat, TextureCreationFlags.DontInitializePixels | TextureCreationFlags.DontUploadUponCreate) { name = "GaussianColorData" };
             tex.SetPixelData(asset.colorData.GetData<byte>(), 0);
             tex.Apply(false, true);
             _gpuColorData = tex;
@@ -1151,7 +1197,6 @@ namespace GaussianSplatting.Runtime
                 _matDebugPoints = new Material(shaderDebugPoints) {name = "GaussianDebugPoints"};
                 _matDebugBoxes = new Material(shaderDebugBoxes) {name = "GaussianDebugBoxes"};
             }
-            // Auto-load tile render compute shader if not assigned in Inspector
             if (csTileRender == null)
                 csTileRender = Resources.Load<ComputeShader>("GaussianTileRender");
         }

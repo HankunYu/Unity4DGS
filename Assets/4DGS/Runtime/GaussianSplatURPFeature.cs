@@ -99,6 +99,7 @@ namespace GaussianSplatting.Runtime
                 internal bool ApplyStylize;
                 internal StylizeSettings StylizeSettings;
                 internal Material StylizeMaterial;
+                internal Vector2Int RenderSize;
             }
 
             public GsRenderPass(GaussianSplatURPFeature owner)
@@ -125,6 +126,7 @@ namespace GaussianSplatting.Runtime
                 if (applyStylize)
                     stylizedHandle = UniversalRenderer.CreateRenderGraphTexture(renderGraph, rtDesc, GaussianStylizeRTName, true);
 
+                passData.RenderSize = new Vector2Int(rtDesc.width, rtDesc.height);
                 passData.CameraData = cameraData;
                 passData.SourceTexture = resourceData.activeColorTexture;
                 passData.SourceDepth = resourceData.activeDepthTexture;
@@ -149,6 +151,7 @@ namespace GaussianSplatting.Runtime
                     // Pass GaussianSplatRT as the tile render output target so the tile
                     // renderer can write directly via UAV without SetRenderTarget/Blit.
                     GaussianSplatRenderSystem.instance.TileOutputTarget = data.GaussianSplatRT;
+                    GaussianSplatRenderSystem.instance.TileRenderSize = data.RenderSize;
                     Material matComposite = GaussianSplatRenderSystem.instance.SortAndRenderSplats(data.CameraData.camera, commandBuffer);
                     if (matComposite != null)
                     {
