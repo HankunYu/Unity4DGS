@@ -37,6 +37,32 @@ namespace GaussianSplatting.Runtime
         ComputeShader _globalSorterShader;
         int _globalFrameId;
 
+        // ── Tile renderer ─────────────────────────────────────────────
+        GpuSorting _tileSorter;
+        ComputeShader _tileCs;
+        int _kernelTileAssign  = -1;
+        int _kernelBuildRanges = -1;
+        int _kernelRenderTiles = -1;
+
+        static class TileProps
+        {
+            public static readonly int SplatCount      = Shader.PropertyToID("_SplatCount");
+            public static readonly int TileCountX      = Shader.PropertyToID("_TileCountX");
+            public static readonly int TileCountY      = Shader.PropertyToID("_TileCountY");
+            public static readonly int MaxTilePairs    = Shader.PropertyToID("_MaxTilePairs");
+            public static readonly int ScreenParams    = Shader.PropertyToID("_ScreenParams");
+            public static readonly int SplatViewData   = Shader.PropertyToID("_SplatViewData");
+            public static readonly int TilePairCounter = Shader.PropertyToID("_TilePairCounter");
+            public static readonly int TileKeys        = Shader.PropertyToID("_TileKeys");
+            public static readonly int TileValues      = Shader.PropertyToID("_TileValues");
+            public static readonly int TilePairCount   = Shader.PropertyToID("_TilePairCount");
+            public static readonly int SortedTileKeys  = Shader.PropertyToID("_SortedTileKeys");
+            public static readonly int TileRanges      = Shader.PropertyToID("_TileRanges");
+            public static readonly int SortedTileValues= Shader.PropertyToID("_SortedTileValues");
+            public static readonly int TileRangesRead  = Shader.PropertyToID("_TileRangesRead");
+            public static readonly int OutputTexture   = Shader.PropertyToID("_OutputTexture");
+        }
+
         private static void DisposeBuffer(ref GraphicsBuffer buf)
         {
             buf?.Dispose();
@@ -54,6 +80,16 @@ namespace GaussianSplatting.Runtime
             public GraphicsBuffer sortKeys;
             public GpuSorting.Args sorterArgs;
 
+            // ── Tile-based rendering buffers ──────────────────────────────
+            public const int MaxTilePairs = 8 * 1024 * 1024; // 8M (tile,splat) pairs
+            public GraphicsBuffer tileKeys;         // sort key per pair: (tile_id<<18)|depth
+            public GraphicsBuffer tileValues;       // splatId per pair
+            public GraphicsBuffer tileRanges;       // uint2[numTiles]: (start,end) per tile
+            public GraphicsBuffer tilePairCounter;  // 4-byte atomic counter
+            public RenderTexture  tileOutputRT;     // RWTexture2D<float4> output
+            public GpuSorting.Args tileSorterArgs;
+            public int tileCountX, tileCountY;      // current tile grid dimensions
+
             public void Dispose()
             {
                 viewData?.Dispose();
@@ -63,6 +99,13 @@ namespace GaussianSplatting.Runtime
                 viewData = null;
                 sortDistances = null;
                 sortKeys = null;
+
+                tileKeys?.Dispose();       tileKeys = null;
+                tileValues?.Dispose();     tileValues = null;
+                tileRanges?.Dispose();     tileRanges = null;
+                tilePairCounter?.Dispose(); tilePairCounter = null;
+                if (tileOutputRT != null) { tileOutputRT.Release(); tileOutputRT = null; }
+                tileSorterArgs.resources.Dispose();
             }
         }
 
@@ -73,6 +116,9 @@ namespace GaussianSplatting.Runtime
             _globalGroups.Clear();
             _globalSorter = null;
             _globalSorterShader = null;
+            _tileSorter = null;
+            _tileCs = null;
+            _kernelTileAssign = _kernelBuildRanges = _kernelRenderTiles = -1;
         }
 
         public void RegisterSplat(GaussianSplatRenderer r)
@@ -250,6 +296,163 @@ namespace GaussianSplatting.Runtime
             }
         }
 
+        // ── Tile rendering helpers ────────────────────────────────────────
+
+        static readonly uint[] s_ZeroUint = new uint[1];
+        uint[] _tileRangesClearBuf;  // reused per-frame clear buffer for tileRanges
+
+        bool EnsureTileResources(GaussianSplatRenderer reference, GlobalOrderGroupCache cache,
+                                 int screenW, int screenH, int splatCount)
+        {
+            if (_tileCs == null)
+            {
+                _tileCs = reference.csTileRender;
+                if (_tileCs == null) return false;
+                _kernelTileAssign  = _tileCs.FindKernel("CSGaussianTileAssign");
+                _kernelBuildRanges = _tileCs.FindKernel("CSBuildTileRanges");
+                _kernelRenderTiles = _tileCs.FindKernel("CSRenderTiles");
+            }
+            if (_tileCs == null) return false;
+
+            int tileX = (screenW + 15) / 16;
+            int tileY = (screenH + 15) / 16;
+            int numTiles = tileX * tileY;
+
+            // Allocate / reallocate tile pair buffers when splat count changes
+            if (cache.tileKeys == null || cache.tileKeys.count < GlobalOrderGroupCache.MaxTilePairs)
+            {
+                cache.tileKeys?.Dispose();
+                cache.tileValues?.Dispose();
+                cache.tileKeys   = new GraphicsBuffer(GraphicsBuffer.Target.Structured,
+                    GlobalOrderGroupCache.MaxTilePairs, 4) { name = "TileKeys" };
+                cache.tileValues = new GraphicsBuffer(GraphicsBuffer.Target.Structured,
+                    GlobalOrderGroupCache.MaxTilePairs, 4) { name = "TileValues" };
+            }
+
+            // Reallocate tile ranges when screen resolution changes
+            if (cache.tileRanges == null || cache.tileCountX != tileX || cache.tileCountY != tileY)
+            {
+                cache.tileRanges?.Dispose();
+                cache.tileRanges = new GraphicsBuffer(GraphicsBuffer.Target.Structured,
+                    numTiles, 8) { name = "TileRanges" };   // uint2 per tile
+                cache.tileCountX = tileX;
+                cache.tileCountY = tileY;
+            }
+
+            if (cache.tilePairCounter == null)
+                cache.tilePairCounter = new GraphicsBuffer(
+                    GraphicsBuffer.Target.Raw, 1, 4) { name = "TilePairCounter" };
+
+            // Output RenderTexture — random write enabled
+            if (cache.tileOutputRT == null ||
+                cache.tileOutputRT.width  != screenW ||
+                cache.tileOutputRT.height != screenH)
+            {
+                if (cache.tileOutputRT != null) cache.tileOutputRT.Release();
+                cache.tileOutputRT = new RenderTexture(screenW, screenH, 0,
+                    RenderTextureFormat.ARGBFloat)
+                {
+                    enableRandomWrite = true,
+                    name = "GaussianTileOutput"
+                };
+                cache.tileOutputRT.Create();
+            }
+
+            // Sorter for tile pairs
+            if (cache.tileSorterArgs.resources.altBuffer == null ||
+                cache.tileSorterArgs.count < (uint)GlobalOrderGroupCache.MaxTilePairs)
+            {
+                cache.tileSorterArgs.resources.Dispose();
+                cache.tileSorterArgs.resources =
+                    GpuSorting.SupportResources.Load((uint)GlobalOrderGroupCache.MaxTilePairs);
+            }
+            // GpuSorting requires the csSplatUtilities shader (contains radix sort kernels)
+            _tileSorter ??= new GpuSorting(reference.csSplatUtilities);
+
+            return true;
+        }
+
+        void DispatchTileRender(CommandBuffer cmb, Camera cam,
+                                GlobalOrderGroupCache cache, int splatCount)
+        {
+            int screenW = cam.pixelWidth;
+            int screenH = cam.pixelHeight;
+            int tileX   = cache.tileCountX;
+            int tileY   = cache.tileCountY;
+            int numTiles = tileX * tileY;
+
+            // ── Read PREVIOUS frame's pair count (before submitting GPU work) ─
+            // GetData stalls until the GPU counter buffer is ready.
+            // Since this runs at the start of frame N's CB recording,
+            // the GPU has already finished frame N-1's work, so the counter
+            // holds frame N-1's result. We use it to sort frame N's pairs
+            // (1-frame lag — acceptable for stable scenes).
+            var counterBuf = new uint[1];
+            cache.tilePairCounter.GetData(counterBuf);
+            uint sortCount = counterBuf[0];
+            if (sortCount == 0)
+                sortCount = (uint)(splatCount * 2);  // frame-0 estimate
+            sortCount = (uint)Mathf.Min((int)sortCount, GlobalOrderGroupCache.MaxTilePairs);
+
+            // ── Clear counter and tile ranges for this frame ──────────
+            cmb.SetBufferData(cache.tilePairCounter, s_ZeroUint, 0, 0, 1);
+            // Clear tile ranges (uint2 per tile = 2 uints, init to 0)
+            // Reuse a static buffer to avoid per-frame allocation
+            if (_tileRangesClearBuf == null || _tileRangesClearBuf.Length < numTiles * 2)
+                _tileRangesClearBuf = new uint[numTiles * 2];
+            System.Array.Clear(_tileRangesClearBuf, 0, numTiles * 2);
+            cmb.SetBufferData(cache.tileRanges, _tileRangesClearBuf, 0, 0, numTiles * 2);
+
+            // ── Kernel 1: assign each Gaussian to tiles ───────────────
+            cmb.SetComputeIntParam   (_tileCs, TileProps.SplatCount,    splatCount);
+            cmb.SetComputeIntParam   (_tileCs, TileProps.TileCountX,    tileX);
+            cmb.SetComputeIntParam   (_tileCs, TileProps.TileCountY,    tileY);
+            cmb.SetComputeIntParam   (_tileCs, TileProps.MaxTilePairs,  GlobalOrderGroupCache.MaxTilePairs);
+            cmb.SetComputeVectorParam(_tileCs, TileProps.ScreenParams,
+                new Vector4(screenW, screenH, 1f / screenW, 1f / screenH));
+            cmb.SetComputeBufferParam(_tileCs, _kernelTileAssign, TileProps.SplatViewData,   cache.viewData);
+            cmb.SetComputeBufferParam(_tileCs, _kernelTileAssign, TileProps.TilePairCounter, cache.tilePairCounter);
+            cmb.SetComputeBufferParam(_tileCs, _kernelTileAssign, TileProps.TileKeys,        cache.tileKeys);
+            cmb.SetComputeBufferParam(_tileCs, _kernelTileAssign, TileProps.TileValues,      cache.tileValues);
+            int tileAssignGroups = (splatCount + 1023) / 1024;
+            cmb.DispatchCompute(_tileCs, _kernelTileAssign, tileAssignGroups, 1, 1);
+
+            // ── Sort tile pairs by (tile_id | depth) ──────────────────
+            // We sort 'sortCount' elements (previous frame's pair count).
+            // Frame N writes pairs in slots [0, N-count), while this sorts
+            // [0, (N-1)-count) — a 1-frame lag that's stable for typical scenes.
+            cache.tileSorterArgs.inputKeys   = cache.tileKeys;
+            cache.tileSorterArgs.inputValues = cache.tileValues;
+            cache.tileSorterArgs.count       = sortCount;
+            _tileSorter.Dispatch(cmb, cache.tileSorterArgs);
+
+            // ── Kernel 2: build tile ranges from sorted keys ──────────
+            cmb.SetComputeIntParam   (_tileCs, TileProps.TilePairCount,  (int)sortCount);
+            cmb.SetComputeIntParam   (_tileCs, TileProps.TileCountX,     tileX);
+            cmb.SetComputeBufferParam(_tileCs, _kernelBuildRanges, TileProps.SortedTileKeys, cache.tileKeys);
+            cmb.SetComputeBufferParam(_tileCs, _kernelBuildRanges, TileProps.TileRanges,     cache.tileRanges);
+            int buildGroups = ((int)sortCount + 1023) / 1024;
+            cmb.DispatchCompute(_tileCs, _kernelBuildRanges, buildGroups, 1, 1);
+
+            // ── Clear output texture ──────────────────────────────────
+            cmb.SetRenderTarget(cache.tileOutputRT);
+            cmb.ClearRenderTarget(false, true, Color.clear);
+
+            // ── Kernel 3: tile-based alpha composite ──────────────────
+            cmb.SetComputeIntParam   (_tileCs, TileProps.TileCountX,    tileX);
+            cmb.SetComputeIntParam   (_tileCs, TileProps.TileCountY,    tileY);
+            cmb.SetComputeVectorParam(_tileCs, TileProps.ScreenParams,
+                new Vector4(screenW, screenH, 1f / screenW, 1f / screenH));
+            cmb.SetComputeBufferParam(_tileCs, _kernelRenderTiles, TileProps.SplatViewData,    cache.viewData);
+            cmb.SetComputeBufferParam(_tileCs, _kernelRenderTiles, TileProps.SortedTileValues, cache.tileValues);
+            cmb.SetComputeBufferParam(_tileCs, _kernelRenderTiles, TileProps.TileRangesRead,   cache.tileRanges);
+            cmb.SetComputeTextureParam(_tileCs, _kernelRenderTiles, TileProps.OutputTexture,   cache.tileOutputRT);
+            cmb.DispatchCompute(_tileCs, _kernelRenderTiles, tileX, tileY, 1);
+
+            // ── Blit tile output into current render target (GaussianSplatRT) ──
+            cmb.Blit(cache.tileOutputRT, BuiltinRenderTextureType.CurrentActive);
+        }
+
         Material SortAndRenderSplatsGlobal(Camera cam, CommandBuffer cmb)
         {
             ++_globalFrameId;
@@ -353,12 +556,26 @@ namespace GaussianSplatting.Runtime
                 }
                 groupCache.groupSignature = groupSignature;
 
-                _globalMpb.Clear();
-                _globalMpb.SetBuffer(GaussianSplatRenderer.Props.SplatViewData, groupCache.viewData);
-                _globalMpb.SetBuffer(GaussianSplatRenderer.Props.OrderBuffer, groupCache.sortKeys);
-
                 cmb.BeginSample(ProfDraw);
-                cmb.DrawProcedural(reference._gpuIndexBuffer, Matrix4x4.identity, groupDisplayMat, 0, MeshTopology.Triangles, 6, dstOffset, _globalMpb);
+                // ── Tile-based rendering path ──────────────────────────
+                bool usedTile = false;
+                if (reference.csTileRender != null &&
+                    EnsureTileResources(reference, groupCache,
+                        cam.pixelWidth, cam.pixelHeight, dstOffset))
+                {
+                    DispatchTileRender(cmb, cam, groupCache, dstOffset);
+                    usedTile = true;
+                }
+
+                // ── Fallback: traditional DrawProcedural ───────────────
+                if (!usedTile)
+                {
+                    _globalMpb.Clear();
+                    _globalMpb.SetBuffer(GaussianSplatRenderer.Props.SplatViewData, groupCache.viewData);
+                    _globalMpb.SetBuffer(GaussianSplatRenderer.Props.OrderBuffer, groupCache.sortKeys);
+                    cmb.DrawProcedural(reference._gpuIndexBuffer, Matrix4x4.identity,
+                        groupDisplayMat, 0, MeshTopology.Triangles, 6, dstOffset, _globalMpb);
+                }
                 cmb.EndSample(ProfDraw);
 
                 hasRenderedAGroup = true;
@@ -516,6 +733,8 @@ namespace GaussianSplatting.Runtime
         [FormerlySerializedAs("m_ShaderDebugBoxes")] public Shader shaderDebugBoxes;
         [Tooltip("Gaussian splatting compute shader")]
         [FormerlySerializedAs("m_CSSplatUtilities")] public ComputeShader csSplatUtilities;
+        [Tooltip("Tile-based rendering compute shader (optional; uses DrawProcedural fallback if null)")]
+        public ComputeShader csTileRender;
 
         int _splatCount; // initially same as asset splat count, but editing can change this
         GraphicsBuffer _gpuSortDistances;
