@@ -36,6 +36,7 @@ namespace GaussianSplatting.Editor
         SerializedProperty m_PropShaderDebugBoxes;
         SerializedProperty m_PropCSSplatUtilities;
         SerializedProperty m_PropCSTileRender;
+        SerializedProperty m_PropUseTileRenderer;
 
         bool m_ResourcesExpanded = false;
         int m_CameraIndex = 0;
@@ -77,6 +78,7 @@ namespace GaussianSplatting.Editor
             m_PropShaderDebugBoxes = serializedObject.FindProperty("shaderDebugBoxes");
             m_PropCSSplatUtilities = serializedObject.FindProperty("csSplatUtilities");
             m_PropCSTileRender = serializedObject.FindProperty("csTileRender");
+            m_PropUseTileRenderer = serializedObject.FindProperty("useTileRenderer");
 
             s_AllEditors.Add(this);
         }
@@ -113,6 +115,7 @@ namespace GaussianSplatting.Editor
             EditorGUILayout.PropertyField(m_PropSHOrder);
             EditorGUILayout.PropertyField(m_PropSHOnly);
             EditorGUILayout.PropertyField(m_PropSortNthFrame);
+            EditorGUILayout.PropertyField(m_PropUseTileRenderer, new GUIContent("Tile-Based Renderer"));
 
             EditorGUILayout.Space();
             GUILayout.Label("Debugging Tweaks", EditorStyles.boldLabel);

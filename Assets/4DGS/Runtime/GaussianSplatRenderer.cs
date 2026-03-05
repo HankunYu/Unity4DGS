@@ -109,7 +109,7 @@ namespace GaussianSplatting.Runtime
             public GpuSorting.Args sorterArgs;
 
             // ── Tile-based rendering buffers ──────────────────────────────
-            public const int MaxTilePairs = 8 * 1024 * 1024; // 8M (tile,splat) pairs
+            public const int MaxTilePairs = 16 * 1024 * 1024; // 16M (tile,splat) pairs
             public GraphicsBuffer tileKeys;         // sort key per pair: (tile_id<<16)|depth
             public GraphicsBuffer tileValues;       // splatId per pair
             public GraphicsBuffer tileRanges;       // uint2[numTiles]: (start,end) per tile
@@ -456,10 +456,9 @@ namespace GaussianSplatting.Runtime
             {
                 cache.hasTileRanges = false;
                 cache.lastTileCameraId = camId;
-                // Reset async pair count so this camera gets the generous initial
-                // sort budget (splatCount * 4) instead of the previous camera's
-                // (possibly much smaller) count.
-                cache.asyncTilePairCount = 0;
+                // Keep asyncTilePairCount across camera switches — different
+                // cameras viewing the same scene produce similar pair counts,
+                // so the previous value is a better estimate than zero.
             }
 
             // On hit frames (no sort needed), skip assign/sort/build — just re-render.
@@ -467,14 +466,15 @@ namespace GaussianSplatting.Runtime
             if (sortNeeded || !cache.hasTileRanges)
             {
                 // ── Sort budget from async readback (1-frame lag) ─────────
-                // Uses previous frame's pair count via AsyncGPUReadback to avoid
-                // CPU-GPU sync stall. First frame uses conservative estimate.
+                // First frame sorts the full buffer (MaxTilePairs) to guarantee
+                // correctness.  Subsequent frames use 2× the previous actual
+                // count to leave headroom for camera movement.
                 uint prevCount = cache.asyncTilePairCount;
                 uint sortCount;
                 if (prevCount == 0)
-                    sortCount = (uint)Mathf.Min((long)splatCount * 4, GlobalOrderGroupCache.MaxTilePairs);
+                    sortCount = (uint)GlobalOrderGroupCache.MaxTilePairs;
                 else
-                    sortCount = (uint)Mathf.Min((long)(prevCount * 1.5f) + 32768, GlobalOrderGroupCache.MaxTilePairs);
+                    sortCount = (uint)Mathf.Min((long)prevCount * 2, GlobalOrderGroupCache.MaxTilePairs);
 
                 // ── GPU clear: keys → 0xFFFFFFFF, ranges → (0,0) ─────────
                 cmb.BeginSample(ProfTileClear);
@@ -518,7 +518,11 @@ namespace GaussianSplatting.Runtime
                         {
                             var data = req.GetData<uint>();
                             if (data.Length > 0)
+                            {
                                 cache.asyncTilePairCount = data[0];
+                                if (data[0] >= (uint)GlobalOrderGroupCache.MaxTilePairs)
+                                    Debug.LogWarning($"[GaussianSplat] Tile pair buffer overflow! pairs={data[0]:N0}, max={GlobalOrderGroupCache.MaxTilePairs:N0}. Some splats will be missing.");
+                            }
                         }
                     });
                 }
@@ -674,7 +678,7 @@ namespace GaussianSplatting.Runtime
                 // TileRenderSize is kept for future render-scale support.
                 int tileW = cam.pixelWidth;
                 int tileH = cam.pixelHeight;
-                if (reference.csTileRender != null &&
+                if (reference.useTileRenderer && reference.csTileRender != null &&
                     EnsureTileResources(reference, groupCache, tileW, tileH))
                 {
                     DispatchTileRender(cmb, cam, groupCache, dstOffset, groupSortNeeded, tileW, tileH);
@@ -858,6 +862,8 @@ namespace GaussianSplatting.Runtime
         [FormerlySerializedAs("m_CSSplatUtilities")] public ComputeShader csSplatUtilities;
         [Tooltip("Tile-based rendering compute shader (optional; uses DrawProcedural fallback if null)")]
         public ComputeShader csTileRender;
+        [Tooltip("Enable tile-based rendering (requires csTileRender). Uncheck to use DrawProcedural fallback.")]
+        public bool useTileRenderer = true;
 
         int _splatCount; // initially same as asset splat count, but editing can change this
         GraphicsBuffer _gpuSortDistances;
