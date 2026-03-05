@@ -955,6 +955,7 @@ namespace GaussianSplatting.Runtime
             public static readonly int DstBuffer = Shader.PropertyToID("_DstBuffer");
             public static readonly int BufferSize = Shader.PropertyToID("_BufferSize");
             public static readonly int MatrixMV = Shader.PropertyToID("_MatrixMV");
+            public static readonly int MatrixVP = Shader.PropertyToID("_MatrixVP");
             public static readonly int MatrixObjectToWorld = Shader.PropertyToID("_MatrixObjectToWorld");
             public static readonly int MatrixWorldToObject = Shader.PropertyToID("_MatrixWorldToObject");
             public static readonly int VecScreenParams = Shader.PropertyToID("_VecScreenParams");
@@ -1158,6 +1159,9 @@ namespace GaussianSplatting.Runtime
             var tex = new Texture2D(texWidth, texHeight, texFormat, TextureCreationFlags.DontInitializePixels | TextureCreationFlags.DontUploadUponCreate) { name = "GaussianColorData" };
             tex.SetPixelData(asset.colorData.GetData<byte>(), 0);
             tex.Apply(false, true);
+            // Destroy previous texture to prevent leak during asset swap
+            if (_gpuColorData != null)
+                DestroyImmediate(_gpuColorData);
             _gpuColorData = tex;
             if (asset.chunkData != null && asset.chunkData.dataSize != 0)
             {
@@ -1190,6 +1194,9 @@ namespace GaussianSplatting.Runtime
             var tex = new Texture2D(texWidth, texHeight, texFormat, TextureCreationFlags.DontInitializePixels | TextureCreationFlags.DontUploadUponCreate) { name = "GaussianColorData" };
             tex.SetPixelData(asset.colorData.GetData<byte>(), 0);
             tex.Apply(false, true);
+            // Destroy previous texture to prevent leak during asset swap
+            if (_gpuColorData != null)
+                DestroyImmediate(_gpuColorData);
             _gpuColorData = tex;
             if (asset.chunkData != null && asset.chunkData.dataSize != 0)
             {
@@ -1468,6 +1475,7 @@ namespace GaussianSplatting.Runtime
                 return false;
 
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixMV, matView * matO2W);
+            cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixVP, GL.GetGPUProjectionMatrix(cam.projectionMatrix, false) * matView);
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixObjectToWorld, matO2W);
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixWorldToObject, matW2O);
 
