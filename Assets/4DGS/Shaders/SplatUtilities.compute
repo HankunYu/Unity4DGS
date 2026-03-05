@@ -41,6 +41,7 @@
 float4x4 _MatrixObjectToWorld;
 float4x4 _MatrixWorldToObject;
 float4x4 _MatrixMV;
+float4x4 _MatrixVP;
 float4 _VecScreenParams;
 float4 _VecWorldSpaceCameraPos;
 int _SelectionMode;
@@ -217,12 +218,76 @@ bool IsSplatCut(float3 pos)
     return finalCut;
 }
 
+// Chunk frustum culling: 4 chunks per group (GROUP_SIZE=1024 / kChunkSize=256)
+groupshared uint _chunkVisible[4];
+
 [numthreads(GROUP_SIZE,1,1)]
-void CSCalcViewData (uint3 id : SV_DispatchThreadID)
+void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
 {
     uint idx = id.x;
+    uint localIdx = gtid.x;
+    uint chunkSlot = localIdx / kChunkSize;    // 0..3
+    uint laneInChunk = localIdx % kChunkSize;
+
+    // Phase 1: chunk frustum culling (first thread per 256-splat chunk)
+    // Skip when morph or animation is active (positions may differ from chunk AABB)
+    bool canCull = (_SplatChunkCount > 0) && (_MorphDataValid == 0) && (_AnimDataValid == 0);
+
+    if (laneInChunk == 0)
+    {
+        _chunkVisible[chunkSlot] = 1; // default visible
+        if (canCull)
+        {
+            uint globalChunkIdx = idx / kChunkSize;
+            if (globalChunkIdx < _SplatChunkCount)
+            {
+                SplatChunkInfo chunk = _SplatChunks[globalChunkIdx];
+                float3 bmin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
+                float3 bmax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
+                float4x4 mvp = mul(_MatrixVP, _MatrixObjectToWorld);
+
+                // Transform 8 AABB corners to clip space
+                float4 c0 = mul(mvp, float4(bmin.x, bmin.y, bmin.z, 1));
+                float4 c1 = mul(mvp, float4(bmax.x, bmin.y, bmin.z, 1));
+                float4 c2 = mul(mvp, float4(bmin.x, bmax.y, bmin.z, 1));
+                float4 c3 = mul(mvp, float4(bmax.x, bmax.y, bmin.z, 1));
+                float4 c4 = mul(mvp, float4(bmin.x, bmin.y, bmax.z, 1));
+                float4 c5 = mul(mvp, float4(bmax.x, bmin.y, bmax.z, 1));
+                float4 c6 = mul(mvp, float4(bmin.x, bmax.y, bmax.z, 1));
+                float4 c7 = mul(mvp, float4(bmax.x, bmax.y, bmax.z, 1));
+
+                // If all 8 corners outside same clip plane → chunk is off-screen
+                bool outL=true, outR=true, outB=true, outT=true, outN=true, outF=true;
+                #define FRUSTUM_TEST(p) \
+                    if((p).x >= -(p).w) outL=false; \
+                    if((p).x <=  (p).w) outR=false; \
+                    if((p).y >= -(p).w) outB=false; \
+                    if((p).y <=  (p).w) outT=false; \
+                    if((p).z >=     0 ) outN=false; \
+                    if((p).z <=  (p).w) outF=false;
+                FRUSTUM_TEST(c0) FRUSTUM_TEST(c1) FRUSTUM_TEST(c2) FRUSTUM_TEST(c3)
+                FRUSTUM_TEST(c4) FRUSTUM_TEST(c5) FRUSTUM_TEST(c6) FRUSTUM_TEST(c7)
+                #undef FRUSTUM_TEST
+
+                if (outL || outR || outB || outT || outN || outF)
+                    _chunkVisible[chunkSlot] = 0;
+            }
+        }
+    }
+
+    // ALL threads must hit the barrier (no early return before this)
+    GroupMemoryBarrierWithGroupSync();
+
     if (idx >= _SplatCount)
         return;
+
+    // Culled chunk → write invisible marker and skip
+    if (_chunkVisible[chunkSlot] == 0)
+    {
+        SplatViewData view = (SplatViewData)0;
+        _SplatViewData[idx] = view;
+        return;
+    }
 
     SplatData splat;
     if (_MorphDataValid != 0)
@@ -347,6 +412,15 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID)
     }
 
     view.pos = centerClipPos;
+
+    // Early opacity culling: skip splats with negligible opacity
+    float finalOpacity = splat.opacity * opacityScale * animOpacityMul;
+    if (finalOpacity < 1.0 / 255.0)
+    {
+        _SplatViewData[idx] = view;
+        return;
+    }
+
     bool behindCam = centerClipPos.w <= 0;
     if (!behindCam)
     {
@@ -364,6 +438,14 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID)
 
         DecomposeCovariance(cov2d, view.axis1, view.axis2);
 
+        // Sub-pixel area culling: skip splats smaller than 1 pixel
+        float splatArea = length(view.axis1) * length(view.axis2);
+        if (splatArea < 1.0)
+        {
+            _SplatViewData[idx] = view;
+            return;
+        }
+
         float3 worldViewDir = _VecWorldSpaceCameraPos.xyz - centerWorldPos;
         float3 objViewDir = mul((float3x3)_MatrixWorldToObject, worldViewDir);
         objViewDir = normalize(objViewDir);
@@ -375,7 +457,7 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID)
         if (animColorBlend > 0)
             col.rgb = lerp(col.rgb, (half3)animColorTint, (half)animColorBlend);
 
-        col.a = min(splat.opacity * opacityScale * animOpacityMul, 65000);
+        col.a = min(finalOpacity, 65000);
 
         if (_SplatBitsValid)
         {
