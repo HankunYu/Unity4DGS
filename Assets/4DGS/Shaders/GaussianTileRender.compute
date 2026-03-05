@@ -97,11 +97,12 @@ void CSGaussianTileAssign(uint3 id : SV_DispatchThreadID)
     centerPx.x = (ndc.x * 0.5 + 0.5) * _TileScreenParams.x;
     centerPx.y = (ndc.y * -0.5 + 0.5) * _TileScreenParams.y;
 
-    // Screen-space AABB of the Gaussian quad (quadPos ∈ [-2, 2])
-    // Max pixel extent = 2 * (|axis1| + |axis2|) per dimension
+    // Screen-space AABB of the Gaussian (√3 ≈ 1.73σ cutoff).
+    // Tighter than the quad's ±2σ; matches the render kernel's
+    // power < -3.0 cutoff (exp(-3) ≈ 0.05) to reduce tile pairs.
     float2 extent;
-    extent.x = 2.0 * (abs(view.axis1.x) + abs(view.axis2.x));
-    extent.y = 2.0 * (abs(view.axis1.y) + abs(view.axis2.y));
+    extent.x = 1.73 * (abs(view.axis1.x) + abs(view.axis2.x));
+    extent.y = 1.73 * (abs(view.axis1.y) + abs(view.axis2.y));
 
     // Skip sub-pixel splats early
     if (extent.x < 0.5 && extent.y < 0.5) return;
@@ -283,7 +284,7 @@ void CSRenderTiles(uint3 groupId : SV_GroupID, uint3 threadId : SV_GroupThreadID
                 localPos.y = (-ax1.y * delta.x + ax1.x * delta.y) * invDet;
 
                 float power = -dot(localPos, localPos);
-                if (power < -4.0) continue;  // exp(-4) ≈ 0.018, negligible
+                if (power < -3.0) continue;  // exp(-3) ≈ 0.05, negligible
 
                 uint2 col = gs_Color[j];
                 float r       = f16tof32(col.x >> 16);

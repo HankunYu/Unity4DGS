@@ -337,6 +337,20 @@ namespace GaussianSplatting.Editor
             bool displayEditStats = isToolActive || modifiedOrHasCutouts;
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Splats", $"{gs.splatCount:N0}");
+            if (gs.useTileRenderer)
+            {
+                var system = GaussianSplatting.Runtime.GaussianSplatRenderSystem.instance;
+                if (system != null)
+                {
+                    uint pairCount = system.LastTilePairCount;
+                    if (pairCount > 0)
+                    {
+                        int max = GaussianSplatting.Runtime.GaussianSplatRenderSystem.MaxTilePairsCapacity;
+                        float usage = (float)pairCount / max * 100f;
+                        EditorGUILayout.LabelField("Tile Pairs", $"{pairCount:N0} / {max:N0} ({usage:F1}%)");
+                    }
+                }
+            }
             if (displayEditStats)
             {
                 EditorGUILayout.LabelField("Cut", $"{gs.editCutSplats:N0}");

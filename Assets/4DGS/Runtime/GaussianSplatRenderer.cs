@@ -15,7 +15,7 @@ using UnityEngine.XR;
 
 namespace GaussianSplatting.Runtime
 {
-    class GaussianSplatRenderSystem
+    public class GaussianSplatRenderSystem
     {
         // ReSharper disable MemberCanBePrivate.Global - used by HDRP/URP features that are not always compiled
         internal static readonly ProfilerMarker ProfDraw = new(ProfilerCategory.Render, "GaussianSplat.Draw", MarkerFlags.SampleGPU);
@@ -238,6 +238,19 @@ namespace GaussianSplatting.Runtime
             });
 
             return true;
+        }
+
+        public static int MaxTilePairsCapacity => GlobalOrderGroupCache.MaxTilePairs;
+
+        // Latest tile pair count from async readback (for diagnostics / Inspector).
+        public uint LastTilePairCount
+        {
+            get
+            {
+                foreach (var kvp in _globalGroups)
+                    return kvp.Value.asyncTilePairCount;
+                return 0;
+            }
         }
 
         // ReSharper disable once MemberCanBePrivate.Global - used by HDRP/URP features that are not always compiled
