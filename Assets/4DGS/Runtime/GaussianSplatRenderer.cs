@@ -119,8 +119,11 @@ namespace GaussianSplatting.Runtime
             public int tileRangesCapacity;          // allocated tile count (grow-only)
             public bool hasTileRanges;              // true after first tile sort+build
             public int lastTileCameraId;            // instance ID of last camera that built tile ranges
-            public uint asyncTilePairCount;         // 1-frame-lagged pair count from async readback
-            public bool asyncReadbackPending;       // true while an async readback is in flight
+            // Per-camera async readback of tile pair counts.
+            // Each camera gets its own entry so that readback results from one
+            // camera never overwrite the sort budget of another.
+            public readonly Dictionary<int, uint> asyncTilePairCounts = new();
+            public readonly HashSet<int> asyncReadbackPending = new(); // camera IDs with in-flight readbacks
             // Buffers retired during grow — kept alive until next frame so in-flight
             // CommandBuffers from other cameras don't reference freed memory.
             public readonly List<GraphicsBuffer> retiredTileRanges = new();
@@ -248,7 +251,12 @@ namespace GaussianSplatting.Runtime
             get
             {
                 foreach (var kvp in _globalGroups)
-                    return kvp.Value.asyncTilePairCount;
+                {
+                    uint max = 0;
+                    foreach (var c in kvp.Value.asyncTilePairCounts.Values)
+                        if (c > max) max = c;
+                    return max;
+                }
                 return 0;
             }
         }
@@ -469,9 +477,8 @@ namespace GaussianSplatting.Runtime
             {
                 cache.hasTileRanges = false;
                 cache.lastTileCameraId = camId;
-                // Keep asyncTilePairCount across camera switches — different
-                // cameras viewing the same scene produce similar pair counts,
-                // so the previous value is a better estimate than zero.
+                // Per-camera asyncTilePairCounts are keyed by camera ID, so
+                // no reset needed on camera switch.
             }
 
             // On hit frames (no sort needed), skip assign/sort/build — just re-render.
@@ -479,10 +486,11 @@ namespace GaussianSplatting.Runtime
             if (sortNeeded || !cache.hasTileRanges)
             {
                 // ── Sort budget from async readback (1-frame lag) ─────────
-                // First frame sorts the full buffer (MaxTilePairs) to guarantee
-                // correctness.  Subsequent frames use 2× the previous actual
-                // count to leave headroom for camera movement.
-                uint prevCount = cache.asyncTilePairCount;
+                // Use per-camera pair count so each camera gets an accurate
+                // sort budget independent of other cameras.
+                // First frame (no readback yet) sorts the full buffer to guarantee
+                // correctness on all GPUs (NVIDIA needs the large budget).
+                cache.asyncTilePairCounts.TryGetValue(camId, out uint prevCount);
                 uint sortCount;
                 if (prevCount == 0)
                     sortCount = (uint)GlobalOrderGroupCache.MaxTilePairs;
@@ -521,18 +529,22 @@ namespace GaussianSplatting.Runtime
                 cmb.EndSample(ProfTileAssign);
 
                 // ── Async readback of pair count (for next frame's sort budget) ──
-                if (!cache.asyncReadbackPending)
+                // Use cmb.RequestAsyncReadback so the readback is sequenced in the
+                // command buffer — it reads the counter AFTER this camera's assign
+                // kernel, not at an indeterminate time like the standalone API.
+                if (!cache.asyncReadbackPending.Contains(camId))
                 {
-                    cache.asyncReadbackPending = true;
-                    AsyncGPUReadback.Request(cache.tilePairCounter, 4, 0, (AsyncGPUReadbackRequest req) =>
+                    cache.asyncReadbackPending.Add(camId);
+                    int capturedCamId = camId;
+                    cmb.RequestAsyncReadback(cache.tilePairCounter, 4, 0, (AsyncGPUReadbackRequest req) =>
                     {
-                        cache.asyncReadbackPending = false;
+                        cache.asyncReadbackPending.Remove(capturedCamId);
                         if (!req.hasError && req.done)
                         {
                             var data = req.GetData<uint>();
                             if (data.Length > 0)
                             {
-                                cache.asyncTilePairCount = data[0];
+                                cache.asyncTilePairCounts[capturedCamId] = data[0];
                                 if (data[0] >= (uint)GlobalOrderGroupCache.MaxTilePairs)
                                     Debug.LogWarning($"[GaussianSplat] Tile pair buffer overflow! pairs={data[0]:N0}, max={GlobalOrderGroupCache.MaxTilePairs:N0}. Some splats will be missing.");
                             }
