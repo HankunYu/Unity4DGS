@@ -202,7 +202,6 @@ namespace GaussianSplatting.Runtime
             var texFormat = GaussianSplatAsset.ColorFormatToGraphics(tgt.colorFormat);
             var tex = new Texture2D(texWidth, texHeight, texFormat,
                 TextureCreationFlags.DontInitializePixels |
-                TextureCreationFlags.IgnoreMipmapLimit |
                 TextureCreationFlags.DontUploadUponCreate)
             { name = "MorphTgtColorData" };
             tex.SetPixelData(tgt.colorData.GetData<byte>(), 0);

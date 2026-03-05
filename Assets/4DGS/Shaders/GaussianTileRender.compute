@@ -1,0 +1,322 @@
+// GaussianTileRender.compute
+//
+// Tile-based Gaussian splat renderer (compute-only path).
+// Pipeline:
+//   0. CSClearTileData      — clear key buffer to 0xFFFFFFFF, range buffer to (0,0)
+//   1. CSGaussianTileAssign — project each Gaussian to screen tiles, write (tileKey, splatId)
+//   2. [DeviceRadixSort]    — sort by tileKey (tile_id | depth), driven from C#
+//   3. CSBuildTileRanges    — scan sorted keys to find each tile's [start, end) range
+//   4. CSRenderTiles        — each 16×16 tile group composites its Gaussians front-to-back
+//
+// Tile size: 16×16 pixels = 256 threads per group.
+// Sort key layout (32-bit): upper N bits = tile_id, lower (32-N) bits = quantized depth.
+//   N = ceil(log2(numTiles)), dynamically set via _TileShift from C#.
+//   This maximises depth precision for the actual screen resolution.
+
+#include "GaussianSplatting.hlsl"
+
+#define TILE_SIZE     16
+#define TILE_PIXELS   (TILE_SIZE * TILE_SIZE)   // 256
+
+// ═══════════════════════════════════════════════════════════════════
+// Shared resources
+// ═══════════════════════════════════════════════════════════════════
+
+uint  _SplatCount;
+uint  _TileCountX;
+uint  _TileCountY;
+uint  _MaxTilePairs;           // pre-allocated pair buffer capacity
+uint  _TileShift;              // bits reserved for depth (32 - tileIdBits)
+float4 _TileScreenParams;     // (width, height, 1/width, 1/height)
+
+StructuredBuffer<SplatViewData> _SplatViewData;
+
+// ═══════════════════════════════════════════════════════════════════
+// Kernel 0: CSClearTileData
+//   Clear tile key buffer to 0xFFFFFFFF (invalid sentinel) so that
+//   unused slots sort to the end and never create spurious tile ranges.
+//   Also clears tile range buffer to (0, 0).
+// ═══════════════════════════════════════════════════════════════════
+
+#pragma kernel CSClearTileData
+
+RWStructuredBuffer<uint>  _ClearTileKeys;
+RWStructuredBuffer<uint2> _ClearTileRanges;
+uint _ClearKeyCount;
+uint _ClearRangeCount;
+
+[numthreads(1024, 1, 1)]
+void CSClearTileData(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i < _ClearKeyCount)
+        _ClearTileKeys[i] = 0xFFFFFFFF;
+    if (i < _ClearRangeCount)
+        _ClearTileRanges[i] = uint2(0, 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Kernel 1: CSGaussianTileAssign
+//   For each Gaussian, determine which 16×16 tiles it overlaps and
+//   write one (tileKey, splatId) pair per tile into the output buffers.
+//   An atomic counter allocates output slots without a CPU readback.
+// ═══════════════════════════════════════════════════════════════════
+
+#pragma kernel CSGaussianTileAssign
+
+RWByteAddressBuffer      _TilePairCounter;  // 4-byte atomic counter
+RWStructuredBuffer<uint> _TileKeys;         // sort key per pair
+RWStructuredBuffer<uint> _TileValues;       // splatId per pair
+
+// Convert clip-space Z to a depth value for the sort key.
+// Unity uses reversed-Z: near → NDC_Z ≈ 1, far → NDC_Z ≈ 0.
+// depthQ = (1 - NDC_Z) * depthMask maps near → 0, far → depthMask.
+// Ascending sort: near (small depthQ) first → front-to-back order.
+uint DepthToSortKey(float4 clipPos)
+{
+    uint depthMask = (1u << _TileShift) - 1u;
+    float ndcZ = saturate(clipPos.z / clipPos.w);
+    uint depthQ = (uint)((1.0 - ndcZ) * (float)depthMask);
+    return depthQ & depthMask;
+}
+
+[numthreads(1024, 1, 1)]
+void CSGaussianTileAssign(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount) return;
+
+    SplatViewData view = _SplatViewData[idx];
+
+    // Skip behind-camera splats
+    if (view.pos.w <= 0) return;
+
+    // NDC → screen pixel center
+    float2 ndc = view.pos.xy / view.pos.w;
+    float2 centerPx;
+    centerPx.x = (ndc.x * 0.5 + 0.5) * _TileScreenParams.x;
+    centerPx.y = (ndc.y * -0.5 + 0.5) * _TileScreenParams.y;
+
+    // Screen-space AABB of the Gaussian (√3 ≈ 1.73σ cutoff).
+    // Tighter than the quad's ±2σ; matches the render kernel's
+    // power < -3.0 cutoff (exp(-3) ≈ 0.05) to reduce tile pairs.
+    float2 extent;
+    extent.x = 1.73 * (abs(view.axis1.x) + abs(view.axis2.x));
+    extent.y = 1.73 * (abs(view.axis1.y) + abs(view.axis2.y));
+
+    // Skip sub-pixel splats early
+    if (extent.x < 0.5 && extent.y < 0.5) return;
+
+    float2 aabbMin = centerPx - extent;
+    float2 aabbMax = centerPx + extent;
+
+    // Tile-space AABB (integer)
+    int2 tileMin = max(int2(0, 0),
+        int2((int)floor(aabbMin.x / TILE_SIZE), (int)floor(aabbMin.y / TILE_SIZE)));
+    int2 tileMax = min(int2((int)_TileCountX - 1, (int)_TileCountY - 1),
+        int2((int)(aabbMax.x / TILE_SIZE), (int)(aabbMax.y / TILE_SIZE)));
+
+    if (tileMin.x > tileMax.x || tileMin.y > tileMax.y) return;
+
+    uint depthKey = DepthToSortKey(view.pos);
+
+    // Write one pair per tile in AABB
+    for (int ty = tileMin.y; ty <= tileMax.y; ty++)
+    {
+        for (int tx = tileMin.x; tx <= tileMax.x; tx++)
+        {
+            uint tileId = (uint)(ty * (int)_TileCountX + tx);
+            uint key    = (tileId << _TileShift) | depthKey;
+
+            uint slot;
+            _TilePairCounter.InterlockedAdd(0, 1, slot);
+            if (slot >= _MaxTilePairs) return;  // buffer full, skip
+
+            _TileKeys[slot]   = key;
+            _TileValues[slot] = idx;
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Kernel 2: CSBuildTileRanges
+//   After sorting _TileKeys ascending, scan to find [start, end)
+//   for each tile's contiguous block.
+// ═══════════════════════════════════════════════════════════════════
+
+#pragma kernel CSBuildTileRanges
+
+uint _TilePairCount;
+uint _NumTiles;     // _TileCountX * _TileCountY — for bounds checking
+
+StructuredBuffer<uint>    _SortedTileKeys;
+RWStructuredBuffer<uint2> _TileRanges;    // [start, end) per tile (x=start, y=end)
+
+[numthreads(1024, 1, 1)]
+void CSBuildTileRanges(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= _TilePairCount) return;
+
+    uint key = _SortedTileKeys[i];
+    // Keys cleared to 0xFFFFFFFF are sentinel — skip them
+    if (key == 0xFFFFFFFF) return;
+
+    uint tileId = key >> _TileShift;
+
+    // Bounds check: skip invalid tile IDs (from stale or corrupted data)
+    if (tileId >= _NumTiles) return;
+
+    // Mark start of a new tile block
+    bool isFirst = (i == 0);
+    if (!isFirst)
+    {
+        uint prevKey = _SortedTileKeys[i - 1];
+        isFirst = (prevKey == 0xFFFFFFFF) || ((prevKey >> _TileShift) != tileId);
+    }
+    if (isFirst)
+        _TileRanges[tileId].x = i;
+
+    // Mark end of a tile block
+    bool isLast = (i + 1 == _TilePairCount);
+    if (!isLast)
+    {
+        uint nextKey = _SortedTileKeys[i + 1];
+        isLast = (nextKey == 0xFFFFFFFF) || ((nextKey >> _TileShift) != tileId);
+    }
+    if (isLast)
+        _TileRanges[tileId].y = i + 1;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Kernel 3: CSRenderTiles
+//   Each 16×16 thread group composites one screen tile.
+//   Gaussians are in front-to-back order within each tile (ascending
+//   sort: near/small depthQ first). We use front-to-back alpha
+//   accumulation: contrib = alpha * (1 - accumulated_alpha).
+//   Each chunk of TILE_PIXELS Gaussians is loaded cooperatively into
+//   groupshared memory for coalesced reads.
+// ═══════════════════════════════════════════════════════════════════
+
+#pragma kernel CSRenderTiles
+
+StructuredBuffer<uint>   _SortedTileValues; // splatId per pair (sorted)
+StructuredBuffer<uint2>  _TileRangesRead;   // [start, end) per tile
+RWTexture2D<float4>      _OutputTexture;    // RGBA output (pre-multiplied alpha)
+
+// Shared memory for cooperative loading
+groupshared float2 gs_Axis1[TILE_PIXELS];
+groupshared float2 gs_Axis2[TILE_PIXELS];
+groupshared float2 gs_Center[TILE_PIXELS];  // pixel-space center
+groupshared uint2  gs_Color[TILE_PIXELS];
+groupshared uint   gs_TileDone;             // group-level early termination flag
+
+[numthreads(TILE_SIZE, TILE_SIZE, 1)]
+void CSRenderTiles(uint3 groupId : SV_GroupID, uint3 threadId : SV_GroupThreadID)
+{
+    uint tileX = groupId.x;
+    uint tileY = groupId.y;
+    uint tileId = tileY * _TileCountX + tileX;
+
+    uint pixelX = tileX * TILE_SIZE + threadId.x;
+    uint pixelY = tileY * TILE_SIZE + threadId.y;
+    bool validPixel = pixelX < (uint)_TileScreenParams.x && pixelY < (uint)_TileScreenParams.y;
+
+    float2 pixelCenter = float2(pixelX, pixelY) + 0.5;
+
+    uint2 range = _TileRangesRead[tileId];
+    uint rangeStart = range.x;
+    uint rangeEnd   = range.y;
+
+    uint threadIdx = threadId.y * TILE_SIZE + threadId.x;  // 0..255
+
+    float4 accum = float4(0, 0, 0, 0);  // (r, g, b, alpha)
+    bool done = false;
+
+    // Process Gaussians front-to-back (ascending sort: near first).
+    // ALL threads must reach GroupMemoryBarrierWithGroupSync together,
+    // so the outer loop runs uniformly. Per-thread early-out uses 'done' flag,
+    // and group-level early-out uses gs_TileDone (uniform across all threads).
+    for (uint base = rangeStart; base < rangeEnd; base += TILE_PIXELS)
+    {
+        uint chunkEnd   = min(base + TILE_PIXELS, rangeEnd);
+        uint chunkSize  = chunkEnd - base;
+
+        // ── Cooperative load into shared memory ──────────────────────
+        if (threadIdx < chunkSize)
+        {
+            uint splatId = _SortedTileValues[base + threadIdx];
+            SplatViewData v = _SplatViewData[splatId];
+            float2 ndc = v.pos.xy / v.pos.w;
+            gs_Center[threadIdx] = float2(
+                (ndc.x * 0.5 + 0.5) * _TileScreenParams.x,
+                (ndc.y * -0.5 + 0.5) * _TileScreenParams.y
+            );
+            gs_Axis1[threadIdx] = v.axis1;
+            gs_Axis2[threadIdx] = v.axis2;
+            gs_Color[threadIdx] = v.color;
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        // ── Each thread composites loaded Gaussians for its pixel ────
+        if (!done && validPixel)
+        {
+            for (uint j = 0; j < chunkSize; j++)
+            {
+                float2 center = gs_Center[j];
+                float2 delta  = pixelCenter - center;
+                // Axes from DecomposeCovariance are in Y-up image space,
+                // but pixel delta is Y-down. Negate delta.y so both
+                // use the same Y convention for correct M^{-1} * delta.
+                delta.y = -delta.y;
+
+                float2 ax1 = gs_Axis1[j];
+                float2 ax2 = gs_Axis2[j];
+
+                // Evaluate Gaussian: transform delta into splat's local space
+                // M = [ax1 | ax2], localPos = M^{-1} * delta
+                float det = ax1.x * ax2.y - ax2.x * ax1.y;
+                if (abs(det) < 1e-6) continue;
+                float invDet = 1.0 / det;
+
+                float2 localPos;
+                localPos.x = ( ax2.y * delta.x - ax2.x * delta.y) * invDet;
+                localPos.y = (-ax1.y * delta.x + ax1.x * delta.y) * invDet;
+
+                float power = -dot(localPos, localPos);
+                if (power < -3.0) continue;  // exp(-3) ≈ 0.05, negligible
+
+                uint2 col = gs_Color[j];
+                float r       = f16tof32(col.x >> 16);
+                float g       = f16tof32(col.x);
+                float b       = f16tof32(col.y >> 16);
+                float opacity = f16tof32(col.y);
+
+                float alpha   = min(0.99, opacity * exp(power));
+                float contrib = alpha * (1.0 - accum.a);
+
+                accum.rgb += contrib * float3(r, g, b);
+                accum.a   += contrib;
+
+                if (accum.a >= 0.99)
+                    break;
+            }
+            done = (accum.a >= 0.99);
+        }
+
+        // ── Group-level early termination (2 barriers, no atomics) ─────
+        // Thread 0 sets the flag; barrier ensures all threads see it.
+        // Any still-active thread clears it via plain store (safe: all
+        // writers store the same value 0, well-defined on modern GPUs).
+        // Second barrier ensures the final value is visible to all threads.
+        if (threadIdx == 0) gs_TileDone = 1;
+        GroupMemoryBarrierWithGroupSync();
+        if (!done && validPixel)
+            gs_TileDone = 0;
+        GroupMemoryBarrierWithGroupSync();
+        if (gs_TileDone != 0) break;
+    }
+
+    if (validPixel)
+        _OutputTexture[uint2(pixelX, pixelY)] = float4(accum.rgb, accum.a);
+}

@@ -99,6 +99,7 @@ namespace GaussianSplatting.Runtime
                 internal bool ApplyStylize;
                 internal StylizeSettings StylizeSettings;
                 internal Material StylizeMaterial;
+                internal Vector2Int RenderSize;
             }
 
             public GsRenderPass(GaussianSplatURPFeature owner)
@@ -117,6 +118,7 @@ namespace GaussianSplatting.Runtime
                 rtDesc.depthBufferBits = 0;
                 rtDesc.msaaSamples = 1;
                 rtDesc.graphicsFormat = GraphicsFormat.R16G16B16A16_SFloat;
+                rtDesc.enableRandomWrite = true;  // allow compute shader UAV writes (tile renderer)
                 TextureHandle textureHandle = UniversalRenderer.CreateRenderGraphTexture(renderGraph, rtDesc, GaussianSplatRTName, true);
                 bool applyStylize =
                     _owner.CanRunStylizeForCamera(cameraData.camera, StylizeTarget.GaussianOnly, out var stylizeSettings);
@@ -124,6 +126,7 @@ namespace GaussianSplatting.Runtime
                 if (applyStylize)
                     stylizedHandle = UniversalRenderer.CreateRenderGraphTexture(renderGraph, rtDesc, GaussianStylizeRTName, true);
 
+                passData.RenderSize = new Vector2Int(rtDesc.width, rtDesc.height);
                 passData.CameraData = cameraData;
                 passData.SourceTexture = resourceData.activeColorTexture;
                 passData.SourceDepth = resourceData.activeDepthTexture;
@@ -145,6 +148,10 @@ namespace GaussianSplatting.Runtime
                     using var _ = new ProfilingScope(commandBuffer, ProfileSampler);
                     commandBuffer.SetGlobalTexture(GaussianSplatRT, data.GaussianSplatRT);
                     CoreUtils.SetRenderTarget(commandBuffer, data.GaussianSplatRT, data.SourceDepth, ClearFlag.Color, Color.clear);
+                    // Pass GaussianSplatRT as the tile render output target so the tile
+                    // renderer can write directly via UAV without SetRenderTarget/Blit.
+                    GaussianSplatRenderSystem.instance.TileOutputTarget = data.GaussianSplatRT;
+                    GaussianSplatRenderSystem.instance.TileRenderSize = data.RenderSize;
                     Material matComposite = GaussianSplatRenderSystem.instance.SortAndRenderSplats(data.CameraData.camera, commandBuffer);
                     if (matComposite != null)
                     {

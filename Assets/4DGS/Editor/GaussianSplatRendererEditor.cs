@@ -35,6 +35,8 @@ namespace GaussianSplatting.Editor
         SerializedProperty m_PropShaderDebugPoints;
         SerializedProperty m_PropShaderDebugBoxes;
         SerializedProperty m_PropCSSplatUtilities;
+        SerializedProperty m_PropCSTileRender;
+        SerializedProperty m_PropUseTileRenderer;
 
         bool m_ResourcesExpanded = false;
         int m_CameraIndex = 0;
@@ -75,6 +77,8 @@ namespace GaussianSplatting.Editor
             m_PropShaderDebugPoints = serializedObject.FindProperty("shaderDebugPoints");
             m_PropShaderDebugBoxes = serializedObject.FindProperty("shaderDebugBoxes");
             m_PropCSSplatUtilities = serializedObject.FindProperty("csSplatUtilities");
+            m_PropCSTileRender = serializedObject.FindProperty("csTileRender");
+            m_PropUseTileRenderer = serializedObject.FindProperty("useTileRenderer");
 
             s_AllEditors.Add(this);
         }
@@ -111,6 +115,7 @@ namespace GaussianSplatting.Editor
             EditorGUILayout.PropertyField(m_PropSHOrder);
             EditorGUILayout.PropertyField(m_PropSHOnly);
             EditorGUILayout.PropertyField(m_PropSortNthFrame);
+            EditorGUILayout.PropertyField(m_PropUseTileRenderer, new GUIContent("Tile-Based Renderer"));
 
             EditorGUILayout.Space();
             GUILayout.Label("Debugging Tweaks", EditorStyles.boldLabel);
@@ -127,6 +132,7 @@ namespace GaussianSplatting.Editor
                 EditorGUILayout.PropertyField(m_PropShaderDebugPoints);
                 EditorGUILayout.PropertyField(m_PropShaderDebugBoxes);
                 EditorGUILayout.PropertyField(m_PropCSSplatUtilities);
+                EditorGUILayout.PropertyField(m_PropCSTileRender);
             }
             bool validAndEnabled = gs && gs.enabled && gs.gameObject.activeInHierarchy && gs.HasValidAsset;
             if (validAndEnabled && !gs.HasValidRenderSetup)
@@ -331,6 +337,20 @@ namespace GaussianSplatting.Editor
             bool displayEditStats = isToolActive || modifiedOrHasCutouts;
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Splats", $"{gs.splatCount:N0}");
+            if (gs.useTileRenderer)
+            {
+                var system = GaussianSplatting.Runtime.GaussianSplatRenderSystem.instance;
+                if (system != null)
+                {
+                    uint pairCount = system.LastTilePairCount;
+                    if (pairCount > 0)
+                    {
+                        int max = GaussianSplatting.Runtime.GaussianSplatRenderSystem.MaxTilePairsCapacity;
+                        float usage = (float)pairCount / max * 100f;
+                        EditorGUILayout.LabelField("Tile Pairs", $"{pairCount:N0} / {max:N0} ({usage:F1}%)");
+                    }
+                }
+            }
             if (displayEditStats)
             {
                 EditorGUILayout.LabelField("Cut", $"{gs.editCutSplats:N0}");
