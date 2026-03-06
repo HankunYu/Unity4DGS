@@ -62,9 +62,9 @@ namespace GaussianSplatting.Runtime
         int _splatCount; // initially same as asset splat count, but editing can change this
         GraphicsBuffer _gpuSortDistances;
         internal GraphicsBuffer _gpuSortKeys;
-        GraphicsBuffer _gpuPosData;
-        GraphicsBuffer _gpuOtherData;
-        GraphicsBuffer _gpuSHData;
+        internal GraphicsBuffer _gpuPosData;
+        internal GraphicsBuffer _gpuOtherData;
+        internal GraphicsBuffer _gpuSHData;
 
         // Set by GaussianAnimator: per-splat animation output (3 float4s per splat)
         internal GraphicsBuffer _animOutputBuffer;
@@ -74,20 +74,16 @@ namespace GaussianSplatting.Runtime
         internal int _morphDataValid;
         internal int _morphedSplatCount;
         internal float _morphWeight;
-        Texture _gpuColorData;
+        internal Texture _gpuColorData;
         internal GraphicsBuffer _gpuChunks;
         internal bool _gpuChunksValid;
         internal GraphicsBuffer _gpuView;
         internal GraphicsBuffer _gpuIndexBuffer;
 
-        // these buffers are only for splat editing, and are lazily created
-        GraphicsBuffer _gpuEditCutouts;
-        GraphicsBuffer _gpuEditCountsBounds;
-        GraphicsBuffer _gpuEditSelected;
-        GraphicsBuffer _gpuEditDeleted;
-        GraphicsBuffer _gpuEditSelectedMouseDown; // selection state at start of operation
-        GraphicsBuffer _gpuEditPosMouseDown; // position state at start of operation
-        GraphicsBuffer _gpuEditOtherMouseDown; // rotation/scale state at start of operation
+        private GaussianSplatEditManager _editManager;
+
+        internal GaussianSplatEditManager EditManager
+            => _editManager ??= new GaussianSplatEditManager(this);
 
         GpuSorting _sorter;
         GpuSorting.Args _sorterArgs;
@@ -167,14 +163,16 @@ namespace GaussianSplatting.Runtime
             public static readonly int SrcSplatCount = Shader.PropertyToID("_SrcSplatCount");
         }
 
-        [field: NonSerialized] public bool editModified { get; private set; }
-        [field: NonSerialized] public uint editSelectedSplats { get; private set; }
-        [field: NonSerialized] public uint editDeletedSplats { get; private set; }
-        [field: NonSerialized] public uint editCutSplats { get; private set; }
-        [field: NonSerialized] public Bounds editSelectedBounds { get; private set; }
+        // Forwarding properties for backward compatibility with Editor code
+        public bool editModified => EditManager.Modified;
+        public uint editSelectedSplats => EditManager.SelectedSplats;
+        public uint editDeletedSplats => EditManager.DeletedSplats;
+        public uint editCutSplats => EditManager.CutSplats;
+        public Bounds editSelectedBounds => EditManager.SelectedBounds;
 
         public GaussianSplatAsset asset => splatAsset;
         public int splatCount => _splatCount;
+        internal int SplatCount { get => _splatCount; set => _splatCount = value; }
 
         // Effective count considering morph: max(source, target) when morph is active
         internal int EffectiveSplatCount =>
@@ -210,7 +208,7 @@ namespace GaussianSplatting.Runtime
             }
         }
 
-        enum KernelIndices
+        internal enum KernelIndices
         {
             SetIndices,
             CalcDistances,
@@ -229,7 +227,7 @@ namespace GaussianSplatting.Runtime
             CopySplats,
         }
 
-        static readonly string[] KernelNames =
+        internal static readonly string[] KernelNames =
         {
             "CSSetIndices",
             "CSCalcDistances",
@@ -411,7 +409,7 @@ namespace GaussianSplatting.Runtime
             InitSortBuffers(splatCount);
         }
 
-        private void InitSortBuffers(int count)
+        internal void InitSortBuffers(int count)
         {
             _gpuSortDistances?.Dispose();
             _gpuSortKeys?.Dispose();
@@ -446,7 +444,7 @@ namespace GaussianSplatting.Runtime
                 _sorterArgs.resources = GpuSorting.SupportResources.Load((uint)count);
         }
 
-        private bool TryFindSupportedKernel(string kernelName, out int kernelIndex)
+        internal bool TryFindSupportedKernel(string kernelName, out int kernelIndex)
         {
             kernelIndex = -1;
             if (csSplatUtilities == null || string.IsNullOrEmpty(kernelName))
@@ -469,7 +467,7 @@ namespace GaussianSplatting.Runtime
             return true;
         }
 
-        private bool TryFindSupportedKernel(KernelIndices kernel, out int kernelIndex)
+        internal bool TryFindSupportedKernel(KernelIndices kernel, out int kernelIndex)
         {
             kernelIndex = -1;
             int idx = (int)kernel;
@@ -520,7 +518,7 @@ namespace GaussianSplatting.Runtime
             CreateResourcesForAsset();
         }
 
-        private bool SetAssetDataOnCS(CommandBuffer cmb, KernelIndices kernel, out int kernelIndex)
+        internal bool SetAssetDataOnCS(CommandBuffer cmb, KernelIndices kernel, out int kernelIndex)
         {
             if (!TryFindSupportedKernel(kernel, out kernelIndex))
                 return false;
@@ -528,7 +526,7 @@ namespace GaussianSplatting.Runtime
             return true;
         }
 
-        private void SetAssetDataOnCS(CommandBuffer cmb, int kernelIndex)
+        internal void SetAssetDataOnCS(CommandBuffer cmb, int kernelIndex)
         {
             ComputeShader cs = csSplatUtilities;
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatPos, _gpuPosData);
@@ -536,21 +534,23 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatOther, _gpuOtherData);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatSH, _gpuSHData);
             cmb.SetComputeTextureParam(cs, kernelIndex, Props.SplatColor, _gpuColorData);
-            cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatSelectedBits, _gpuEditSelected ?? _gpuPosData);
-            cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatDeletedBits, _gpuEditDeleted ?? _gpuPosData);
+            var editSelected = EditManager.GpuEditSelected;
+            var editDeleted = EditManager.GpuEditDeleted;
+            cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatSelectedBits, editSelected ?? _gpuPosData);
+            cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatDeletedBits, editDeleted ?? _gpuPosData);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatViewData, _gpuView);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.OrderBuffer, _gpuSortKeys);
 
-            cmb.SetComputeIntParam(cs, Props.SplatBitsValid, _gpuEditSelected != null && _gpuEditDeleted != null ? 1 : 0);
+            cmb.SetComputeIntParam(cs, Props.SplatBitsValid, editSelected != null && editDeleted != null ? 1 : 0);
             uint format = (uint)splatAsset.posFormat | ((uint)splatAsset.scaleFormat << 8) | ((uint)splatAsset.shFormat << 16);
             cmb.SetComputeIntParam(cs, Props.SplatFormat, (int)format);
             cmb.SetComputeIntParam(cs, Props.SplatCount, EffectiveSplatCount);
             cmb.SetComputeIntParam(cs, Props.SrcSplatCount, _splatCount);
             cmb.SetComputeIntParam(cs, Props.SplatChunkCount, _gpuChunksValid ? _gpuChunks.count : 0);
 
-            UpdateCutoutsBuffer();
+            EditManager.UpdateCutoutsBuffer();
             cmb.SetComputeIntParam(cs, Props.SplatCutoutsCount, cutouts?.Length ?? 0);
-            cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatCutouts, _gpuEditCutouts);
+            cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatCutouts, EditManager.GpuEditCutouts);
 
             // Animation data binding
             bool hasAnim = _animOutputBuffer != null;
@@ -574,9 +574,11 @@ namespace GaussianSplatting.Runtime
             mat.SetBuffer(Props.SplatOther, _gpuOtherData);
             mat.SetBuffer(Props.SplatSH, _gpuSHData);
             mat.SetTexture(Props.SplatColor, _gpuColorData);
-            mat.SetBuffer(Props.SplatSelectedBits, _gpuEditSelected ?? _gpuPosData);
-            mat.SetBuffer(Props.SplatDeletedBits, _gpuEditDeleted ?? _gpuPosData);
-            mat.SetInt(Props.SplatBitsValid, _gpuEditSelected != null && _gpuEditDeleted != null ? 1 : 0);
+            var editSelected = EditManager.GpuEditSelected;
+            var editDeleted = EditManager.GpuEditDeleted;
+            mat.SetBuffer(Props.SplatSelectedBits, editSelected ?? _gpuPosData);
+            mat.SetBuffer(Props.SplatDeletedBits, editDeleted ?? _gpuPosData);
+            mat.SetInt(Props.SplatBitsValid, editSelected != null && editDeleted != null ? 1 : 0);
             uint format = (uint)splatAsset.posFormat | ((uint)splatAsset.scaleFormat << 8) | ((uint)splatAsset.shFormat << 16);
             mat.SetInteger(Props.SplatFormat, (int)format);
             mat.SetInteger(Props.SplatCount, _splatCount);
@@ -603,28 +605,16 @@ namespace GaussianSplatting.Runtime
             DisposeBuffer(ref _gpuSortDistances);
             DisposeBuffer(ref _gpuSortKeys);
 
-            DisposeBuffer(ref _gpuEditSelectedMouseDown);
-            DisposeBuffer(ref _gpuEditPosMouseDown);
-            DisposeBuffer(ref _gpuEditOtherMouseDown);
-            DisposeBuffer(ref _gpuEditSelected);
-            DisposeBuffer(ref _gpuEditDeleted);
-            DisposeBuffer(ref _gpuEditCountsBounds);
-            DisposeBuffer(ref _gpuEditCutouts);
-
             _sorterArgs.resources.Dispose();
 
             _splatCount = 0;
             _gpuChunksValid = false;
-
-            editSelectedSplats = 0;
-            editDeletedSplats = 0;
-            editCutSplats = 0;
-            editModified = false;
-            editSelectedBounds = default;
         }
 
         private void OnDisable()
         {
+            _editManager?.Dispose();
+            _editManager = null;
             DisposeResourcesForAsset();
             _kernelIndexCache.Clear();
             GaussianSplatRenderSystem.instance.UnregisterSplat(this);
@@ -807,438 +797,32 @@ namespace GaussianSplatting.Runtime
 #endif
         }
 
-        private void ClearGraphicsBuffer(GraphicsBuffer buf)
-        {
-            if (!TryFindSupportedKernel(KernelIndices.ClearBuffer, out int kernelIndex))
-                return;
-            csSplatUtilities.SetBuffer(kernelIndex, Props.DstBuffer, buf);
-            csSplatUtilities.SetInt(Props.BufferSize, buf.count);
-            csSplatUtilities.GetKernelThreadGroupSizes(kernelIndex, out uint gsX, out _, out _);
-            csSplatUtilities.Dispatch(kernelIndex, (int)((buf.count+gsX-1)/gsX), 1, 1);
-        }
-
-        private void UnionGraphicsBuffers(GraphicsBuffer dst, GraphicsBuffer src)
-        {
-            if (!TryFindSupportedKernel(KernelIndices.OrBuffers, out int kernelIndex))
-                return;
-            csSplatUtilities.SetBuffer(kernelIndex, Props.SrcBuffer, src);
-            csSplatUtilities.SetBuffer(kernelIndex, Props.DstBuffer, dst);
-            csSplatUtilities.SetInt(Props.BufferSize, dst.count);
-            csSplatUtilities.GetKernelThreadGroupSizes(kernelIndex, out uint gsX, out _, out _);
-            csSplatUtilities.Dispatch(kernelIndex, (int)((dst.count+gsX-1)/gsX), 1, 1);
-        }
-
-        static float SortableUintToFloat(uint v)
-        {
-            uint mask = ((v >> 31) - 1) | 0x80000000u;
-            return math.asfloat(v ^ mask);
-        }
-
-        public void UpdateEditCountsAndBounds()
-        {
-            if (_gpuEditSelected == null)
-            {
-                editSelectedSplats = 0;
-                editDeletedSplats = 0;
-                editCutSplats = 0;
-                editModified = false;
-                editSelectedBounds = default;
-                return;
-            }
-
-            if (!TryFindSupportedKernel(KernelIndices.InitEditData, out int initKernel))
-                return;
-            csSplatUtilities.SetBuffer(initKernel, Props.DstBuffer, _gpuEditCountsBounds);
-            csSplatUtilities.Dispatch(initKernel, 1, 1, 1);
-
-            using CommandBuffer cmb = new CommandBuffer();
-            if (!SetAssetDataOnCS(cmb, KernelIndices.UpdateEditData, out int updateKernel))
-                return;
-            cmb.SetComputeBufferParam(csSplatUtilities, updateKernel, Props.DstBuffer, _gpuEditCountsBounds);
-            cmb.SetComputeIntParam(csSplatUtilities, Props.BufferSize, _gpuEditSelected.count);
-            csSplatUtilities.GetKernelThreadGroupSizes(updateKernel, out uint gsX, out _, out _);
-            cmb.DispatchCompute(csSplatUtilities, updateKernel, (int)((_gpuEditSelected.count+gsX-1)/gsX), 1, 1);
-            Graphics.ExecuteCommandBuffer(cmb);
-
-            uint[] res = new uint[_gpuEditCountsBounds.count];
-            _gpuEditCountsBounds.GetData(res);
-            editSelectedSplats = res[0];
-            editDeletedSplats = res[1];
-            editCutSplats = res[2];
-            Vector3 min = new Vector3(SortableUintToFloat(res[3]), SortableUintToFloat(res[4]), SortableUintToFloat(res[5]));
-            Vector3 max = new Vector3(SortableUintToFloat(res[6]), SortableUintToFloat(res[7]), SortableUintToFloat(res[8]));
-            Bounds bounds = default;
-            bounds.SetMinMax(min, max);
-            if (bounds.extents.sqrMagnitude < 0.01)
-                bounds.extents = new Vector3(0.1f,0.1f,0.1f);
-            editSelectedBounds = bounds;
-        }
-
-        private void UpdateCutoutsBuffer()
-        {
-            int bufferSize = cutouts?.Length ?? 0;
-            if (bufferSize == 0)
-                bufferSize = 1;
-            if (_gpuEditCutouts == null || _gpuEditCutouts.count != bufferSize)
-            {
-                _gpuEditCutouts?.Dispose();
-                _gpuEditCutouts = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bufferSize, UnsafeUtility.SizeOf<GaussianCutout.ShaderData>()) { name = "GaussianCutouts" };
-            }
-
-            NativeArray<GaussianCutout.ShaderData> data = new(bufferSize, Allocator.Temp);
-            if (cutouts != null)
-            {
-                var matrix = transform.localToWorldMatrix;
-                for (var i = 0; i < cutouts.Length; ++i)
-                {
-                    data[i] = GaussianCutout.GetShaderData(cutouts[i], matrix);
-                }
-            }
-
-            _gpuEditCutouts.SetData(data);
-            data.Dispose();
-        }
-
-        private bool EnsureEditingBuffers()
-        {
-            if (!HasValidAsset || !HasValidRenderSetup)
-                return false;
-
-            if (_gpuEditSelected == null)
-            {
-                var target = GraphicsBuffer.Target.Raw | GraphicsBuffer.Target.CopySource |
-                             GraphicsBuffer.Target.CopyDestination;
-                var size = (_splatCount + 31) / 32;
-                _gpuEditSelected = new GraphicsBuffer(target, size, 4) {name = "GaussianSplatSelected"};
-                _gpuEditSelectedMouseDown = new GraphicsBuffer(target, size, 4) {name = "GaussianSplatSelectedInit"};
-                _gpuEditDeleted = new GraphicsBuffer(target, size, 4) {name = "GaussianSplatDeleted"};
-                _gpuEditCountsBounds = new GraphicsBuffer(target, 3 + 6, 4) {name = "GaussianSplatEditData"}; // selected count, deleted bound, cut count, float3 min, float3 max
-                ClearGraphicsBuffer(_gpuEditSelected);
-                ClearGraphicsBuffer(_gpuEditSelectedMouseDown);
-                ClearGraphicsBuffer(_gpuEditDeleted);
-            }
-            return _gpuEditSelected != null;
-        }
-
-        public void EditStoreSelectionMouseDown()
-        {
-            if (!EnsureEditingBuffers()) return;
-            Graphics.CopyBuffer(_gpuEditSelected, _gpuEditSelectedMouseDown);
-        }
-
-        public void EditStorePosMouseDown()
-        {
-            if (_gpuEditPosMouseDown == null)
-            {
-                _gpuEditPosMouseDown = new GraphicsBuffer(_gpuPosData.target | GraphicsBuffer.Target.CopyDestination, _gpuPosData.count, _gpuPosData.stride) {name = "GaussianSplatEditPosMouseDown"};
-            }
-            Graphics.CopyBuffer(_gpuPosData, _gpuEditPosMouseDown);
-        }
-        public void EditStoreOtherMouseDown()
-        {
-            if (_gpuEditOtherMouseDown == null)
-            {
-                _gpuEditOtherMouseDown = new GraphicsBuffer(_gpuOtherData.target | GraphicsBuffer.Target.CopyDestination, _gpuOtherData.count, _gpuOtherData.stride) {name = "GaussianSplatEditOtherMouseDown"};
-            }
-            Graphics.CopyBuffer(_gpuOtherData, _gpuEditOtherMouseDown);
-        }
-
+        // Forwarding methods for backward compatibility with Editor code
+        public void UpdateEditCountsAndBounds() => EditManager.UpdateEditCountsAndBounds();
+        public void EditStoreSelectionMouseDown() => EditManager.StoreSelectionMouseDown();
+        public void EditStorePosMouseDown() => EditManager.StorePosMouseDown();
+        public void EditStoreOtherMouseDown() => EditManager.StoreOtherMouseDown();
         public void EditUpdateSelection(Vector2 rectMin, Vector2 rectMax, Camera cam, bool subtract)
-        {
-            if (!EnsureEditingBuffers()) return;
-
-            Graphics.CopyBuffer(_gpuEditSelectedMouseDown, _gpuEditSelected);
-
-            var tr = transform;
-            Matrix4x4 matView = cam.worldToCameraMatrix;
-            Matrix4x4 matO2W = tr.localToWorldMatrix;
-            Matrix4x4 matW2O = tr.worldToLocalMatrix;
-            int screenW = cam.pixelWidth, screenH = cam.pixelHeight;
-            Vector4 screenPar = new Vector4(screenW, screenH, 0, 0);
-            Vector4 camPos = cam.transform.position;
-
-            using var cmb = new CommandBuffer { name = "SplatSelectionUpdate" };
-            if (!SetAssetDataOnCS(cmb, KernelIndices.SelectionUpdate, out _))
-                return;
-
-            cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixMV, matView * matO2W);
-            cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixObjectToWorld, matO2W);
-            cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixWorldToObject, matW2O);
-
-            cmb.SetComputeVectorParam(csSplatUtilities, Props.VecScreenParams, screenPar);
-            cmb.SetComputeVectorParam(csSplatUtilities, Props.VecWorldSpaceCameraPos, camPos);
-
-            cmb.SetComputeVectorParam(csSplatUtilities, Props.SelectionRect, new Vector4(rectMin.x, rectMax.y, rectMax.x, rectMin.y));
-            cmb.SetComputeIntParam(csSplatUtilities, Props.SelectionMode, subtract ? 0 : 1);
-
-            if (!DispatchUtilsAndExecute(cmb, KernelIndices.SelectionUpdate, _splatCount))
-                return;
-            UpdateEditCountsAndBounds();
-        }
-
-        public void EditTranslateSelection(Vector3 localSpacePosDelta)
-        {
-            if (!EnsureEditingBuffers()) return;
-
-            using var cmb = new CommandBuffer { name = "SplatTranslateSelection" };
-            if (!SetAssetDataOnCS(cmb, KernelIndices.TranslateSelection, out _))
-                return;
-
-            cmb.SetComputeVectorParam(csSplatUtilities, Props.SelectionDelta, localSpacePosDelta);
-
-            if (!DispatchUtilsAndExecute(cmb, KernelIndices.TranslateSelection, _splatCount))
-                return;
-            UpdateEditCountsAndBounds();
-            editModified = true;
-        }
-
-        public void EditRotateSelection(Vector3 localSpaceCenter, Matrix4x4 localToWorld, Matrix4x4 worldToLocal, Quaternion rotation)
-        {
-            if (!EnsureEditingBuffers()) return;
-            if (_gpuEditPosMouseDown == null || _gpuEditOtherMouseDown == null) return; // should have captured initial state
-
-            using var cmb = new CommandBuffer { name = "SplatRotateSelection" };
-            if (!SetAssetDataOnCS(cmb, KernelIndices.RotateSelection, out int kernelIndex))
-                return;
-
-            cmb.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.SplatPosMouseDown, _gpuEditPosMouseDown);
-            cmb.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.SplatOtherMouseDown, _gpuEditOtherMouseDown);
-            cmb.SetComputeVectorParam(csSplatUtilities, Props.SelectionCenter, localSpaceCenter);
-            cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixObjectToWorld, localToWorld);
-            cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixWorldToObject, worldToLocal);
-            cmb.SetComputeVectorParam(csSplatUtilities, Props.SelectionDeltaRot, new Vector4(rotation.x, rotation.y, rotation.z, rotation.w));
-
-            if (!DispatchUtilsAndExecute(cmb, KernelIndices.RotateSelection, _splatCount))
-                return;
-            UpdateEditCountsAndBounds();
-            editModified = true;
-        }
-
-
-        public void EditScaleSelection(Vector3 localSpaceCenter, Matrix4x4 localToWorld, Matrix4x4 worldToLocal, Vector3 scale)
-        {
-            if (!EnsureEditingBuffers()) return;
-            if (_gpuEditPosMouseDown == null) return; // should have captured initial state
-
-            using var cmb = new CommandBuffer { name = "SplatScaleSelection" };
-            if (!SetAssetDataOnCS(cmb, KernelIndices.ScaleSelection, out int kernelIndex))
-                return;
-
-            cmb.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.SplatPosMouseDown, _gpuEditPosMouseDown);
-            cmb.SetComputeVectorParam(csSplatUtilities, Props.SelectionCenter, localSpaceCenter);
-            cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixObjectToWorld, localToWorld);
-            cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixWorldToObject, worldToLocal);
-            cmb.SetComputeVectorParam(csSplatUtilities, Props.SelectionDelta, scale);
-
-            if (!DispatchUtilsAndExecute(cmb, KernelIndices.ScaleSelection, _splatCount))
-                return;
-            UpdateEditCountsAndBounds();
-            editModified = true;
-        }
-
-        public void EditDeleteSelected()
-        {
-            if (!EnsureEditingBuffers()) return;
-            UnionGraphicsBuffers(_gpuEditDeleted, _gpuEditSelected);
-            EditDeselectAll();
-            UpdateEditCountsAndBounds();
-            if (editDeletedSplats != 0)
-                editModified = true;
-        }
-
-        public void EditSelectAll()
-        {
-            if (!EnsureEditingBuffers()) return;
-            using var cmb = new CommandBuffer { name = "SplatSelectAll" };
-            if (!SetAssetDataOnCS(cmb, KernelIndices.SelectAll, out int kernelIndex))
-                return;
-            cmb.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.DstBuffer, _gpuEditSelected);
-            cmb.SetComputeIntParam(csSplatUtilities, Props.BufferSize, _gpuEditSelected.count);
-            if (!DispatchUtilsAndExecute(cmb, KernelIndices.SelectAll, _gpuEditSelected.count))
-                return;
-            UpdateEditCountsAndBounds();
-        }
-
-        public void EditDeselectAll()
-        {
-            if (!EnsureEditingBuffers()) return;
-            ClearGraphicsBuffer(_gpuEditSelected);
-            UpdateEditCountsAndBounds();
-        }
-
-        public void EditInvertSelection()
-        {
-            if (!EnsureEditingBuffers()) return;
-
-            using var cmb = new CommandBuffer { name = "SplatInvertSelection" };
-            if (!SetAssetDataOnCS(cmb, KernelIndices.InvertSelection, out int kernelIndex))
-                return;
-            cmb.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.DstBuffer, _gpuEditSelected);
-            cmb.SetComputeIntParam(csSplatUtilities, Props.BufferSize, _gpuEditSelected.count);
-            if (!DispatchUtilsAndExecute(cmb, KernelIndices.InvertSelection, _gpuEditSelected.count))
-                return;
-            UpdateEditCountsAndBounds();
-        }
-
+            => EditManager.UpdateSelection(rectMin, rectMax, cam, subtract);
+        public void EditTranslateSelection(Vector3 delta) => EditManager.TranslateSelection(delta);
+        public void EditRotateSelection(Vector3 center, Matrix4x4 l2w, Matrix4x4 w2l, Quaternion rot)
+            => EditManager.RotateSelection(center, l2w, w2l, rot);
+        public void EditScaleSelection(Vector3 center, Matrix4x4 l2w, Matrix4x4 w2l, Vector3 scale)
+            => EditManager.ScaleSelection(center, l2w, w2l, scale);
+        public void EditDeleteSelected() => EditManager.DeleteSelected();
+        public void EditSelectAll() => EditManager.SelectAll();
+        public void EditDeselectAll() => EditManager.DeselectAll();
+        public void EditInvertSelection() => EditManager.InvertSelection();
         public bool EditExportData(GraphicsBuffer dstData, bool bakeTransform)
-        {
-            if (!EnsureEditingBuffers()) return false;
-
-            int flags = 0;
-            var tr = transform;
-            Quaternion bakeRot = tr.localRotation;
-            Vector3 bakeScale = tr.localScale;
-
-            if (bakeTransform)
-                flags = 1;
-
-            using var cmb = new CommandBuffer { name = "SplatExportData" };
-            if (!SetAssetDataOnCS(cmb, KernelIndices.ExportData, out int kernelIndex))
-                return false;
-            cmb.SetComputeIntParam(csSplatUtilities, "_ExportTransformFlags", flags);
-            cmb.SetComputeVectorParam(csSplatUtilities, "_ExportTransformRotation", new Vector4(bakeRot.x, bakeRot.y, bakeRot.z, bakeRot.w));
-            cmb.SetComputeVectorParam(csSplatUtilities, "_ExportTransformScale", bakeScale);
-            cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixObjectToWorld, tr.localToWorldMatrix);
-            cmb.SetComputeBufferParam(csSplatUtilities, kernelIndex, "_ExportBuffer", dstData);
-
-            if (!DispatchUtilsAndExecute(cmb, KernelIndices.ExportData, _splatCount))
-                return false;
-            return true;
-        }
-
-        public void EditSetSplatCount(int newSplatCount)
-        {
-            if (newSplatCount <= 0 || newSplatCount > GaussianSplatAsset.MaxSplats)
-            {
-                Debug.LogError($"Invalid new splat count: {newSplatCount}");
-                return;
-            }
-            if (asset.chunkData != null)
-            {
-                Debug.LogError("Only splats with VeryHigh quality can be resized");
-                return;
-            }
-            if (newSplatCount == splatCount)
-                return;
-
-            int posStride = (int)(asset.posData.dataSize / asset.splatCount);
-            int otherStride = (int)(asset.otherData.dataSize / asset.splatCount);
-            int shStride = (int) (asset.shData.dataSize / asset.splatCount);
-
-            // create new GPU buffers
-            var newPosData = new GraphicsBuffer(GraphicsBuffer.Target.Raw | GraphicsBuffer.Target.CopySource, newSplatCount * posStride / 4, 4) { name = "GaussianPosData" };
-            var newOtherData = new GraphicsBuffer(GraphicsBuffer.Target.Raw | GraphicsBuffer.Target.CopySource, newSplatCount * otherStride / 4, 4) { name = "GaussianOtherData" };
-            var newSHData = new GraphicsBuffer(GraphicsBuffer.Target.Raw, newSplatCount * shStride / 4, 4) { name = "GaussianSHData" };
-
-            // new texture is a RenderTexture so we can write to it from a compute shader
-            var (texWidth, texHeight) = GaussianSplatAsset.CalcTextureSize(newSplatCount);
-            var texFormat = GaussianSplatAsset.ColorFormatToGraphics(asset.colorFormat);
-            var newColorData = new RenderTexture(texWidth, texHeight, texFormat, GraphicsFormat.None) { name = "GaussianColorData", enableRandomWrite = true };
-            newColorData.Create();
-
-            // selected/deleted buffers
-            var selTarget = GraphicsBuffer.Target.Raw | GraphicsBuffer.Target.CopySource | GraphicsBuffer.Target.CopyDestination;
-            var selSize = (newSplatCount + 31) / 32;
-            var newEditSelected = new GraphicsBuffer(selTarget, selSize, 4) {name = "GaussianSplatSelected"};
-            var newEditSelectedMouseDown = new GraphicsBuffer(selTarget, selSize, 4) {name = "GaussianSplatSelectedInit"};
-            var newEditDeleted = new GraphicsBuffer(selTarget, selSize, 4) {name = "GaussianSplatDeleted"};
-            ClearGraphicsBuffer(newEditSelected);
-            ClearGraphicsBuffer(newEditSelectedMouseDown);
-            ClearGraphicsBuffer(newEditDeleted);
-
-            var newGpuView = new GraphicsBuffer(GraphicsBuffer.Target.Structured, newSplatCount, GpuViewDataSize);
-            InitSortBuffers(newSplatCount);
-
-            // copy existing data over into new buffers
-            EditCopySplats(transform, newPosData, newOtherData, newSHData, newColorData, newEditDeleted, newSplatCount, 0, 0, _splatCount);
-
-            // use the new buffers and the new splat count
-            _gpuPosData.Dispose();
-            _gpuOtherData.Dispose();
-            _gpuSHData.Dispose();
-            DestroyImmediate(_gpuColorData);
-            _gpuView.Dispose();
-
-            _gpuEditSelected?.Dispose();
-            _gpuEditSelectedMouseDown?.Dispose();
-            _gpuEditDeleted?.Dispose();
-
-            _gpuPosData = newPosData;
-            _gpuOtherData = newOtherData;
-            _gpuSHData = newSHData;
-            _gpuColorData = newColorData;
-            _gpuView = newGpuView;
-            _gpuEditSelected = newEditSelected;
-            _gpuEditSelectedMouseDown = newEditSelectedMouseDown;
-            _gpuEditDeleted = newEditDeleted;
-
-            DisposeBuffer(ref _gpuEditPosMouseDown);
-            DisposeBuffer(ref _gpuEditOtherMouseDown);
-
-            _splatCount = newSplatCount;
-            editModified = true;
-        }
-
-        public void EditCopySplatsInto(GaussianSplatRenderer dst, int copySrcStartIndex, int copyDstStartIndex, int copyCount)
-        {
-            EditCopySplats(
-                dst.transform,
-                dst._gpuPosData, dst._gpuOtherData, dst._gpuSHData, dst._gpuColorData, dst._gpuEditDeleted,
-                dst.splatCount,
-                copySrcStartIndex, copyDstStartIndex, copyCount);
-            dst.editModified = true;
-        }
-
-        public void EditCopySplats(
-            Transform dstTransform,
-            GraphicsBuffer dstPos, GraphicsBuffer dstOther, GraphicsBuffer dstSH, Texture dstColor,
-            GraphicsBuffer dstEditDeleted,
-            int dstSize,
-            int copySrcStartIndex, int copyDstStartIndex, int copyCount)
-        {
-            if (!EnsureEditingBuffers()) return;
-
-            Matrix4x4 copyMatrix = dstTransform.worldToLocalMatrix * transform.localToWorldMatrix;
-            Quaternion copyRot = copyMatrix.rotation;
-            Vector3 copyScale = copyMatrix.lossyScale;
-
-            using var cmb = new CommandBuffer { name = "SplatCopy" };
-            if (!SetAssetDataOnCS(cmb, KernelIndices.CopySplats, out int kernelIndex))
-                return;
-
-            cmb.SetComputeBufferParam(csSplatUtilities, kernelIndex, "_CopyDstPos", dstPos);
-            cmb.SetComputeBufferParam(csSplatUtilities, kernelIndex, "_CopyDstOther", dstOther);
-            cmb.SetComputeBufferParam(csSplatUtilities, kernelIndex, "_CopyDstSH", dstSH);
-            cmb.SetComputeTextureParam(csSplatUtilities, kernelIndex, "_CopyDstColor", dstColor);
-            cmb.SetComputeBufferParam(csSplatUtilities, kernelIndex, "_CopyDstEditDeleted", dstEditDeleted);
-
-            cmb.SetComputeIntParam(csSplatUtilities, "_CopyDstSize", dstSize);
-            cmb.SetComputeIntParam(csSplatUtilities, "_CopySrcStartIndex", copySrcStartIndex);
-            cmb.SetComputeIntParam(csSplatUtilities, "_CopyDstStartIndex", copyDstStartIndex);
-            cmb.SetComputeIntParam(csSplatUtilities, "_CopyCount", copyCount);
-
-            cmb.SetComputeVectorParam(csSplatUtilities, "_CopyTransformRotation", new Vector4(copyRot.x, copyRot.y, copyRot.z, copyRot.w));
-            cmb.SetComputeVectorParam(csSplatUtilities, "_CopyTransformScale", copyScale);
-            cmb.SetComputeMatrixParam(csSplatUtilities, "_CopyTransformMatrix", copyMatrix);
-
-            DispatchUtilsAndExecute(cmb, KernelIndices.CopySplats, copyCount);
-        }
-
-        private bool DispatchUtilsAndExecute(CommandBuffer cmb, KernelIndices kernel, int count)
-        {
-            if (count <= 0)
-            {
-                Graphics.ExecuteCommandBuffer(cmb);
-                return true;
-            }
-            if (!TryFindSupportedKernel(kernel, out int kernelIndex))
-                return false;
-            csSplatUtilities.GetKernelThreadGroupSizes(kernelIndex, out uint gsX, out _, out _);
-            cmb.DispatchCompute(csSplatUtilities, kernelIndex, (int)((count + gsX - 1)/gsX), 1, 1);
-            Graphics.ExecuteCommandBuffer(cmb);
-            return true;
-        }
-
-        public GraphicsBuffer GpuEditDeleted => _gpuEditDeleted;
+            => EditManager.ExportData(dstData, bakeTransform);
+        public void EditSetSplatCount(int count) => EditManager.SetSplatCount(count);
+        public void EditCopySplatsInto(GaussianSplatRenderer dst, int srcStart, int dstStart, int count)
+            => EditManager.CopySplatsInto(dst, srcStart, dstStart, count);
+        public void EditCopySplats(Transform dstTransform, GraphicsBuffer dstPos, GraphicsBuffer dstOther,
+            GraphicsBuffer dstSH, Texture dstColor, GraphicsBuffer dstEditDeleted, int dstSize,
+            int srcStart, int dstStart, int count)
+            => EditManager.CopySplats(dstTransform, dstPos, dstOther, dstSH, dstColor, dstEditDeleted,
+                dstSize, srcStart, dstStart, count);
+        public GraphicsBuffer GpuEditDeleted => EditManager.GpuEditDeleted;
     }
 }
