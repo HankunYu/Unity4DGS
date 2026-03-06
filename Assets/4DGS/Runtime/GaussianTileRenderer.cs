@@ -64,14 +64,13 @@ namespace GaussianSplatting.Runtime
 
         // ── Public methods ───────────────────────────────────────────────
 
-        public bool EnsureResources(GaussianSplatRenderer reference,
+        public bool EnsureResources(GaussianSplatConfig config,
             GaussianSplatRenderSystem.GlobalOrderGroupCache cache,
             int screenW, int screenH)
         {
             if (_tileCs == null)
             {
-                _tileCs = reference.csTileRender
-                    ?? Resources.Load<ComputeShader>("GaussianTileRender");
+                _tileCs = config.CsTileRender;
                 if (_tileCs == null) return false;
                 _kernelClearTileData = _tileCs.FindKernel("CSClearTileData");
                 _kernelTileAssign    = _tileCs.FindKernel("CSGaussianTileAssign");
@@ -124,7 +123,7 @@ namespace GaussianSplatting.Runtime
                 cache.tileSorterArgs.resources =
                     GpuSorting.SupportResources.Load((uint)GaussianSplatRenderSystem.GlobalOrderGroupCache.MaxTilePairs);
             }
-            _tileSorter ??= new GpuSorting(reference.csSplatUtilities);
+            _tileSorter ??= new GpuSorting(config.CsSplatUtilities);
 
             return true;
         }

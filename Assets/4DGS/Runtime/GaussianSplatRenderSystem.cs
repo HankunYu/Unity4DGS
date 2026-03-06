@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: MIT
-
 using System.Collections.Generic;
 using Unity.Profiling;
 using Unity.Profiling.LowLevel;
@@ -31,11 +29,64 @@ namespace GaussianSplatting.Runtime
         ComputeShader _globalSorterShader;
         int _globalFrameId;
 
+        // ── Config ──────────────────────────────────────────────────────
+        private GaussianSplatConfig _config;
+        private bool _configWarningLogged;
+
+        public GaussianSplatConfig Config
+        {
+            get
+            {
+                if (_config == null)
+                {
+                    _config = Object.FindFirstObjectByType<GaussianSplatConfig>();
+                    if (_config == null)
+                    {
+                        if (!_configWarningLogged)
+                        {
+                            Debug.LogWarning("GaussianSplatConfig not found in scene. Gaussian splat rendering disabled.");
+                            _configWarningLogged = true;
+                        }
+                    }
+                    else
+                    {
+                        _configWarningLogged = false;
+                    }
+                }
+                return _config;
+            }
+        }
+
+        // ── Materials (created from Config shaders) ─────────────────────
+        private Material _matSplats;
+        private Material _matComposite;
+        private Material _matDebugPoints;
+        private Material _matDebugBoxes;
+        private GaussianSplatConfig _materialSource;
+
+        internal Material MatSplats => _matSplats;
+        internal Material MatComposite => _matComposite;
+        internal Material MatDebugPoints => _matDebugPoints;
+        internal Material MatDebugBoxes => _matDebugBoxes;
+
+        internal void EnsureMaterials()
+        {
+            if (_config == null) return;
+            if (_matSplats != null && _materialSource == _config) return;
+
+            Object.DestroyImmediate(_matSplats);
+            Object.DestroyImmediate(_matComposite);
+            Object.DestroyImmediate(_matDebugPoints);
+            Object.DestroyImmediate(_matDebugBoxes);
+
+            _matSplats = new Material(_config.ShaderSplats) { name = "GaussianSplats" };
+            _matComposite = new Material(_config.ShaderComposite) { name = "GaussianClearDstAlpha" };
+            _matDebugPoints = new Material(_config.ShaderDebugPoints) { name = "GaussianDebugPoints" };
+            _matDebugBoxes = new Material(_config.ShaderDebugBoxes) { name = "GaussianDebugBoxes" };
+            _materialSource = _config;
+        }
+
         // ── Cross-camera GPU synchronisation ─────────────────────────
-        // On D3D12/Vulkan, render graph does not insert UAV barriers for
-        // manually-managed GraphicsBuffers between different cameras' passes.
-        // A GraphicsFence at the end of each camera's splat work ensures the
-        // next camera waits for completion before reusing shared buffers.
         GraphicsFence _lastRenderFence;
         bool _hasRenderFence;
 
@@ -83,13 +134,8 @@ namespace GaussianSplatting.Runtime
             public int tileRangesCapacity;          // allocated tile count (grow-only)
             public bool hasTileRanges;              // true after first tile sort+build
             public int lastTileCameraId;            // instance ID of last camera that built tile ranges
-            // Per-camera async readback of tile pair counts.
-            // Each camera gets its own entry so that readback results from one
-            // camera never overwrite the sort budget of another.
             public readonly Dictionary<int, uint> asyncTilePairCounts = new();
-            public readonly HashSet<int> asyncReadbackPending = new(); // camera IDs with in-flight readbacks
-            // Buffers retired during grow — kept alive until next frame so in-flight
-            // CommandBuffers from other cameras don't reference freed memory.
+            public readonly HashSet<int> asyncReadbackPending = new();
             public readonly List<GraphicsBuffer> retiredTileRanges = new();
 
             public void DisposeRetiredBuffers()
@@ -129,6 +175,16 @@ namespace GaussianSplatting.Runtime
             _globalSorterShader = null;
             _tileRenderer = null;
             _hasRenderFence = false;
+
+            Object.DestroyImmediate(_matSplats);
+            Object.DestroyImmediate(_matComposite);
+            Object.DestroyImmediate(_matDebugPoints);
+            Object.DestroyImmediate(_matDebugBoxes);
+            _matSplats = null;
+            _matComposite = null;
+            _matDebugPoints = null;
+            _matDebugBoxes = null;
+            _materialSource = null;
         }
 
         public void RegisterSplat(GaussianSplatRenderer r)
@@ -166,6 +222,7 @@ namespace GaussianSplatting.Runtime
                 DisposeGlobalResources();
                 _commandBuffer?.Dispose();
                 _commandBuffer = null;
+                _config = null;
                 Camera.onPreCull -= OnPreCullCamera;
             }
         }
@@ -175,6 +232,13 @@ namespace GaussianSplatting.Runtime
         {
             if (cam.cameraType == CameraType.Preview)
                 return false;
+
+            var config = Config;
+            if (config == null || !config.ResourcesValid)
+                return false;
+
+            EnsureMaterials();
+
             // gather all active & valid splat objects
             _activeSplats.Clear();
             foreach (var kvp in _splats)
@@ -213,10 +277,6 @@ namespace GaussianSplatting.Runtime
         // ReSharper disable once MemberCanBePrivate.Global - used by HDRP/URP features that are not always compiled
         public Material SortAndRenderSplats(Camera cam, CommandBuffer cmb)
         {
-            // Wait for the previous camera's GPU work on shared buffers to
-            // complete.  Required on D3D12/Vulkan where the render graph does
-            // not insert UAV barriers for our manually-managed GraphicsBuffers.
-            // On Metal/OpenGL this is a no-op (already signaled).
             if (_hasRenderFence)
                 cmb.WaitOnAsyncGraphicsFence(_lastRenderFence);
 
@@ -224,8 +284,6 @@ namespace GaussianSplatting.Runtime
                 ? SortAndRenderSplatsGlobal(cam, cmb)
                 : SortAndRenderSplatsPerObject(cam, cmb);
 
-            // Fence after all compute/draw commands so the next camera can
-            // synchronise on our completion.
             _lastRenderFence = cmb.CreateAsyncGraphicsFence();
             _hasRenderFence = true;
 
@@ -234,34 +292,33 @@ namespace GaussianSplatting.Runtime
 
         private bool CanUseGlobalSortPath()
         {
+            if (_config.renderMode != GaussianSplatRenderMode.Splats)
+                return false;
             foreach (var kvp in _activeSplats)
             {
                 var gs = kvp.Item1;
-                gs.EnsureMaterials();
-                if (gs.renderMode != GaussianSplatRenderer.RenderMode.Splats)
-                    return false;
                 if (!gs.SupportsGlobalSortPath())
                     return false;
             }
             return true;
         }
 
-        private bool EnsureGlobalSorter(GaussianSplatRenderer reference)
+        private bool EnsureGlobalSorter()
         {
-            if (reference == null || reference.csSplatUtilities == null)
-                return false;
-            if (_globalSorter == null || _globalSorterShader != reference.csSplatUtilities)
+            var cs = _config?.CsSplatUtilities;
+            if (cs == null) return false;
+            if (_globalSorter == null || _globalSorterShader != cs)
             {
-                _globalSorter = new GpuSorting(reference.csSplatUtilities);
-                _globalSorterShader = reference.csSplatUtilities;
+                _globalSorter = new GpuSorting(cs);
+                _globalSorterShader = cs;
             }
             return _globalSorter != null && _globalSorter.Valid;
         }
 
-        private bool EnsureGlobalGroupCache(int renderOrder, GaussianSplatRenderer reference, int splatCount, out GlobalOrderGroupCache cache)
+        private bool EnsureGlobalGroupCache(int renderOrder, int splatCount, out GlobalOrderGroupCache cache)
         {
             cache = null;
-            if (!EnsureGlobalSorter(reference) || splatCount <= 0)
+            if (!EnsureGlobalSorter() || splatCount <= 0)
                 return false;
 
             if (!_globalGroups.TryGetValue(renderOrder, out cache))
@@ -327,9 +384,6 @@ namespace GaussianSplatting.Runtime
 
         Material SortAndRenderSplatsGlobal(Camera cam, CommandBuffer cmb)
         {
-            // Dispose retired tile-range buffers from previous frames.
-            // Safe here: previous frame's GPU work is complete by the time a new
-            // Unity frame starts.  Only run once per Unity frame.
             int unityFrame = Time.frameCount;
             if (_lastRetiredCleanupFrame != unityFrame)
             {
@@ -355,7 +409,7 @@ namespace GaussianSplatting.Runtime
                 }
 
                 var reference = _activeSplats[groupStart].Item1;
-                if (!EnsureGlobalGroupCache(order, reference, groupSplatCount, out var groupCache))
+                if (!EnsureGlobalGroupCache(order, groupSplatCount, out var groupCache))
                 {
                     if (!hasRenderedAGroup)
                     {
@@ -389,10 +443,9 @@ namespace GaussianSplatting.Runtime
                 for (int i = groupStart; i < groupEnd; ++i)
                 {
                     var gs = _activeSplats[i].Item1;
-                    gs.EnsureMaterials();
-                    matComposite = gs.MatComposite;
-                    groupDisplayMat ??= gs.MatSplats;
-                    if (gs.MatSplats == null)
+                    matComposite = _matComposite;
+                    groupDisplayMat ??= _matSplats;
+                    if (_matSplats == null)
                     {
                         groupValid = false;
                         break;
@@ -436,21 +489,16 @@ namespace GaussianSplatting.Runtime
                 cmb.BeginSample(ProfDraw);
                 // ── Tile-based rendering path ──────────────────────────
                 bool usedTile = false;
-                // Use cam.pixelWidth/Height for the tile grid — this matches the
-                // coordinate space used by CalcViewData's focal-length computation.
-                // TileRenderSize is kept for future render-scale support.
                 int tileW = cam.pixelWidth;
                 int tileH = cam.pixelHeight;
                 _tileRenderer ??= new GaussianTileRenderer();
-                if (reference.useTileRenderer && reference.csTileRender != null &&
-                    _tileRenderer.EnsureResources(reference, groupCache, tileW, tileH))
+                if (_config.useTileRenderer &&
+                    _tileRenderer.EnsureResources(_config, groupCache, tileW, tileH))
                 {
                     _tileRenderer.Dispatch(cmb, cam, groupCache, dstOffset, groupSortNeeded, tileW, tileH);
                     usedTile = true;
                 }
 
-                // Global distance sort is only needed for the DrawProcedural
-                // fallback path; tile path does its own per-tile sort.
                 if (!usedTile && (groupSortNeeded || !groupCache.hasSortedKeys))
                 {
                     groupCache.sorterArgs.count = (uint)dstOffset;
@@ -478,12 +526,10 @@ namespace GaussianSplatting.Runtime
 
         Material SortAndRenderSplatsPerObject(Camera cam, CommandBuffer cmb)
         {
-            Material matComposite = null;
+            Material matComposite = _matComposite;
             foreach (var kvp in _activeSplats)
             {
                 var gs = kvp.Item1;
-                gs.EnsureMaterials();
-                matComposite = gs.MatComposite;
                 var mpb = kvp.Item2;
 
                 // sort
@@ -494,13 +540,13 @@ namespace GaussianSplatting.Runtime
 
                 // cache view
                 kvp.Item2.Clear();
-                Material displayMat = gs.renderMode switch
+                Material displayMat = _config.renderMode switch
                 {
-                    GaussianSplatRenderer.RenderMode.DebugPoints => gs.MatDebugPoints,
-                    GaussianSplatRenderer.RenderMode.DebugPointIndices => gs.MatDebugPoints,
-                    GaussianSplatRenderer.RenderMode.DebugBoxes => gs.MatDebugBoxes,
-                    GaussianSplatRenderer.RenderMode.DebugChunkBounds => gs.MatDebugBoxes,
-                    _ => gs.MatSplats
+                    GaussianSplatRenderMode.DebugPoints => _matDebugPoints,
+                    GaussianSplatRenderMode.DebugPointIndices => _matDebugPoints,
+                    GaussianSplatRenderMode.DebugBoxes => _matDebugBoxes,
+                    GaussianSplatRenderMode.DebugChunkBounds => _matDebugBoxes,
+                    _ => _matSplats
                 };
                 if (displayMat == null)
                     continue;
@@ -511,11 +557,11 @@ namespace GaussianSplatting.Runtime
                 mpb.SetBuffer(GaussianSplatRenderer.Props.OrderBuffer, gs.GpuSortKeys);
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatScale, gs.splatScale);
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatOpacityScale, gs.opacityScale);
-                mpb.SetFloat(GaussianSplatRenderer.Props.SplatSize, gs.pointDisplaySize);
+                mpb.SetFloat(GaussianSplatRenderer.Props.SplatSize, _config.pointDisplaySize);
                 mpb.SetInteger(GaussianSplatRenderer.Props.SHOrder, gs.shOrder);
                 mpb.SetInteger(GaussianSplatRenderer.Props.SHOnly, gs.shOnly ? 1 : 0);
-                mpb.SetInteger(GaussianSplatRenderer.Props.DisplayIndex, gs.renderMode == GaussianSplatRenderer.RenderMode.DebugPointIndices ? 1 : 0);
-                mpb.SetInteger(GaussianSplatRenderer.Props.DisplayChunks, gs.renderMode == GaussianSplatRenderer.RenderMode.DebugChunkBounds ? 1 : 0);
+                mpb.SetInteger(GaussianSplatRenderer.Props.DisplayIndex, _config.renderMode == GaussianSplatRenderMode.DebugPointIndices ? 1 : 0);
+                mpb.SetInteger(GaussianSplatRenderer.Props.DisplayChunks, _config.renderMode == GaussianSplatRenderMode.DebugChunkBounds ? 1 : 0);
 
                 cmb.BeginSample(ProfCalcView);
                 bool calcSuccess = gs.CalcViewData(cmb, cam);
@@ -527,9 +573,9 @@ namespace GaussianSplatting.Runtime
                 int indexCount = 6;
                 int instanceCount = gs.EffectiveSplatCount;
                 MeshTopology topology = MeshTopology.Triangles;
-                if (gs.renderMode is GaussianSplatRenderer.RenderMode.DebugBoxes or GaussianSplatRenderer.RenderMode.DebugChunkBounds)
+                if (_config.renderMode is GaussianSplatRenderMode.DebugBoxes or GaussianSplatRenderMode.DebugChunkBounds)
                     indexCount = 36;
-                if (gs.renderMode == GaussianSplatRenderer.RenderMode.DebugChunkBounds)
+                if (_config.renderMode == GaussianSplatRenderMode.DebugChunkBounds)
                     instanceCount = gs.GpuChunksValid ? gs.GpuChunksBuffer.count : 0;
 
                 cmb.BeginSample(ProfDraw);
@@ -566,14 +612,10 @@ namespace GaussianSplatting.Runtime
             _commandBuffer.SetRenderTarget(GaussianSplatRenderer.Props.GaussianSplatRT, BuiltinRenderTextureType.CurrentActive);
             _commandBuffer.ClearRenderTarget(RTClearFlags.Color, new Color(0, 0, 0, 0), 0, 0);
 
-            // We only need this to determine whether we're rendering into backbuffer or not. However, detection this
-            // way only works in BiRP so only do it here.
             _commandBuffer.SetGlobalTexture(GaussianSplatRenderer.Props.CameraTargetTexture, BuiltinRenderTextureType.CameraTarget);
 
-            // add sorting, view calc and drawing commands for each splat object
             Material matComposite = SortAndRenderSplats(cam, _commandBuffer);
 
-            // compose
             if (matComposite != null)
             {
                 _commandBuffer.BeginSample(ProfCompose);

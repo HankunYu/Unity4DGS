@@ -1,20 +1,19 @@
-// SPDX-License-Identifier: MIT
-
 using System.Linq;
-using UnityEditor;
 using UnityEngine;
 
 namespace GaussianSplatting.Runtime
 {
+    [ExecuteInEditMode]
     public class GaussianCutout : MonoBehaviour
     {
-        public enum Type
+        public enum Shape
         {
-            Ellipsoid,
-            Box
+            Sphere = 0,
+            Box = 1
         }
 
-        public Type cutoutType = Type.Ellipsoid;
+        [Tooltip("Shape of the cutout region")]
+        public Shape shape = Shape.Sphere;
         public bool invert = false;
 
         public struct ShaderData // match GaussianCutoutShaderData in CS
@@ -30,7 +29,7 @@ namespace GaussianSplatting.Runtime
             {
                 var tr = self.transform;
                 sd.matrix = tr.worldToLocalMatrix * rendererMatrix;
-                sd.typeAndFlags = ((uint)self.cutoutType) | (self.invert ? 0x100u : 0u);
+                sd.typeAndFlags = ((uint)self.shape) | (self.invert ? 0x100u : 0u);
             }
             else
             {
@@ -45,33 +44,29 @@ namespace GaussianSplatting.Runtime
             Gizmos.matrix = transform.localToWorldMatrix;
             var color = Color.magenta;
             color.a = 0.2f;
-            if (Selection.Contains(gameObject))
+            if (UnityEditor.Selection.Contains(gameObject))
                 color.a = 0.9f;
             else
             {
-                // mid amount of alpha if a GS object that contains us as a cutout is selected
-                var activeGo = Selection.activeGameObject;
-                if (activeGo != null)
+                var activeGo = UnityEditor.Selection.activeGameObject;
+                var mgr = GetComponentInParent<GaussianCutoutManager>();
+                if (activeGo != null && mgr != null && activeGo == mgr.gameObject)
                 {
-                    var activeSplat = activeGo.GetComponent<GaussianSplatRenderer>();
-                    if (activeSplat != null)
-                    {
-                        if (activeSplat.cutouts != null && activeSplat.cutouts.Contains(this))
-                            color.a = 0.5f;
-                    }
+                    if (mgr.Cutouts.Contains(this))
+                        color.a = 0.5f;
                 }
             }
 
             Gizmos.color = color;
-            if (cutoutType == Type.Ellipsoid)
+            if (shape == Shape.Sphere)
             {
                 Gizmos.DrawWireSphere(Vector3.zero, 1.0f);
             }
-            if (cutoutType == Type.Box)
+            if (shape == Shape.Box)
             {
                 Gizmos.DrawWireCube(Vector3.zero, Vector3.one * 2);
             }
         }
-#endif // #if UNITY_EDITOR
+#endif
     }
 }

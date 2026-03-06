@@ -1,8 +1,5 @@
-// SPDX-License-Identifier: MIT
-
 using System;
 using Unity.Collections;
-using Unity.Collections.LowLevel.Unsafe;
 using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -14,7 +11,6 @@ namespace GaussianSplatting.Runtime
         private readonly GaussianSplatRenderer _renderer;
 
         // GPU buffers owned by this manager
-        private GraphicsBuffer _gpuEditCutouts;
         private GraphicsBuffer _gpuEditCountsBounds;
         private GraphicsBuffer _gpuEditSelected;
         private GraphicsBuffer _gpuEditDeleted;
@@ -30,8 +26,6 @@ namespace GaussianSplatting.Runtime
         public Bounds SelectedBounds { get; private set; }
         public GraphicsBuffer GpuEditDeleted => _gpuEditDeleted;
         internal GraphicsBuffer GpuEditSelected => _gpuEditSelected;
-        internal GraphicsBuffer GpuEditCutouts => _gpuEditCutouts;
-
         public GaussianSplatEditManager(GaussianSplatRenderer renderer)
         {
             _renderer = renderer;
@@ -39,7 +33,6 @@ namespace GaussianSplatting.Runtime
 
         public void Dispose()
         {
-            DisposeBuffer(ref _gpuEditCutouts);
             DisposeBuffer(ref _gpuEditCountsBounds);
             DisposeBuffer(ref _gpuEditSelected);
             DisposeBuffer(ref _gpuEditDeleted);
@@ -140,31 +133,6 @@ namespace GaussianSplatting.Runtime
             if (bounds.extents.sqrMagnitude < 0.01)
                 bounds.extents = new Vector3(0.1f, 0.1f, 0.1f);
             SelectedBounds = bounds;
-        }
-
-        public void UpdateCutoutsBuffer()
-        {
-            int bufferSize = _renderer.cutouts?.Length ?? 0;
-            if (bufferSize == 0)
-                bufferSize = 1;
-            if (_gpuEditCutouts == null || _gpuEditCutouts.count != bufferSize)
-            {
-                _gpuEditCutouts?.Dispose();
-                _gpuEditCutouts = new GraphicsBuffer(GraphicsBuffer.Target.Structured, bufferSize, UnsafeUtility.SizeOf<GaussianCutout.ShaderData>()) { name = "GaussianCutouts" };
-            }
-
-            NativeArray<GaussianCutout.ShaderData> data = new(bufferSize, Allocator.Temp);
-            if (_renderer.cutouts != null)
-            {
-                var matrix = _renderer.transform.localToWorldMatrix;
-                for (var i = 0; i < _renderer.cutouts.Length; ++i)
-                {
-                    data[i] = GaussianCutout.GetShaderData(_renderer.cutouts[i], matrix);
-                }
-            }
-
-            _gpuEditCutouts.SetData(data);
-            data.Dispose();
         }
 
         private bool EnsureEditingBuffers()
