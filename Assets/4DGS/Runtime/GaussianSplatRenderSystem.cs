@@ -374,7 +374,7 @@ namespace GaussianSplatting.Runtime
                     groupSignature = groupSignature * 31 + gs.GetInstanceID();
                     groupSignature = groupSignature * 31 + gs.EffectiveSplatCount;
                     int nth = Mathf.Max(1, gs.sortNthFrame);
-                    if (gs._frameCounter % nth == 0)
+                    if (gs.FrameCounter % nth == 0)
                         groupSortNeeded = true;
                 }
                 if (groupCache.groupSignature != groupSignature)
@@ -390,9 +390,9 @@ namespace GaussianSplatting.Runtime
                 {
                     var gs = _activeSplats[i].Item1;
                     gs.EnsureMaterials();
-                    matComposite = gs._matComposite;
-                    groupDisplayMat ??= gs._matSplats;
-                    if (gs._matSplats == null)
+                    matComposite = gs.MatComposite;
+                    groupDisplayMat ??= gs.MatSplats;
+                    if (gs.MatSplats == null)
                     {
                         groupValid = false;
                         break;
@@ -417,7 +417,7 @@ namespace GaussianSplatting.Runtime
                     }
 
                     dstOffset += gs.EffectiveSplatCount;
-                    ++gs._frameCounter;
+                    ++gs.FrameCounter;
                 }
 
                 if (!groupValid || groupDisplayMat == null || dstOffset == 0)
@@ -464,7 +464,7 @@ namespace GaussianSplatting.Runtime
                     _globalMpb.Clear();
                     _globalMpb.SetBuffer(GaussianSplatRenderer.Props.SplatViewData, groupCache.viewData);
                     _globalMpb.SetBuffer(GaussianSplatRenderer.Props.OrderBuffer, groupCache.sortKeys);
-                    cmb.DrawProcedural(reference._gpuIndexBuffer, Matrix4x4.identity,
+                    cmb.DrawProcedural(reference.GpuIndexBuffer, Matrix4x4.identity,
                         groupDisplayMat, 0, MeshTopology.Triangles, 6, dstOffset, _globalMpb);
                 }
                 cmb.EndSample(ProfDraw);
@@ -483,32 +483,32 @@ namespace GaussianSplatting.Runtime
             {
                 var gs = kvp.Item1;
                 gs.EnsureMaterials();
-                matComposite = gs._matComposite;
+                matComposite = gs.MatComposite;
                 var mpb = kvp.Item2;
 
                 // sort
                 var matrix = gs.transform.localToWorldMatrix;
-                if (gs._frameCounter % gs.sortNthFrame == 0)
+                if (gs.FrameCounter % gs.sortNthFrame == 0)
                     gs.SortPoints(cmb, cam, matrix);
-                ++gs._frameCounter;
+                ++gs.FrameCounter;
 
                 // cache view
                 kvp.Item2.Clear();
                 Material displayMat = gs.renderMode switch
                 {
-                    GaussianSplatRenderer.RenderMode.DebugPoints => gs._matDebugPoints,
-                    GaussianSplatRenderer.RenderMode.DebugPointIndices => gs._matDebugPoints,
-                    GaussianSplatRenderer.RenderMode.DebugBoxes => gs._matDebugBoxes,
-                    GaussianSplatRenderer.RenderMode.DebugChunkBounds => gs._matDebugBoxes,
-                    _ => gs._matSplats
+                    GaussianSplatRenderer.RenderMode.DebugPoints => gs.MatDebugPoints,
+                    GaussianSplatRenderer.RenderMode.DebugPointIndices => gs.MatDebugPoints,
+                    GaussianSplatRenderer.RenderMode.DebugBoxes => gs.MatDebugBoxes,
+                    GaussianSplatRenderer.RenderMode.DebugChunkBounds => gs.MatDebugBoxes,
+                    _ => gs.MatSplats
                 };
                 if (displayMat == null)
                     continue;
 
                 gs.SetAssetDataOnMaterial(mpb);
-                mpb.SetBuffer(GaussianSplatRenderer.Props.SplatChunks, gs._gpuChunks);
-                mpb.SetBuffer(GaussianSplatRenderer.Props.SplatViewData, gs._gpuView);
-                mpb.SetBuffer(GaussianSplatRenderer.Props.OrderBuffer, gs._gpuSortKeys);
+                mpb.SetBuffer(GaussianSplatRenderer.Props.SplatChunks, gs.GpuChunksBuffer);
+                mpb.SetBuffer(GaussianSplatRenderer.Props.SplatViewData, gs.GpuView);
+                mpb.SetBuffer(GaussianSplatRenderer.Props.OrderBuffer, gs.GpuSortKeys);
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatScale, gs.splatScale);
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatOpacityScale, gs.opacityScale);
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatSize, gs.pointDisplaySize);
@@ -530,10 +530,10 @@ namespace GaussianSplatting.Runtime
                 if (gs.renderMode is GaussianSplatRenderer.RenderMode.DebugBoxes or GaussianSplatRenderer.RenderMode.DebugChunkBounds)
                     indexCount = 36;
                 if (gs.renderMode == GaussianSplatRenderer.RenderMode.DebugChunkBounds)
-                    instanceCount = gs._gpuChunksValid ? gs._gpuChunks.count : 0;
+                    instanceCount = gs.GpuChunksValid ? gs.GpuChunksBuffer.count : 0;
 
                 cmb.BeginSample(ProfDraw);
-                cmb.DrawProcedural(gs._gpuIndexBuffer, matrix, displayMat, 0, topology, indexCount, instanceCount, mpb);
+                cmb.DrawProcedural(gs.GpuIndexBuffer, matrix, displayMat, 0, topology, indexCount, instanceCount, mpb);
                 cmb.EndSample(ProfDraw);
             }
             return matComposite;

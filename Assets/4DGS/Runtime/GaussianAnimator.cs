@@ -58,7 +58,7 @@ namespace GaussianSplatting.Runtime
         {
             ReleaseBuffers();
             if (_renderer != null)
-                _renderer._animOutputBuffer = null;
+                _renderer.ClearAnimationOutput();
         }
 
         private void ReleaseBuffers()
@@ -77,20 +77,20 @@ namespace GaussianSplatting.Runtime
             if (_renderer == null || !_renderer.HasValidAsset || !_renderer.HasValidRenderSetup)
             {
                 if (_renderer != null)
-                    _renderer._animOutputBuffer = null;
+                    _renderer.ClearAnimationOutput();
                 return;
             }
 
             if (animateShader == null)
             {
-                _renderer._animOutputBuffer = null;
+                _renderer.ClearAnimationOutput();
                 return;
             }
 
             // Collect active volumes and their modifiers
             if (volumes == null || volumes.Length == 0)
             {
-                _renderer._animOutputBuffer = null;
+                _renderer.ClearAnimationOutput();
                 return;
             }
 
@@ -111,7 +111,7 @@ namespace GaussianSplatting.Runtime
 
             if (volumeCount == 0 || modifierCount == 0)
             {
-                _renderer._animOutputBuffer = null;
+                _renderer.ClearAnimationOutput();
                 return;
             }
 
@@ -128,7 +128,7 @@ namespace GaussianSplatting.Runtime
             DispatchAnimation(splatCount, volumeCount, modifierCount);
 
             // Set the output buffer on the renderer so CalcViewData can read it
-            _renderer._animOutputBuffer = _animOutputBuffer;
+            _renderer.SetAnimationOutput(_animOutputBuffer);
         }
 
         private void EnsureBuffers(int splatCount, int volumeCount, int modifierCount)
@@ -237,13 +237,13 @@ namespace GaussianSplatting.Runtime
             uint format = (uint)asset.posFormat | ((uint)asset.scaleFormat << 8) | ((uint)asset.shFormat << 16);
             cs.SetInt(PropAnimSplatFormat, (int)format);
 
-            bool hasChunks = _renderer._gpuChunksValid;
-            int chunkCount = hasChunks ? _renderer._gpuChunks.count : 0;
+            bool hasChunks = _renderer.GpuChunksValid;
+            int chunkCount = hasChunks ? _renderer.GpuChunksBuffer.count : 0;
             cs.SetInt(PropAnimChunkCount, chunkCount);
 
             // Set original pos buffer and chunk data
             cs.SetBuffer(kernel, PropAnimSplatPos, _renderer.GpuPosData);
-            cs.SetBuffer(kernel, PropAnimSplatChunks, _renderer._gpuChunks);
+            cs.SetBuffer(kernel, PropAnimSplatChunks, _renderer.GpuChunksBuffer);
 
             cs.SetMatrix(PropAnimMatrixO2W, transform.localToWorldMatrix);
 

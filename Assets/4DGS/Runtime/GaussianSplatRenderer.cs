@@ -60,41 +60,41 @@ namespace GaussianSplatting.Runtime
         public bool useTileRenderer = true;
 
         int _splatCount; // initially same as asset splat count, but editing can change this
-        GraphicsBuffer _gpuSortDistances;
-        internal GraphicsBuffer _gpuSortKeys;
+        private GraphicsBuffer _gpuSortDistances;
+        private GraphicsBuffer _gpuSortKeys;
         internal GraphicsBuffer _gpuPosData;
         internal GraphicsBuffer _gpuOtherData;
         internal GraphicsBuffer _gpuSHData;
 
         // Set by GaussianAnimator: per-splat animation output (3 float4s per splat)
-        internal GraphicsBuffer _animOutputBuffer;
+        private GraphicsBuffer _animOutputBuffer;
         // Set by GaussianMorph: pre-blended splat data (4 float4s per splat)
-        internal GraphicsBuffer _morphedDataBuffer;
-        internal GraphicsBuffer _morphSHBuffer;
-        internal int _morphDataValid;
-        internal int _morphedSplatCount;
-        internal float _morphWeight;
+        private GraphicsBuffer _morphedDataBuffer;
+        private GraphicsBuffer _morphSHBuffer;
+        private int _morphDataValid;
+        private int _morphedSplatCount;
+        private float _morphWeight;
         internal Texture _gpuColorData;
-        internal GraphicsBuffer _gpuChunks;
-        internal bool _gpuChunksValid;
+        private GraphicsBuffer _gpuChunks;
+        private bool _gpuChunksValid;
         internal GraphicsBuffer _gpuView;
-        internal GraphicsBuffer _gpuIndexBuffer;
+        private GraphicsBuffer _gpuIndexBuffer;
 
         private GaussianSplatEditManager _editManager;
 
         internal GaussianSplatEditManager EditManager
             => _editManager ??= new GaussianSplatEditManager(this);
 
-        GpuSorting _sorter;
-        GpuSorting.Args _sorterArgs;
-        readonly Dictionary<string, int> _kernelIndexCache = new();
+        private GpuSorting _sorter;
+        private GpuSorting.Args _sorterArgs;
+        private readonly Dictionary<string, int> _kernelIndexCache = new();
 
-        internal Material _matSplats;
-        internal Material _matComposite;
-        internal Material _matDebugPoints;
-        internal Material _matDebugBoxes;
+        private Material _matSplats;
+        private Material _matComposite;
+        private Material _matDebugPoints;
+        private Material _matDebugBoxes;
 
-        internal int _frameCounter;
+        private int _frameCounter;
         GaussianSplatAsset _prevAsset;
         private int _deferAssetFrames = 0;
         private const int DeferFrames = 1;
@@ -185,6 +185,14 @@ namespace GaussianSplatting.Runtime
         internal Texture GpuColorData => _gpuColorData;
         internal GraphicsBuffer GpuChunksBuffer => _gpuChunks;
         internal bool GpuChunksValid => _gpuChunksValid;
+        internal GraphicsBuffer GpuSortKeys => _gpuSortKeys;
+        internal Material MatSplats => _matSplats;
+        internal Material MatComposite => _matComposite;
+        internal Material MatDebugPoints => _matDebugPoints;
+        internal Material MatDebugBoxes => _matDebugBoxes;
+        internal GraphicsBuffer GpuIndexBuffer => _gpuIndexBuffer;
+        internal GraphicsBuffer GpuView => _gpuView;
+        internal int FrameCounter { get => _frameCounter; set => _frameCounter = value; }
 
         internal void SetMorphData(GraphicsBuffer morphedData, int splatCount, int valid, float weight = 0f, GraphicsBuffer morphSH = null)
         {
@@ -206,6 +214,16 @@ namespace GaussianSplatting.Runtime
             {
                 InitSortBuffers(needed);
             }
+        }
+
+        internal void SetAnimationOutput(GraphicsBuffer animBuffer)
+        {
+            _animOutputBuffer = animBuffer;
+        }
+
+        internal void ClearAnimationOutput()
+        {
+            _animOutputBuffer = null;
         }
 
         internal enum KernelIndices

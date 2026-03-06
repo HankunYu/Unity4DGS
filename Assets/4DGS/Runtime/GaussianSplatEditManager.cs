@@ -196,20 +196,22 @@ namespace GaussianSplatting.Runtime
 
         public void StorePosMouseDown()
         {
+            var posData = _renderer.GpuPosData;
             if (_gpuEditPosMouseDown == null)
             {
-                _gpuEditPosMouseDown = new GraphicsBuffer(_renderer._gpuPosData.target | GraphicsBuffer.Target.CopyDestination, _renderer._gpuPosData.count, _renderer._gpuPosData.stride) { name = "GaussianSplatEditPosMouseDown" };
+                _gpuEditPosMouseDown = new GraphicsBuffer(posData.target | GraphicsBuffer.Target.CopyDestination, posData.count, posData.stride) { name = "GaussianSplatEditPosMouseDown" };
             }
-            Graphics.CopyBuffer(_renderer._gpuPosData, _gpuEditPosMouseDown);
+            Graphics.CopyBuffer(posData, _gpuEditPosMouseDown);
         }
 
         public void StoreOtherMouseDown()
         {
+            var otherData = _renderer.GpuOtherData;
             if (_gpuEditOtherMouseDown == null)
             {
-                _gpuEditOtherMouseDown = new GraphicsBuffer(_renderer._gpuOtherData.target | GraphicsBuffer.Target.CopyDestination, _renderer._gpuOtherData.count, _renderer._gpuOtherData.stride) { name = "GaussianSplatEditOtherMouseDown" };
+                _gpuEditOtherMouseDown = new GraphicsBuffer(otherData.target | GraphicsBuffer.Target.CopyDestination, otherData.count, otherData.stride) { name = "GaussianSplatEditOtherMouseDown" };
             }
-            Graphics.CopyBuffer(_renderer._gpuOtherData, _gpuEditOtherMouseDown);
+            Graphics.CopyBuffer(otherData, _gpuEditOtherMouseDown);
         }
 
         public void UpdateSelection(Vector2 rectMin, Vector2 rectMax, Camera cam, bool subtract)
