@@ -34,8 +34,8 @@
 #pragma require waveballot
 #pragma use_dxc
 
-#include "DeviceRadixSort.hlsl"
-#include "GaussianSplatting.hlsl"
+#include "../Shaders/DeviceRadixSort.hlsl"
+#include "../Shaders/GaussianSplatting.hlsl"
 #include "UnityCG.cginc"
 
 float4x4 _MatrixObjectToWorld;
@@ -122,7 +122,7 @@ uint _SplatCutoutsCount;
 StructuredBuffer<float4> _AnimOutputData;
 uint _AnimDataValid; // 0 = no animation, 1 = animation active
 
-#define SPLAT_CUTOUT_TYPE_ELLIPSOID 0
+#define SPLAT_CUTOUT_TYPE_SPHERE 0
 #define SPLAT_CUTOUT_TYPE_BOX 1
 
 struct GaussianCutoutShaderData // match GaussianCutout.ShaderData in C#
@@ -205,7 +205,7 @@ bool IsSplatCut(float3 pos)
         bool invert = (cutData.typeAndFlags & 0xFF00) != 0;
 
         float3 cutoutPos = mul(cutData.mat, float4(pos, 1)).xyz;
-        if (type == SPLAT_CUTOUT_TYPE_ELLIPSOID)
+        if (type == SPLAT_CUTOUT_TYPE_SPHERE)
         {
             if (dot(cutoutPos, cutoutPos) <= 1) return invert;
         }
@@ -794,7 +794,7 @@ float InvSigmoid(float v)
 }
 
 // SH rotation
-#include "SphericalHarmonics.hlsl"
+#include "../Shaders/SphericalHarmonics.hlsl"
 
 void RotateSH(inout SplatSHData sh, float3x3 rot)
 {

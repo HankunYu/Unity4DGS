@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Unity.Collections;
 using UnityEngine;
 
@@ -5,7 +6,7 @@ namespace GaussianSplatting.Runtime
 {
     /// <summary>
     /// Main controller for procedural splat animation. Attach to the same
-    /// GameObject as GaussianSplatRenderer. References scene-placed
+    /// GameObject as GaussianSplatRenderer. Auto-collects child
     /// GaussianAnimVolume objects, packs their data to GPU, and dispatches
     /// the animation compute shader each frame.
     /// </summary>
@@ -13,14 +14,13 @@ namespace GaussianSplatting.Runtime
     [ExecuteInEditMode]
     public class GaussianAnimator : MonoBehaviour
     {
-        [Tooltip("Volumes that define animation regions. Each volume has modifier components.")]
-        public GaussianAnimVolume[] volumes;
-
-        [Tooltip("Animation compute shader (GaussianAnimate.compute)")]
-        public ComputeShader animateShader;
-
+        private ComputeShader _animateShader;
         private GaussianSplatRenderer _renderer;
         private GraphicsBuffer _animOutputBuffer;
+
+        // Auto-collected from children each frame
+        private readonly List<GaussianAnimVolume> _volumes = new();
+        public IReadOnlyList<GaussianAnimVolume> Volumes => _volumes;
 
         // Structured buffers for GPU upload
         private GraphicsBuffer _volumeBuffer;
@@ -52,13 +52,15 @@ namespace GaussianSplatting.Runtime
         private void OnEnable()
         {
             _renderer = GetComponent<GaussianSplatRenderer>();
+            if (_animateShader == null)
+                _animateShader = Resources.Load<ComputeShader>("GaussianAnimate");
         }
 
         private void OnDisable()
         {
             ReleaseBuffers();
             if (_renderer != null)
-                _renderer._animOutputBuffer = null;
+                _renderer.ClearAnimationOutput();
         }
 
         private void ReleaseBuffers()
@@ -72,36 +74,43 @@ namespace GaussianSplatting.Runtime
             _kernelAnimate = -1;
         }
 
+        private void CollectVolumes()
+        {
+            _volumes.Clear();
+            GetComponentsInChildren(_volumes);
+        }
+
         private void LateUpdate()
         {
             if (_renderer == null || !_renderer.HasValidAsset || !_renderer.HasValidRenderSetup)
             {
                 if (_renderer != null)
-                    _renderer._animOutputBuffer = null;
+                    _renderer.ClearAnimationOutput();
                 return;
             }
 
-            if (animateShader == null)
+            if (_animateShader == null)
             {
-                _renderer._animOutputBuffer = null;
+                _renderer.ClearAnimationOutput();
                 return;
             }
 
-            // Collect active volumes and their modifiers
-            if (volumes == null || volumes.Length == 0)
+            CollectVolumes();
+
+            if (_volumes.Count == 0)
             {
-                _renderer._animOutputBuffer = null;
+                _renderer.ClearAnimationOutput();
                 return;
             }
 
             // Count active volumes and modifiers
             int volumeCount = 0;
             int modifierCount = 0;
-            for (int i = 0; i < volumes.Length && volumeCount < MaxVolumes; i++)
+            for (int i = 0; i < _volumes.Count && volumeCount < MaxVolumes; i++)
             {
-                if (volumes[i] == null || !volumes[i].isActiveAndEnabled) continue;
+                if (!_volumes[i].isActiveAndEnabled) continue;
                 volumeCount++;
-                var mods = volumes[i].GetModifiers();
+                var mods = _volumes[i].GetModifiers();
                 for (int j = 0; j < mods.Length && modifierCount < MaxModifiers; j++)
                 {
                     if (mods[j] != null && mods[j].isActiveAndEnabled)
@@ -111,7 +120,7 @@ namespace GaussianSplatting.Runtime
 
             if (volumeCount == 0 || modifierCount == 0)
             {
-                _renderer._animOutputBuffer = null;
+                _renderer.ClearAnimationOutput();
                 return;
             }
 
@@ -128,7 +137,7 @@ namespace GaussianSplatting.Runtime
             DispatchAnimation(splatCount, volumeCount, modifierCount);
 
             // Set the output buffer on the renderer so CalcViewData can read it
-            _renderer._animOutputBuffer = _animOutputBuffer;
+            _renderer.SetAnimationOutput(_animOutputBuffer);
         }
 
         private void EnsureBuffers(int splatCount, int volumeCount, int modifierCount)
@@ -136,9 +145,9 @@ namespace GaussianSplatting.Runtime
             // Find kernel
             if (_kernelAnimate < 0)
             {
-                if (!animateShader.HasKernel("CSAnimateSplats"))
+                if (!_animateShader.HasKernel("CSAnimateSplats"))
                     return;
-                _kernelAnimate = animateShader.FindKernel("CSAnimateSplats");
+                _kernelAnimate = _animateShader.FindKernel("CSAnimateSplats");
             }
 
             // Animation output: 3 float4s per splat
@@ -188,12 +197,12 @@ namespace GaussianSplatting.Runtime
 
             int vi = 0;
             int mi = 0;
-            for (int i = 0; i < volumes.Length && vi < MaxVolumes; i++)
+            for (int i = 0; i < _volumes.Count && vi < MaxVolumes; i++)
             {
-                if (volumes[i] == null || !volumes[i].isActiveAndEnabled) continue;
-                volData[vi] = volumes[i].GetShaderData();
+                if (!_volumes[i].isActiveAndEnabled) continue;
+                volData[vi] = _volumes[i].GetShaderData();
 
-                var mods = volumes[i].GetModifiers();
+                var mods = _volumes[i].GetModifiers();
                 for (int j = 0; j < mods.Length && mi < MaxModifiers; j++)
                 {
                     if (mods[j] == null || !mods[j].isActiveAndEnabled) continue;
@@ -223,7 +232,7 @@ namespace GaussianSplatting.Runtime
 
         private void DispatchAnimation(int splatCount, int volumeCount, int modifierCount)
         {
-            var cs = animateShader;
+            var cs = _animateShader;
             int kernel = _kernelAnimate;
 
             cs.SetBuffer(kernel, PropAnimVolumes, _volumeBuffer);
@@ -237,13 +246,13 @@ namespace GaussianSplatting.Runtime
             uint format = (uint)asset.posFormat | ((uint)asset.scaleFormat << 8) | ((uint)asset.shFormat << 16);
             cs.SetInt(PropAnimSplatFormat, (int)format);
 
-            bool hasChunks = _renderer._gpuChunksValid;
-            int chunkCount = hasChunks ? _renderer._gpuChunks.count : 0;
+            bool hasChunks = _renderer.GpuChunksValid;
+            int chunkCount = hasChunks ? _renderer.GpuChunksBuffer.count : 0;
             cs.SetInt(PropAnimChunkCount, chunkCount);
 
             // Set original pos buffer and chunk data
             cs.SetBuffer(kernel, PropAnimSplatPos, _renderer.GpuPosData);
-            cs.SetBuffer(kernel, PropAnimSplatChunks, _renderer._gpuChunks);
+            cs.SetBuffer(kernel, PropAnimSplatChunks, _renderer.GpuChunksBuffer);
 
             cs.SetMatrix(PropAnimMatrixO2W, transform.localToWorldMatrix);
 

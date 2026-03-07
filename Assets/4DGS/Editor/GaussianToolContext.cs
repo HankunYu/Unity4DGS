@@ -145,19 +145,23 @@ namespace GaussianSplatting.Editor
                     // draw cutout gizmos
                     Handles.color = new Color(1,0,1,0.7f);
                     var prevMatrix = Handles.matrix;
-                    foreach (var cutout in gs.cutouts)
+                    var cutoutMgr = gs.CutoutManager;
+                    if (cutoutMgr != null)
                     {
-                        if (!cutout)
-                            continue;
-                        Handles.matrix = cutout.transform.localToWorldMatrix;
-                        if (cutout.cutoutType == GaussianCutout.Type.Ellipsoid)
+                        foreach (var cutout in cutoutMgr.Cutouts)
                         {
-                            Handles.DrawWireDisc(Vector3.zero, Vector3.up, 1.0f);
-                            Handles.DrawWireDisc(Vector3.zero, Vector3.right, 1.0f);
-                            Handles.DrawWireDisc(Vector3.zero, Vector3.forward, 1.0f);
+                            if (!cutout)
+                                continue;
+                            Handles.matrix = cutout.transform.localToWorldMatrix;
+                            if (cutout.shape == GaussianCutout.Shape.Sphere)
+                            {
+                                Handles.DrawWireDisc(Vector3.zero, Vector3.up, 1.0f);
+                                Handles.DrawWireDisc(Vector3.zero, Vector3.right, 1.0f);
+                                Handles.DrawWireDisc(Vector3.zero, Vector3.forward, 1.0f);
+                            }
+                            if (cutout.shape == GaussianCutout.Shape.Box)
+                                Handles.DrawWireCube(Vector3.zero, Vector3.one * 2);
                         }
-                        if (cutout.cutoutType == GaussianCutout.Type.Box)
-                            Handles.DrawWireCube(Vector3.zero, Vector3.one * 2);
                     }
 
                     Handles.matrix = prevMatrix;
