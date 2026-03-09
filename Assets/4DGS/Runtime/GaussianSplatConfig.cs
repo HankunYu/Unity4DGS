@@ -10,6 +10,10 @@ namespace GaussianSplatting.Runtime
         [Range(1.0f, 15.0f)] public float pointDisplaySize = 3.0f;
         public bool useTileRenderer = true;
 
+        [Header("VR Settings")]
+        [Tooltip("Use VR-optimized rendering path (RenderMeshPrimitives + vertex covariance)")]
+        public bool useVRRenderPath;
+
         // Auto-loaded resources (not serialized)
         private Shader _shaderSplats;
         private Shader _shaderComposite;
@@ -17,6 +21,7 @@ namespace GaussianSplatting.Runtime
         private Shader _shaderDebugBoxes;
         private ComputeShader _csSplatUtilities;
         private ComputeShader _csTileRender;
+        private Shader _shaderSplatsVR;
 
         public Shader ShaderSplats => _shaderSplats;
         public Shader ShaderComposite => _shaderComposite;
@@ -24,6 +29,7 @@ namespace GaussianSplatting.Runtime
         public Shader ShaderDebugBoxes => _shaderDebugBoxes;
         public ComputeShader CsSplatUtilities => _csSplatUtilities;
         public ComputeShader CsTileRender => _csTileRender;
+        public Shader ShaderSplatsVR => _shaderSplatsVR;
 
         public bool ResourcesValid =>
             _shaderSplats != null && _shaderComposite != null &&
@@ -35,6 +41,12 @@ namespace GaussianSplatting.Runtime
             LoadResources();
         }
 
+        private void LateUpdate()
+        {
+            if (useVRRenderPath)
+                GaussianSplatRenderSystem.instance?.RenderVRSplats();
+        }
+
         private void LoadResources()
         {
             _shaderSplats = Shader.Find("Gaussian Splatting/Render Splats");
@@ -43,6 +55,7 @@ namespace GaussianSplatting.Runtime
             _shaderDebugBoxes = Shader.Find("Gaussian Splatting/Debug/Render Boxes");
             _csSplatUtilities = Resources.Load<ComputeShader>("SplatUtilities");
             _csTileRender = Resources.Load<ComputeShader>("GaussianTileRender");
+            _shaderSplatsVR = Shader.Find("Gaussian Splatting/Render Splats VR");
         }
     }
 }

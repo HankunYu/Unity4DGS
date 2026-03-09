@@ -166,6 +166,7 @@ namespace GaussianSplatting.Runtime
         internal GraphicsBuffer GpuSortKeys => _gpuSortKeys;
         internal GraphicsBuffer GpuIndexBuffer => _gpuIndexBuffer;
         internal GraphicsBuffer GpuView => _gpuView;
+        internal GraphicsBuffer AnimOutputBuffer => _animOutputBuffer;
         internal int FrameCounter { get => _frameCounter; set => _frameCounter = value; }
 
         internal void SetMorphData(GraphicsBuffer morphedData, int splatCount, int valid, float weight = 0f, GraphicsBuffer morphSH = null)
@@ -735,6 +736,22 @@ namespace GaussianSplatting.Runtime
                     Debug.LogError($"{nameof(GaussianSplatRenderer)} requires a GaussianSplatConfig in the scene, or platform does not support compute shaders");
                 }
             }
+        }
+
+        internal Bounds GetWorldBounds()
+        {
+            if (splatAsset == null)
+                return new Bounds();
+            var localCenter = (splatAsset.boundsMin + splatAsset.boundsMax) * 0.5f;
+            var center = transform.TransformPoint(localCenter);
+            var extents = (splatAsset.boundsMax - splatAsset.boundsMin) * 0.5f;
+            var axisX = transform.TransformVector(extents.x, 0, 0);
+            var axisY = transform.TransformVector(0, extents.y, 0);
+            var axisZ = transform.TransformVector(0, 0, extents.z);
+            extents.x = Mathf.Abs(axisX.x) + Mathf.Abs(axisY.x) + Mathf.Abs(axisZ.x);
+            extents.y = Mathf.Abs(axisX.y) + Mathf.Abs(axisY.y) + Mathf.Abs(axisZ.y);
+            extents.z = Mathf.Abs(axisX.z) + Mathf.Abs(axisY.z) + Mathf.Abs(axisZ.z);
+            return new Bounds(center, extents * 2);
         }
 
         public void ActivateCamera(int index)
