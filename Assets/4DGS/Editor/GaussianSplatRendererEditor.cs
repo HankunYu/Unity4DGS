@@ -89,6 +89,21 @@ namespace GaussianSplatting.Editor
                 validAndEnabled = false;
             }
 
+            if (Object.FindFirstObjectByType<GaussianSplatConfig>() == null)
+            {
+                EditorGUILayout.HelpBox("No GaussianSplatConfig found in the scene. One is required for rendering.", MessageType.Warning);
+                if (GUILayout.Button("Create GS_Config"))
+                {
+                    var configGo = new GameObject("GS_Config");
+                    Undo.RegisterCreatedObjectUndo(configGo, "Create GS_Config");
+                    Undo.AddComponent<GaussianSplatConfig>(configGo);
+
+                    // Re-enable renderer so it picks up the new config
+                    gs.enabled = false;
+                    gs.enabled = true;
+                }
+            }
+
             if (validAndEnabled && targets.Length == 1)
             {
                 EditCameras(gs);
