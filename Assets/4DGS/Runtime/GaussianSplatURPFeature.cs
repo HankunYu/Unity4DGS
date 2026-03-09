@@ -109,10 +109,28 @@ namespace GaussianSplatting.Runtime
 
             public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
             {
-                using var builder = renderGraph.AddUnsafePass(ProfilerTag, out PassData passData);
-
                 var cameraData = frameData.Get<UniversalCameraData>();
                 var resourceData = frameData.Get<UniversalResourceData>();
+
+                // VR path: only sort via CommandBuffer; rendering via RenderMeshPrimitives in LateUpdate
+                bool vrPath = GaussianSplatRenderSystem.instance.Config != null &&
+                              GaussianSplatRenderSystem.instance.Config.useVRRenderPath;
+
+                if (vrPath)
+                {
+                    using var builder = renderGraph.AddUnsafePass("GaussianSplat.VRSort", out PassData passData);
+                    passData.CameraData = cameraData;
+                    builder.AllowPassCulling(false);
+                    builder.SetRenderFunc(static (PassData data, UnsafeGraphContext context) =>
+                    {
+                        var commandBuffer = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
+                        GaussianSplatRenderSystem.instance.SortSplatsOnly(data.CameraData.camera, commandBuffer);
+                    });
+                    return;
+                }
+
+                // Non-VR path: intermediate RT + sort + render + composite
+                using var nonVrBuilder = renderGraph.AddUnsafePass(ProfilerTag, out PassData nonVrPassData);
 
                 RenderTextureDescriptor rtDesc = cameraData.cameraTargetDescriptor;
                 rtDesc.depthBufferBits = 0;
@@ -126,23 +144,23 @@ namespace GaussianSplatting.Runtime
                 if (applyStylize)
                     stylizedHandle = UniversalRenderer.CreateRenderGraphTexture(renderGraph, rtDesc, GaussianStylizeRTName, true);
 
-                passData.RenderSize = new Vector2Int(rtDesc.width, rtDesc.height);
-                passData.CameraData = cameraData;
-                passData.SourceTexture = resourceData.activeColorTexture;
-                passData.SourceDepth = resourceData.activeDepthTexture;
-                passData.GaussianSplatRT = textureHandle;
-                passData.StylizedGaussianRT = stylizedHandle;
-                passData.ApplyStylize = applyStylize;
-                passData.StylizeSettings = stylizeSettings;
-                passData.StylizeMaterial = _owner._stylizeMaterial;
+                nonVrPassData.RenderSize = new Vector2Int(rtDesc.width, rtDesc.height);
+                nonVrPassData.CameraData = cameraData;
+                nonVrPassData.SourceTexture = resourceData.activeColorTexture;
+                nonVrPassData.SourceDepth = resourceData.activeDepthTexture;
+                nonVrPassData.GaussianSplatRT = textureHandle;
+                nonVrPassData.StylizedGaussianRT = stylizedHandle;
+                nonVrPassData.ApplyStylize = applyStylize;
+                nonVrPassData.StylizeSettings = stylizeSettings;
+                nonVrPassData.StylizeMaterial = _owner._stylizeMaterial;
 
-                builder.UseTexture(resourceData.activeColorTexture, AccessFlags.ReadWrite);
-                builder.UseTexture(resourceData.activeDepthTexture);
-                builder.UseTexture(textureHandle, AccessFlags.ReadWrite);
+                nonVrBuilder.UseTexture(resourceData.activeColorTexture, AccessFlags.ReadWrite);
+                nonVrBuilder.UseTexture(resourceData.activeDepthTexture);
+                nonVrBuilder.UseTexture(textureHandle, AccessFlags.ReadWrite);
                 if (applyStylize)
-                    builder.UseTexture(stylizedHandle, AccessFlags.ReadWrite);
-                builder.AllowPassCulling(false);
-                builder.SetRenderFunc(static (PassData data, UnsafeGraphContext context) =>
+                    nonVrBuilder.UseTexture(stylizedHandle, AccessFlags.ReadWrite);
+                nonVrBuilder.AllowPassCulling(false);
+                nonVrBuilder.SetRenderFunc(static (PassData data, UnsafeGraphContext context) =>
                 {
                     var commandBuffer = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
                     using var _ = new ProfilingScope(commandBuffer, ProfileSampler);
