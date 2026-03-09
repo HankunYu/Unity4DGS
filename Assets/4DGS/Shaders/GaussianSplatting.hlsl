@@ -201,8 +201,10 @@ struct SplatChunkInfo
     uint shR, shG, shB;
 };
 
+#ifndef GAUSSIAN_SPLAT_SKIP_BUFFER_DECLARATIONS
 StructuredBuffer<SplatChunkInfo> _SplatChunks;
 uint _SplatChunkCount;
+#endif
 
 static const uint kChunkSize = 256;
 
@@ -304,6 +306,7 @@ uint EncodeQuatToNorm10(float4 v) // 32 bits: 10.10.10.2
 }
 
 
+#ifndef GAUSSIAN_SPLAT_SKIP_BUFFER_DECLARATIONS
 #ifdef SHADER_STAGE_COMPUTE
 #define SplatBufferDataType RWByteAddressBuffer
 #else
@@ -315,7 +318,6 @@ SplatBufferDataType _SplatOther;
 SplatBufferDataType _SplatSH;
 Texture2D _SplatColor;
 uint _SplatFormat;
-
 // Match GaussianSplatAsset.VectorFormat
 #define VECTOR_FMT_32F 0
 #define VECTOR_FMT_16 1
@@ -606,6 +608,8 @@ SplatData LoadSplatData(uint idx)
 
     return s;
 }
+
+#endif // GAUSSIAN_SPLAT_SKIP_BUFFER_DECLARATIONS
 
 struct SplatViewData
 {
