@@ -77,6 +77,9 @@ Shader "Gaussian Splatting/Render Splats VR"
             struct appdata
             {
                 float4 vertex : POSITION;
+                #if !defined(UNITY_INSTANCING_ENABLED) && !defined(UNITY_PROCEDURAL_INSTANCING_ENABLED) && !defined(UNITY_STEREO_INSTANCING_ENABLED)
+                uint instanceID : SV_InstanceID;
+                #endif
                 UNITY_VERTEX_INPUT_INSTANCE_ID
             };
 
@@ -100,7 +103,12 @@ Shader "Gaussian Splatting/Render Splats VR"
                 // Decode splat index from mesh data
                 // vertex.xy = quad corner, vertex.z = packed local splat index
                 uint localIdx = asuint(v.vertex.z);
-                uint globalIdx = unity_InstanceID * (uint)_SplatInstanceSize + localIdx;
+                #if defined(UNITY_INSTANCING_ENABLED) || defined(UNITY_PROCEDURAL_INSTANCING_ENABLED) || defined(UNITY_STEREO_INSTANCING_ENABLED)
+                uint instID = unity_InstanceID;
+                #else
+                uint instID = v.instanceID;
+                #endif
+                uint globalIdx = instID * (uint)_SplatInstanceSize + localIdx;
 
                 // Bounds check
                 if (globalIdx >= (uint)_SplatCount)
