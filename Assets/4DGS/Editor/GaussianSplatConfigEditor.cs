@@ -10,12 +10,14 @@ namespace GaussianSplatting.Editor
         SerializedProperty m_PropRenderMode;
         SerializedProperty m_PropPointDisplaySize;
         SerializedProperty m_PropUseTileRenderer;
+        SerializedProperty m_PropUseVRRenderPath;
 
         private void OnEnable()
         {
             m_PropRenderMode = serializedObject.FindProperty("renderMode");
             m_PropPointDisplaySize = serializedObject.FindProperty("pointDisplaySize");
             m_PropUseTileRenderer = serializedObject.FindProperty("useTileRenderer");
+            m_PropUseVRRenderPath = serializedObject.FindProperty("useVRRenderPath");
         }
 
         public override void OnInspectorGUI()
@@ -33,6 +35,11 @@ namespace GaussianSplatting.Editor
             EditorGUILayout.PropertyField(m_PropUseTileRenderer, new GUIContent("Tile-Based Renderer"));
 
             EditorGUILayout.Space();
+            GUILayout.Label("VR Settings", EditorStyles.boldLabel);
+            EditorGUILayout.PropertyField(m_PropUseVRRenderPath,
+                new GUIContent("VR Render Path", "Use RenderMeshPrimitives with vertex-shader covariance for Single-Pass Instanced stereo"));
+
+            EditorGUILayout.Space();
             GUILayout.Label("Auto-Loaded Resources", EditorStyles.boldLabel);
 
             using (new EditorGUI.DisabledScope(true))
@@ -43,6 +50,7 @@ namespace GaussianSplatting.Editor
                 EditorGUILayout.ObjectField("Shader Debug Boxes", config.ShaderDebugBoxes, typeof(Shader), false);
                 EditorGUILayout.ObjectField("CS Splat Utilities", config.CsSplatUtilities, typeof(ComputeShader), false);
                 EditorGUILayout.ObjectField("CS Tile Render", config.CsTileRender, typeof(ComputeShader), false);
+                EditorGUILayout.ObjectField("Shader Splats VR", config.ShaderSplatsVR, typeof(Shader), false);
             }
 
             if (!config.ResourcesValid)
