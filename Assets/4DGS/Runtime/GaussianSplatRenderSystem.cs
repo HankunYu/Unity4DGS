@@ -63,8 +63,6 @@ namespace GaussianSplatting.Runtime
         private Material _matDebugPoints;
         private Material _matDebugBoxes;
         private GaussianSplatConfig _materialSource;
-        private Material _vrMaterial;
-        private MaterialPropertyBlock _vrMpb;
 
         internal Material MatSplats => _matSplats;
         internal Material MatComposite => _matComposite;
@@ -85,11 +83,6 @@ namespace GaussianSplatting.Runtime
             _matComposite = new Material(_config.ShaderComposite) { name = "GaussianClearDstAlpha" };
             _matDebugPoints = new Material(_config.ShaderDebugPoints) { name = "GaussianDebugPoints" };
             _matDebugBoxes = new Material(_config.ShaderDebugBoxes) { name = "GaussianDebugBoxes" };
-
-            Object.DestroyImmediate(_vrMaterial);
-            if (_config.ShaderSplatsVR != null)
-                _vrMaterial = new Material(_config.ShaderSplatsVR) { name = "GaussianSplatsVR", hideFlags = HideFlags.HideAndDontSave };
-            _vrMpb = new MaterialPropertyBlock();
 
             _materialSource = _config;
         }
@@ -188,12 +181,10 @@ namespace GaussianSplatting.Runtime
             Object.DestroyImmediate(_matComposite);
             Object.DestroyImmediate(_matDebugPoints);
             Object.DestroyImmediate(_matDebugBoxes);
-            Object.DestroyImmediate(_vrMaterial);
             _matSplats = null;
             _matComposite = null;
             _matDebugPoints = null;
             _matDebugBoxes = null;
-            _vrMaterial = null;
             _materialSource = null;
         }
 
@@ -302,9 +293,6 @@ namespace GaussianSplatting.Runtime
 
         private bool CanUseGlobalSortPath()
         {
-            // VR path uses per-object sort keys with RenderMeshPrimitives
-            if (_config.useVRRenderPath)
-                return false;
             if (_config.renderMode != GaussianSplatRenderMode.Splats)
                 return false;
             foreach (var kvp in _activeSplats)
@@ -539,7 +527,6 @@ namespace GaussianSplatting.Runtime
 
         Material SortAndRenderSplatsPerObject(Camera cam, CommandBuffer cmb)
         {
-            bool vrPath = _config.useVRRenderPath;
             Material matComposite = _matComposite;
             foreach (var kvp in _activeSplats)
             {
@@ -551,10 +538,6 @@ namespace GaussianSplatting.Runtime
                 if (gs.FrameCounter % gs.sortNthFrame == 0)
                     gs.SortPoints(cmb, cam, matrix);
                 ++gs.FrameCounter;
-
-                // VR path: sort only, rendering done via RenderMeshPrimitives in LateUpdate
-                if (vrPath)
-                    continue;
 
                 // cache view
                 kvp.Item2.Clear();
@@ -601,80 +584,6 @@ namespace GaussianSplatting.Runtime
                 cmb.EndSample(ProfDraw);
             }
             return matComposite;
-        }
-
-        /// <summary>
-        /// Sort only — used by VR path where rendering is done via RenderMeshPrimitives.
-        /// </summary>
-        public void SortSplatsOnly(Camera cam, CommandBuffer cmb)
-        {
-            if (_activeSplats == null) return;
-            foreach (var (gs, _) in _activeSplats)
-            {
-                if (gs.FrameCounter % gs.sortNthFrame == 0)
-                    gs.SortPoints(cmb, cam, gs.transform.localToWorldMatrix);
-                gs.FrameCounter++;
-            }
-        }
-
-        /// <summary>
-        /// Render splats using VR-compatible path (RenderMeshPrimitives).
-        /// Called from GaussianSplatConfig.LateUpdate when VR path is active.
-        /// </summary>
-        public void RenderVRSplats()
-        {
-            if (_vrMaterial == null || _activeSplats == null)
-                return;
-
-            foreach (var (gs, mpb) in _activeSplats)
-            {
-                RenderSingleSplatVR(gs);
-            }
-        }
-
-        private void RenderSingleSplatVR(GaussianSplatRenderer gs)
-        {
-            int splatCount = gs.EffectiveSplatCount;
-            if (splatCount <= 0 || gs.GpuSortKeys == null)
-                return;
-
-            _vrMpb.Clear();
-
-            // Set splat data buffers
-            gs.SetAssetDataOnMaterial(_vrMpb);
-
-            // Set sort output
-            _vrMpb.SetBuffer(GaussianSplatRenderer.Props.OrderBuffer, gs.GpuSortKeys);
-
-            // Set uniforms
-            _vrMpb.SetInteger(GaussianSplatRenderer.Props.SplatCount, splatCount);
-            _vrMpb.SetInteger(Shader.PropertyToID("_SplatInstanceSize"), GaussianSplatVRMesh.SplatsPerBatch);
-            _vrMpb.SetFloat(GaussianSplatRenderer.Props.SplatScale, gs.splatScale);
-            _vrMpb.SetFloat(GaussianSplatRenderer.Props.SplatOpacityScale, gs.opacityScale);
-            _vrMpb.SetInteger(GaussianSplatRenderer.Props.SHOrder, gs.shOrder);
-            _vrMpb.SetInteger(GaussianSplatRenderer.Props.SHOnly, gs.shOnly ? 1 : 0);
-            _vrMpb.SetMatrix(GaussianSplatRenderer.Props.MatrixObjectToWorld, gs.transform.localToWorldMatrix);
-            _vrMpb.SetMatrix(GaussianSplatRenderer.Props.MatrixWorldToObject, gs.transform.worldToLocalMatrix);
-
-            // Animation data
-            bool hasAnim = gs.AnimOutputBuffer != null;
-            _vrMpb.SetInteger(GaussianSplatRenderer.Props.AnimDataValid, hasAnim ? 1 : 0);
-            if (hasAnim)
-                _vrMpb.SetBuffer(GaussianSplatRenderer.Props.AnimOutputData, gs.AnimOutputBuffer);
-
-            // Render using RenderMeshPrimitives (stereo-compatible)
-            var mesh = GaussianSplatVRMesh.GetOrCreate();
-            int instanceCount = GaussianSplatVRMesh.CalcInstanceCount(splatCount);
-
-            var rp = new RenderParams(_vrMaterial)
-            {
-                worldBounds = gs.GetWorldBounds(),
-                matProps = _vrMpb,
-                layer = gs.gameObject.layer,
-                renderingLayerMask = GraphicsSettings.defaultRenderingLayerMask,
-            };
-
-            Graphics.RenderMeshPrimitives(rp, mesh, 0, instanceCount);
         }
 
         // ReSharper disable once MemberCanBePrivate.Global - used by HDRP/URP features that are not always compiled

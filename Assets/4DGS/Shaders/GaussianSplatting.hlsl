@@ -178,7 +178,6 @@ half3 ShadeSH(SplatSHData splat, half3 dir, int shOrder, bool onlySH)
     return max(res, 0);
 }
 
-#ifndef GAUSSIAN_SPLAT_SKIP_BUFFER_DECLARATIONS
 static const uint kTexWidth = 2048;
 
 uint3 SplatIndexToPixelIndex(uint idx)
@@ -193,7 +192,6 @@ uint3 SplatIndexToPixelIndex(uint idx)
     res.z = 0;
     return res;
 }
-#endif
 
 struct SplatChunkInfo
 {
