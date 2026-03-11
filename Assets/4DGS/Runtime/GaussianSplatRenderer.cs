@@ -139,6 +139,10 @@ namespace GaussianSplatting.Runtime
             public static readonly int MorphWeight = Shader.PropertyToID("_MorphWeight");
             public static readonly int MorphSHData = Shader.PropertyToID("_MorphSHData");
             public static readonly int SrcSplatCount = Shader.PropertyToID("_SrcSplatCount");
+            public static readonly int EyeIndex = Shader.PropertyToID("_EyeIndex");
+            public static readonly int IsStereo = Shader.PropertyToID("_IsStereo");
+            public static readonly int ViewProjMatrixLeft = Shader.PropertyToID("_ViewProjMatrixLeft");
+            public static readonly int ViewProjMatrixRight = Shader.PropertyToID("_ViewProjMatrixRight");
         }
 
         // Forwarding properties for backward compatibility with Editor code
@@ -279,7 +283,7 @@ namespace GaussianSplatting.Runtime
                 _gpuChunks = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1,
                     UnsafeUtility.SizeOf<GaussianSplatAsset.ChunkInfo>())
                 { name = "GaussianChunkData" };
-            _gpuView = new GraphicsBuffer(GraphicsBuffer.Target.Structured, (int)splatCountMaxSize, GpuViewDataSize);
+            _gpuView = new GraphicsBuffer(GraphicsBuffer.Target.Structured, (int)splatCountMaxSize * 2, GpuViewDataSize);
             _gpuIndexBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Index, 36, 2);
             _gpuIndexBuffer.SetData(new ushort[]
             {
@@ -309,7 +313,7 @@ namespace GaussianSplatting.Runtime
                     UnsafeUtility.SizeOf<GaussianSplatAsset.ChunkInfo>())
                 { name = "GaussianChunkData" };
             }
-            _gpuView = new GraphicsBuffer(GraphicsBuffer.Target.Structured, splatAsset.splatCount, GpuViewDataSize);
+            _gpuView = new GraphicsBuffer(GraphicsBuffer.Target.Structured, splatAsset.splatCount * 2, GpuViewDataSize);
             _gpuIndexBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Index, 36, 2);
             _gpuIndexBuffer.SetData(new ushort[]
             {
@@ -391,7 +395,7 @@ namespace GaussianSplatting.Runtime
                 _gpuChunksValid = false;
             }
 
-            _gpuView = new GraphicsBuffer(GraphicsBuffer.Target.Structured, splatAsset.splatCount, GpuViewDataSize);
+            _gpuView = new GraphicsBuffer(GraphicsBuffer.Target.Structured, splatAsset.splatCount * 2, GpuViewDataSize);
             _gpuIndexBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Index, 36, 2);
             _gpuIndexBuffer.SetData(new ushort[]
             {
@@ -619,6 +623,33 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixVP, GL.GetGPUProjectionMatrix(cam.projectionMatrix, false) * matView);
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixObjectToWorld, matO2W);
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixWorldToObject, matW2O);
+
+            // Stereo rendering: pass per-eye view-projection matrices
+            bool isStereo = XRSettings.enabled && cam.stereoEnabled &&
+                            (XRSettings.stereoRenderingMode == XRSettings.StereoRenderingMode.SinglePassInstanced ||
+                             XRSettings.stereoRenderingMode == XRSettings.StereoRenderingMode.SinglePassMultiview) &&
+                            !Application.isEditor;
+
+            if (isStereo)
+            {
+                Matrix4x4 stereoViewLeft = cam.GetStereoViewMatrix(Camera.StereoscopicEye.Left);
+                Matrix4x4 stereoProjLeft = GL.GetGPUProjectionMatrix(
+                    cam.GetStereoProjectionMatrix(Camera.StereoscopicEye.Left), true);
+                cmb.SetComputeMatrixParam(csSplatUtilities, Props.ViewProjMatrixLeft,
+                    stereoProjLeft * stereoViewLeft);
+
+                Matrix4x4 stereoViewRight = cam.GetStereoViewMatrix(Camera.StereoscopicEye.Right);
+                Matrix4x4 stereoProjRight = GL.GetGPUProjectionMatrix(
+                    cam.GetStereoProjectionMatrix(Camera.StereoscopicEye.Right), true);
+                cmb.SetComputeMatrixParam(csSplatUtilities, Props.ViewProjMatrixRight,
+                    stereoProjRight * stereoViewRight);
+
+                cmb.SetComputeIntParam(csSplatUtilities, Props.IsStereo, 1);
+            }
+            else
+            {
+                cmb.SetComputeIntParam(csSplatUtilities, Props.IsStereo, 0);
+            }
 
             cmb.SetComputeVectorParam(csSplatUtilities, Props.VecScreenParams, screenPar);
             cmb.SetComputeVectorParam(csSplatUtilities, Props.VecWorldSpaceCameraPos, camPos);
