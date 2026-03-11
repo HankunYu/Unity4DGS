@@ -42,6 +42,9 @@ float4x4 _MatrixObjectToWorld;
 float4x4 _MatrixWorldToObject;
 float4x4 _MatrixMV;
 float4x4 _MatrixVP;
+float4x4 _ViewProjMatrixLeft;
+float4x4 _ViewProjMatrixRight;
+uint _IsStereo;
 float4 _VecScreenParams;
 float4 _VecWorldSpaceCameraPos;
 int _SelectionMode;
@@ -218,6 +221,96 @@ bool IsSplatCut(float3 pos)
     return finalCut;
 }
 
+// Per-eye view data calculation helper.
+// Computes clip-space position, covariance, SH shading, and packs into SplatViewData.
+// Shared data (world pos, splat loading, animation) is computed once in the kernel;
+// this function handles the VP-dependent steps for each eye.
+SplatViewData CalculateEyeViewData(
+    SplatData splat,
+    float3 centerWorldPos,
+    float4x4 viewProjMatrix,
+    bool isDeleted,
+    bool isCut,
+    float splatScale,
+    half opacityScale,
+    float animOpacityMul,
+    float animScaleMul,
+    float animColorBlend,
+    float3 animColorTint)
+{
+    SplatViewData view = (SplatViewData)0;
+
+    float4 centerClipPos = mul(viewProjMatrix, float4(centerWorldPos, 1));
+
+    // Mark deleted or cut splats as invisible
+    if (isDeleted || isCut)
+        centerClipPos.w = 0;
+
+    // Conservative frustum cull: max scale as bounding radius -> clip-space margin
+    if (centerClipPos.w > 0)
+    {
+        float maxScale = max(max(abs(splat.scale.x), abs(splat.scale.y)), abs(splat.scale.z))
+                       * splatScale * animScaleMul;
+        float clipMargin = maxScale * abs(UNITY_MATRIX_P._m00);
+        float w = centerClipPos.w;
+        bool outsideFrustum = (centerClipPos.x < -(w + clipMargin)) ||
+                              (centerClipPos.x >  (w + clipMargin)) ||
+                              (centerClipPos.y < -(w + clipMargin)) ||
+                              (centerClipPos.y >  (w + clipMargin));
+        if (outsideFrustum)
+            centerClipPos.w = 0;
+    }
+
+    view.pos = centerClipPos;
+
+    // Early opacity culling: skip splats with negligible opacity
+    float finalOpacity = splat.opacity * opacityScale * animOpacityMul;
+    if (finalOpacity < 1.0 / 255.0)
+        return view;
+
+    bool behindCam = centerClipPos.w <= 0;
+    if (!behindCam)
+    {
+        float4 boxRot = splat.rot;
+        float3 boxSize = splat.scale * animScaleMul;
+
+        float3x3 splatRotScaleMat = CalcMatrixFromRotationScale(boxRot, boxSize);
+
+        float3 cov3d0, cov3d1;
+        CalcCovariance3D(splatRotScaleMat, cov3d0, cov3d1);
+        float splatScale2 = splatScale * splatScale;
+        cov3d0 *= splatScale2;
+        cov3d1 *= splatScale2;
+        // Uses center-eye MV/P for covariance (acceptable approximation for stereo)
+        float3 cov2d = CalcCovariance2D(splat.pos, cov3d0, cov3d1, _MatrixMV, UNITY_MATRIX_P, _VecScreenParams);
+
+        DecomposeCovariance(cov2d, view.axis1, view.axis2);
+
+        // Sub-pixel area culling: skip splats smaller than 1 pixel
+        float splatArea = length(view.axis1) * length(view.axis2);
+        if (splatArea < 1.0)
+            return view;
+
+        float3 worldViewDir = _VecWorldSpaceCameraPos.xyz - centerWorldPos;
+        float3 objViewDir = mul((float3x3)_MatrixWorldToObject, worldViewDir);
+        objViewDir = normalize(objViewDir);
+
+        half4 col;
+        col.rgb = ShadeSH(splat.sh, objViewDir, _SHOrder, _SHOnly != 0);
+
+        // Apply animation color tint
+        if (animColorBlend > 0)
+            col.rgb = lerp(col.rgb, (half3)animColorTint, (half)animColorBlend);
+
+        col.a = min(finalOpacity, 65000);
+
+        view.color.x = (f32tof16(col.r) << 16) | f32tof16(col.g);
+        view.color.y = (f32tof16(col.b) << 16) | f32tof16(col.a);
+    }
+
+    return view;
+}
+
 // Chunk frustum culling: 4 chunks per group (GROUP_SIZE=1024 / kChunkSize=256)
 groupshared uint _chunkVisible[4];
 
@@ -256,7 +349,7 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
                 float4 c6 = mul(mvp, float4(bmin.x, bmax.y, bmax.z, 1));
                 float4 c7 = mul(mvp, float4(bmax.x, bmax.y, bmax.z, 1));
 
-                // If all 8 corners outside same clip plane → chunk is off-screen
+                // If all 8 corners outside same clip plane -> chunk is off-screen
                 bool outL=true, outR=true, outB=true, outT=true, outN=true, outF=true;
                 #define FRUSTUM_TEST(p) \
                     if((p).x >= -(p).w) outL=false; \
@@ -281,11 +374,12 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
     if (idx >= _SplatCount)
         return;
 
-    // Culled chunk → write invisible marker and skip
+    // Culled chunk -> write invisible marker and skip
     if (_chunkVisible[chunkSlot] == 0)
     {
         SplatViewData view = (SplatViewData)0;
-        _SplatViewData[idx] = view;
+        if (_IsStereo) { _SplatViewData[idx * 2] = view; _SplatViewData[idx * 2 + 1] = view; }
+        else { _SplatViewData[idx] = view; }
         return;
     }
 
@@ -352,7 +446,6 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
     {
         splat = LoadSplatData(idx);
     }
-    SplatViewData view = (SplatViewData)0;
 
     // Apply animation position offset if available
     float animOpacityMul = 1.0;
@@ -374,105 +467,97 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
     }
 
     float3 centerWorldPos = mul(_MatrixObjectToWorld, float4(splat.pos,1)).xyz;
-    float4 centerClipPos = mul(UNITY_MATRIX_VP, float4(centerWorldPos, 1));
     half opacityScale = _SplatOpacityScale;
     float splatScale = _SplatScale;
 
-    // deleted? (guard against OOB for target-only extra splats during morph)
+    // Determine deleted state (guard against OOB for target-only extra splats during morph)
+    bool isDeleted = false;
     if (_SplatBitsValid && idx < _SrcSplatCount)
     {
         uint wordIdx = idx / 32;
         uint bitIdx = idx & 31;
         uint wordVal = _SplatDeletedBits.Load(wordIdx * 4);
-        if (wordVal & (1 << bitIdx))
+        isDeleted = (wordVal & (1 << bitIdx)) != 0;
+    }
+
+    // Cutout check (uses object-space position)
+    bool isCut = IsSplatCut(splat.pos);
+
+    // Selection highlight: apply to the final view data after helper returns
+    // (only relevant for non-stereo / editor usage, but keep consistent)
+    bool isSelected = false;
+    if (_SplatBitsValid)
+    {
+        uint wordIdx = idx / 32;
+        uint bitIdx = idx & 31;
+        uint selVal = _SplatSelectedBits.Load(wordIdx * 4);
+        isSelected = (selVal & (1 << bitIdx)) != 0;
+    }
+
+    if (_IsStereo)
+    {
+        SplatViewData viewLeft = CalculateEyeViewData(splat, centerWorldPos,
+            _ViewProjMatrixLeft, isDeleted, isCut, splatScale, opacityScale,
+            animOpacityMul, animScaleMul, animColorBlend, animColorTint);
+        SplatViewData viewRight = CalculateEyeViewData(splat, centerWorldPos,
+            _ViewProjMatrixRight, isDeleted, isCut, splatScale, opacityScale,
+            animOpacityMul, animScaleMul, animColorBlend, animColorTint);
+
+        // Apply selection highlight (negate alpha to signal selected state)
+        if (isSelected)
         {
-            centerClipPos.w = 0;
-        }
-    }
+            half4 colL;
+            colL.r = f16tof32(viewLeft.color.x >> 16);
+            colL.g = f16tof32(viewLeft.color.x);
+            colL.b = f16tof32(viewLeft.color.y >> 16);
+            colL.a = f16tof32(viewLeft.color.y);
+            if (colL.a > 0)
+            {
+                colL.a = -max(colL.a, 1.0 / 255.0);
+                viewLeft.color.x = (f32tof16(colL.r) << 16) | f32tof16(colL.g);
+                viewLeft.color.y = (f32tof16(colL.b) << 16) | f32tof16(colL.a);
+            }
 
-    // cutouts
-    if (IsSplatCut(splat.pos))
-    {
-        centerClipPos.w = 0;
-    }
-
-    // Conservative frustum cull: max scale as bounding radius → clip-space margin
-    if (centerClipPos.w > 0)
-    {
-        float maxScale = max(max(abs(splat.scale.x), abs(splat.scale.y)), abs(splat.scale.z))
-                       * splatScale * animScaleMul;
-        float clipMargin = maxScale * abs(UNITY_MATRIX_P._m00);
-        float w = centerClipPos.w;
-        bool outsideFrustum = (centerClipPos.x < -(w + clipMargin)) ||
-                              (centerClipPos.x >  (w + clipMargin)) ||
-                              (centerClipPos.y < -(w + clipMargin)) ||
-                              (centerClipPos.y >  (w + clipMargin));
-        if (outsideFrustum)
-            centerClipPos.w = 0;
-    }
-
-    view.pos = centerClipPos;
-
-    // Early opacity culling: skip splats with negligible opacity
-    float finalOpacity = splat.opacity * opacityScale * animOpacityMul;
-    if (finalOpacity < 1.0 / 255.0)
-    {
-        _SplatViewData[idx] = view;
-        return;
-    }
-
-    bool behindCam = centerClipPos.w <= 0;
-    if (!behindCam)
-    {
-        float4 boxRot = splat.rot;
-        float3 boxSize = splat.scale * animScaleMul;
-
-        float3x3 splatRotScaleMat = CalcMatrixFromRotationScale(boxRot, boxSize);
-
-        float3 cov3d0, cov3d1;
-        CalcCovariance3D(splatRotScaleMat, cov3d0, cov3d1);
-        float splatScale2 = splatScale * splatScale;
-        cov3d0 *= splatScale2;
-        cov3d1 *= splatScale2;
-        float3 cov2d = CalcCovariance2D(splat.pos, cov3d0, cov3d1, _MatrixMV, UNITY_MATRIX_P, _VecScreenParams);
-
-        DecomposeCovariance(cov2d, view.axis1, view.axis2);
-
-        // Sub-pixel area culling: skip splats smaller than 1 pixel
-        float splatArea = length(view.axis1) * length(view.axis2);
-        if (splatArea < 1.0)
-        {
-            _SplatViewData[idx] = view;
-            return;
+            half4 colR;
+            colR.r = f16tof32(viewRight.color.x >> 16);
+            colR.g = f16tof32(viewRight.color.x);
+            colR.b = f16tof32(viewRight.color.y >> 16);
+            colR.a = f16tof32(viewRight.color.y);
+            if (colR.a > 0)
+            {
+                colR.a = -max(colR.a, 1.0 / 255.0);
+                viewRight.color.x = (f32tof16(colR.r) << 16) | f32tof16(colR.g);
+                viewRight.color.y = (f32tof16(colR.b) << 16) | f32tof16(colR.a);
+            }
         }
 
-        float3 worldViewDir = _VecWorldSpaceCameraPos.xyz - centerWorldPos;
-        float3 objViewDir = mul((float3x3)_MatrixWorldToObject, worldViewDir);
-        objViewDir = normalize(objViewDir);
+        _SplatViewData[idx * 2] = viewLeft;
+        _SplatViewData[idx * 2 + 1] = viewRight;
+    }
+    else
+    {
+        SplatViewData view = CalculateEyeViewData(splat, centerWorldPos,
+            _MatrixVP, isDeleted, isCut, splatScale, opacityScale,
+            animOpacityMul, animScaleMul, animColorBlend, animColorTint);
 
-        half4 col;
-        col.rgb = ShadeSH(splat.sh, objViewDir, _SHOrder, _SHOnly != 0);
-
-        // Apply animation color tint
-        if (animColorBlend > 0)
-            col.rgb = lerp(col.rgb, (half3)animColorTint, (half)animColorBlend);
-
-        col.a = min(finalOpacity, 65000);
-
-        if (_SplatBitsValid)
+        // Apply selection highlight (negate alpha to signal selected state)
+        if (isSelected)
         {
-            uint wordIdx = idx / 32;
-            uint bitIdx = idx & 31;
-            uint selVal = _SplatSelectedBits.Load(wordIdx * 4);
-            if (selVal & (1 << bitIdx))
+            half4 col;
+            col.r = f16tof32(view.color.x >> 16);
+            col.g = f16tof32(view.color.x);
+            col.b = f16tof32(view.color.y >> 16);
+            col.a = f16tof32(view.color.y);
+            if (col.a > 0)
+            {
                 col.a = -max(col.a, 1.0 / 255.0);
+                view.color.x = (f32tof16(col.r) << 16) | f32tof16(col.g);
+                view.color.y = (f32tof16(col.b) << 16) | f32tof16(col.a);
+            }
         }
 
-        view.color.x = (f32tof16(col.r) << 16) | f32tof16(col.g);
-        view.color.y = (f32tof16(col.b) << 16) | f32tof16(col.a);
+        _SplatViewData[idx] = view;
     }
-
-    _SplatViewData[idx] = view;
 }
 
 [numthreads(GROUP_SIZE,1,1)]
