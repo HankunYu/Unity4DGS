@@ -537,7 +537,7 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
     else
     {
         SplatViewData view = CalculateEyeViewData(splat, centerWorldPos,
-            _MatrixVP, isDeleted, isCut, splatScale, opacityScale,
+            UNITY_MATRIX_VP, isDeleted, isCut, splatScale, opacityScale,
             animOpacityMul, animScaleMul, animColorBlend, animColorTint);
 
         // Apply selection highlight (negate alpha to signal selected state)
