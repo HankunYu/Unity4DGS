@@ -182,10 +182,10 @@ namespace GaussianSplatting.Runtime
             _morphWeight = weight;
 
             int needed = EffectiveSplatCount;
-            if (_gpuView != null && _gpuView.count < needed)
+            if (_gpuView != null && _gpuView.count < needed * 2)
             {
                 _gpuView.Dispose();
-                _gpuView = new GraphicsBuffer(GraphicsBuffer.Target.Structured, needed, GpuViewDataSize);
+                _gpuView = new GraphicsBuffer(GraphicsBuffer.Target.Structured, needed * 2, GpuViewDataSize);
             }
             if (_gpuSortDistances != null && _gpuSortDistances.count < needed)
             {

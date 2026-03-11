@@ -384,7 +384,7 @@ namespace GaussianSplatting.Runtime
             ClearGraphicsBuffer(newEditSelectedMouseDown);
             ClearGraphicsBuffer(newEditDeleted);
 
-            var newGpuView = new GraphicsBuffer(GraphicsBuffer.Target.Structured, newSplatCount, GaussianSplatRenderer.GpuViewDataSize);
+            var newGpuView = new GraphicsBuffer(GraphicsBuffer.Target.Structured, newSplatCount * 2, GaussianSplatRenderer.GpuViewDataSize);
             _renderer.InitSortBuffers(newSplatCount);
 
             // copy existing data over into new buffers

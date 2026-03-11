@@ -4,6 +4,7 @@ using Unity.Profiling.LowLevel;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
+using UnityEngine.XR;
 
 namespace GaussianSplatting.Runtime
 {
@@ -393,6 +394,10 @@ namespace GaussianSplatting.Runtime
 
         private bool CanUseGlobalSortPath()
         {
+            // Global sort copies view data linearly; incompatible with stereo doubled layout
+            if (XRSettings.enabled && !Application.isEditor)
+                return false;
+
             if (_config.renderMode != GaussianSplatRenderMode.Splats)
                 return false;
             foreach (var kvp in _activeSplats)
@@ -613,6 +618,7 @@ namespace GaussianSplatting.Runtime
                     _globalMpb.Clear();
                     _globalMpb.SetBuffer(GaussianSplatRenderer.Props.SplatViewData, groupCache.viewData);
                     _globalMpb.SetBuffer(GaussianSplatRenderer.Props.OrderBuffer, groupCache.sortKeys);
+                    _globalMpb.SetInteger(GaussianSplatRenderer.Props.IsStereo, 0);
                     cmb.DrawProcedural(reference.GpuIndexBuffer, Matrix4x4.identity,
                         groupDisplayMat, 0, MeshTopology.Triangles, 6, dstOffset, _globalMpb);
                 }
@@ -663,6 +669,7 @@ namespace GaussianSplatting.Runtime
                 mpb.SetInteger(GaussianSplatRenderer.Props.SHOnly, gs.shOnly ? 1 : 0);
                 mpb.SetInteger(GaussianSplatRenderer.Props.DisplayIndex, _config.renderMode == GaussianSplatRenderMode.DebugPointIndices ? 1 : 0);
                 mpb.SetInteger(GaussianSplatRenderer.Props.DisplayChunks, _config.renderMode == GaussianSplatRenderMode.DebugChunkBounds ? 1 : 0);
+                mpb.SetInteger(GaussianSplatRenderer.Props.IsStereo, 0);
 
                 cmb.BeginSample(ProfCalcView);
                 bool calcSuccess = gs.CalcViewData(cmb, cam);
