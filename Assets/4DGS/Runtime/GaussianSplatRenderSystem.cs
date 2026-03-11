@@ -91,6 +91,19 @@ namespace GaussianSplatting.Runtime
         GraphicsFence _lastRenderFence;
         bool _hasRenderFence;
 
+        // ── Stereo prepare/render split ─────────────────────────────────
+        public struct StereoRenderItem
+        {
+            public GaussianSplatRenderer gs;
+            public Material displayMat;
+            public MaterialPropertyBlock mpb;
+            public int indexCount;
+            public int instanceCount;
+            public MeshTopology topology;
+        }
+
+        private readonly List<StereoRenderItem> _preparedItems = new();
+
         // ── Tile renderer ─────────────────────────────────────────────
         int _lastRetiredCleanupFrame = -1;
         private GaussianTileRenderer _tileRenderer;
@@ -289,6 +302,93 @@ namespace GaussianSplatting.Runtime
             _hasRenderFence = true;
 
             return result;
+        }
+
+        // Stereo path: prepare (sort + CalcViewData) once, then render per eye.
+        // Only supports per-object path (no global sort) for now.
+        public Material PrepareSplats(Camera cam, CommandBuffer cmb)
+        {
+            if (_hasRenderFence)
+                cmb.WaitOnAsyncGraphicsFence(_lastRenderFence);
+
+            _preparedItems.Clear();
+            Material matComposite = _matComposite;
+
+            foreach (var kvp in _activeSplats)
+            {
+                var gs = kvp.Item1;
+                var mpb = kvp.Item2;
+
+                var matrix = gs.transform.localToWorldMatrix;
+                if (gs.FrameCounter % gs.sortNthFrame == 0)
+                    gs.SortPoints(cmb, cam, matrix);
+                ++gs.FrameCounter;
+
+                mpb.Clear();
+                Material displayMat = _config.renderMode switch
+                {
+                    GaussianSplatRenderMode.DebugPoints => _matDebugPoints,
+                    GaussianSplatRenderMode.DebugPointIndices => _matDebugPoints,
+                    GaussianSplatRenderMode.DebugBoxes => _matDebugBoxes,
+                    GaussianSplatRenderMode.DebugChunkBounds => _matDebugBoxes,
+                    _ => _matSplats
+                };
+                if (displayMat == null)
+                    continue;
+
+                gs.SetAssetDataOnMaterial(mpb);
+                mpb.SetBuffer(GaussianSplatRenderer.Props.SplatChunks, gs.GpuChunksBuffer);
+                mpb.SetBuffer(GaussianSplatRenderer.Props.SplatViewData, gs.GpuView);
+                mpb.SetBuffer(GaussianSplatRenderer.Props.OrderBuffer, gs.GpuSortKeys);
+                mpb.SetFloat(GaussianSplatRenderer.Props.SplatScale, gs.splatScale);
+                mpb.SetFloat(GaussianSplatRenderer.Props.SplatOpacityScale, gs.opacityScale);
+                mpb.SetFloat(GaussianSplatRenderer.Props.SplatSize, _config.pointDisplaySize);
+                mpb.SetInteger(GaussianSplatRenderer.Props.SHOrder, gs.shOrder);
+                mpb.SetInteger(GaussianSplatRenderer.Props.SHOnly, gs.shOnly ? 1 : 0);
+                mpb.SetInteger(GaussianSplatRenderer.Props.DisplayIndex,
+                    _config.renderMode == GaussianSplatRenderMode.DebugPointIndices ? 1 : 0);
+                mpb.SetInteger(GaussianSplatRenderer.Props.DisplayChunks,
+                    _config.renderMode == GaussianSplatRenderMode.DebugChunkBounds ? 1 : 0);
+
+                cmb.BeginSample(ProfCalcView);
+                bool calcSuccess = gs.CalcViewData(cmb, cam);
+                cmb.EndSample(ProfCalcView);
+                if (!calcSuccess)
+                    continue;
+
+                int indexCount = 6;
+                int instanceCount = gs.EffectiveSplatCount;
+                MeshTopology topology = MeshTopology.Triangles;
+                if (_config.renderMode is GaussianSplatRenderMode.DebugBoxes or GaussianSplatRenderMode.DebugChunkBounds)
+                    indexCount = 36;
+                if (_config.renderMode == GaussianSplatRenderMode.DebugChunkBounds)
+                    instanceCount = gs.GpuChunksValid ? gs.GpuChunksBuffer.count : 0;
+
+                _preparedItems.Add(new StereoRenderItem
+                {
+                    gs = gs, displayMat = displayMat, mpb = mpb,
+                    indexCount = indexCount, instanceCount = instanceCount, topology = topology
+                });
+            }
+
+            _lastRenderFence = cmb.CreateAsyncGraphicsFence();
+            _hasRenderFence = true;
+            return matComposite;
+        }
+
+        // Draw all prepared items for a specific eye (0 = left, 1 = right).
+        public void RenderPreparedSplats(CommandBuffer cmb, int eyeIndex)
+        {
+            foreach (var item in _preparedItems)
+            {
+                item.mpb.SetInteger(GaussianSplatRenderer.Props.EyeIndex, eyeIndex);
+                item.mpb.SetInteger(GaussianSplatRenderer.Props.IsStereo, eyeIndex >= 0 ? 1 : 0);
+
+                cmb.BeginSample(ProfDraw);
+                cmb.DrawProcedural(item.gs.GpuIndexBuffer, item.gs.transform.localToWorldMatrix,
+                    item.displayMat, 0, item.topology, item.indexCount, item.instanceCount, item.mpb);
+                cmb.EndSample(ProfDraw);
+            }
         }
 
         private bool CanUseGlobalSortPath()

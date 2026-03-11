@@ -11,6 +11,7 @@ using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
 using UnityEngine.Rendering.RenderGraphModule;
+using UnityEngine.XR;
 
 namespace GaussianSplatting.Runtime
 {
@@ -86,6 +87,7 @@ namespace GaussianSplatting.Runtime
             private const string ProfilerTag = "GaussianSplatRenderGraph";
             private static readonly ProfilingSampler ProfileSampler = new(ProfilerTag);
             private static readonly int GaussianSplatRT = Shader.PropertyToID(GaussianSplatRTName);
+            private static readonly int CustomStereoEyeIndex = Shader.PropertyToID("_CustomStereoEyeIndex");
 
             private readonly GaussianSplatURPFeature _owner;
 
@@ -100,6 +102,7 @@ namespace GaussianSplatting.Runtime
                 internal StylizeSettings StylizeSettings;
                 internal Material StylizeMaterial;
                 internal Vector2Int RenderSize;
+                internal bool IsStereo;
             }
 
             public GsRenderPass(GaussianSplatURPFeature owner)
@@ -111,6 +114,13 @@ namespace GaussianSplatting.Runtime
             {
                 var cameraData = frameData.Get<UniversalCameraData>();
                 var resourceData = frameData.Get<UniversalResourceData>();
+
+                // Detect stereo: single-pass instanced/multiview on device with Tex2DArray target
+                bool isStereo = XRSettings.enabled && cameraData.camera.stereoEnabled &&
+                                (XRSettings.stereoRenderingMode == XRSettings.StereoRenderingMode.SinglePassInstanced ||
+                                 XRSettings.stereoRenderingMode == XRSettings.StereoRenderingMode.SinglePassMultiview) &&
+                                !Application.isEditor &&
+                                cameraData.cameraTargetDescriptor.dimension == TextureDimension.Tex2DArray;
 
                 using var builder = renderGraph.AddUnsafePass(ProfilerTag, out PassData passData);
 
@@ -135,6 +145,7 @@ namespace GaussianSplatting.Runtime
                 passData.ApplyStylize = applyStylize;
                 passData.StylizeSettings = stylizeSettings;
                 passData.StylizeMaterial = _owner._stylizeMaterial;
+                passData.IsStereo = isStereo;
 
                 builder.UseTexture(resourceData.activeColorTexture, AccessFlags.ReadWrite);
                 builder.UseTexture(resourceData.activeDepthTexture);
@@ -146,28 +157,76 @@ namespace GaussianSplatting.Runtime
                 {
                     var commandBuffer = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
                     using var _ = new ProfilingScope(commandBuffer, ProfileSampler);
-                    commandBuffer.SetGlobalTexture(GaussianSplatRT, data.GaussianSplatRT);
-                    CoreUtils.SetRenderTarget(commandBuffer, data.GaussianSplatRT, data.SourceDepth, ClearFlag.Color, Color.clear);
-                    // Pass GaussianSplatRT as the tile render output target so the tile
-                    // renderer can write directly via UAV without SetRenderTarget/Blit.
-                    GaussianSplatRenderSystem.instance.TileOutputTarget = data.GaussianSplatRT;
-                    GaussianSplatRenderSystem.instance.TileRenderSize = data.RenderSize;
-                    Material matComposite = GaussianSplatRenderSystem.instance.SortAndRenderSplats(data.CameraData.camera, commandBuffer);
-                    if (matComposite != null)
-                    {
-                        TextureHandle composeSource = data.GaussianSplatRT;
-                        if (data.ApplyStylize && data.StylizeMaterial != null)
-                        {
-                            SetStylizeMaterialProperties(data.StylizeMaterial, in data.StylizeSettings);
-                            commandBuffer.SetGlobalTexture(StylizeSourceTex, data.GaussianSplatRT);
-                            Blitter.BlitCameraTexture(commandBuffer, data.GaussianSplatRT, data.StylizedGaussianRT, data.StylizeMaterial, 0);
-                            composeSource = data.StylizedGaussianRT;
-                        }
+                    var system = GaussianSplatRenderSystem.instance;
 
-                        commandBuffer.SetGlobalTexture(GaussianSplatRT, composeSource);
-                        commandBuffer.BeginSample(GaussianSplatRenderSystem.ProfCompose);
-                        Blitter.BlitCameraTexture(commandBuffer, composeSource, data.SourceTexture, matComposite, 0);
-                        commandBuffer.EndSample(GaussianSplatRenderSystem.ProfCompose);
+                    if (data.IsStereo)
+                    {
+                        // Prepare once (sort + compute view data for both eyes)
+                        Material matComposite = system.PrepareSplats(data.CameraData.camera, commandBuffer);
+
+                        // Clear entire RT array
+                        CoreUtils.SetRenderTarget(commandBuffer, data.GaussianSplatRT,
+                            ClearFlag.Color, Color.clear);
+
+                        // Render left eye to slice 0
+                        CoreUtils.SetRenderTarget(commandBuffer, data.GaussianSplatRT,
+                            ClearFlag.Color, Color.clear, 0, CubemapFace.Unknown, 0);
+                        system.RenderPreparedSplats(commandBuffer, 0);
+
+                        // Render right eye to slice 1
+                        CoreUtils.SetRenderTarget(commandBuffer, data.GaussianSplatRT,
+                            ClearFlag.Color, Color.clear, 0, CubemapFace.Unknown, 1);
+                        system.RenderPreparedSplats(commandBuffer, 1);
+
+                        // Composite per eye
+                        if (matComposite != null)
+                        {
+                            commandBuffer.BeginSample(GaussianSplatRenderSystem.ProfCompose);
+                            matComposite.SetTexture(GaussianSplatRT, data.GaussianSplatRT);
+
+                            // Left eye composite
+                            commandBuffer.SetRenderTarget(data.SourceTexture, 0, CubemapFace.Unknown, 0);
+                            commandBuffer.SetGlobalInt(CustomStereoEyeIndex, 0);
+                            commandBuffer.DrawProcedural(Matrix4x4.identity, matComposite, 0,
+                                MeshTopology.Triangles, 3, 1);
+
+                            // Right eye composite
+                            commandBuffer.SetRenderTarget(data.SourceTexture, 0, CubemapFace.Unknown, 1);
+                            commandBuffer.SetGlobalInt(CustomStereoEyeIndex, 1);
+                            commandBuffer.DrawProcedural(Matrix4x4.identity, matComposite, 0,
+                                MeshTopology.Triangles, 3, 1);
+
+                            commandBuffer.EndSample(GaussianSplatRenderSystem.ProfCompose);
+                        }
+                    }
+                    else
+                    {
+                        // Non-stereo path (unchanged)
+                        commandBuffer.SetGlobalTexture(GaussianSplatRT, data.GaussianSplatRT);
+                        CoreUtils.SetRenderTarget(commandBuffer, data.GaussianSplatRT,
+                            data.SourceDepth, ClearFlag.Color, Color.clear);
+                        // Pass GaussianSplatRT as the tile render output target so the tile
+                        // renderer can write directly via UAV without SetRenderTarget/Blit.
+                        system.TileOutputTarget = data.GaussianSplatRT;
+                        system.TileRenderSize = data.RenderSize;
+                        Material matComposite = system.SortAndRenderSplats(data.CameraData.camera, commandBuffer);
+
+                        if (matComposite != null)
+                        {
+                            TextureHandle composeSource = data.GaussianSplatRT;
+                            if (data.ApplyStylize && data.StylizeMaterial != null)
+                            {
+                                SetStylizeMaterialProperties(data.StylizeMaterial, in data.StylizeSettings);
+                                commandBuffer.SetGlobalTexture(StylizeSourceTex, data.GaussianSplatRT);
+                                Blitter.BlitCameraTexture(commandBuffer, data.GaussianSplatRT, data.StylizedGaussianRT, data.StylizeMaterial, 0);
+                                composeSource = data.StylizedGaussianRT;
+                            }
+
+                            commandBuffer.SetGlobalTexture(GaussianSplatRT, composeSource);
+                            commandBuffer.BeginSample(GaussianSplatRenderSystem.ProfCompose);
+                            Blitter.BlitCameraTexture(commandBuffer, composeSource, data.SourceTexture, matComposite, 0);
+                            commandBuffer.EndSample(GaussianSplatRenderSystem.ProfCompose);
+                        }
                     }
                 });
             }
