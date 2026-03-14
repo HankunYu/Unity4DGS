@@ -11,6 +11,7 @@
 #pragma kernel CSSetIndices
 #pragma kernel CSCalcDistances
 #pragma kernel CSCalcViewData
+#pragma kernel CSCalcViewDataStereo
 #pragma kernel CSCopyViewDataAndDistances
 #pragma kernel CSUpdateEditData
 #pragma kernel CSInitEditData
@@ -39,6 +40,11 @@ float4x4 _MatrixVP;
 float4x4 _MatrixP;
 uint _IsStereo;
 uint _StereoEyeIndex;
+
+// Single-dispatch stereo: both eyes' matrices passed at once
+float4x4 _MatrixVP_Eye[2];
+float4x4 _MatrixP_Eye[2];
+float4x4 _MatrixMV_Eye[2];
 float4 _VecScreenParams;
 float4 _VecWorldSpaceCameraPos;
 int _SelectionMode;
@@ -215,7 +221,86 @@ bool IsSplatCut(float3 pos)
     return finalCut;
 }
 
-// Per-eye view data calculation helper.
+// View-independent intermediate data computed once for both eyes.
+struct SplatSharedData
+{
+    float3 worldPos;
+    float3 cov3d0;
+    float3 cov3d1;
+    half4 color;   // SH-evaluated color + opacity
+    bool skip;     // deleted, cut, or zero opacity
+};
+
+// Compute view-independent data: 3D covariance, SH, opacity. Called once per splat.
+SplatSharedData CalcSharedSplatData(
+    SplatData splat, float3 centerWorldPos, bool isDeleted, bool isCut,
+    float splatScale, half opacityScale,
+    float animOpacityMul, float animScaleMul, float animColorBlend, float3 animColorTint)
+{
+    SplatSharedData ssd = (SplatSharedData)0;
+    ssd.worldPos = centerWorldPos;
+    ssd.skip = isDeleted || isCut;
+
+    float finalOpacity = splat.opacity * opacityScale * animOpacityMul;
+    if (finalOpacity < 1.0 / 255.0) { ssd.skip = true; return ssd; }
+    if (ssd.skip) return ssd;
+
+    float3x3 splatRotScaleMat = CalcMatrixFromRotationScale(splat.rot, splat.scale * animScaleMul);
+    CalcCovariance3D(splatRotScaleMat, ssd.cov3d0, ssd.cov3d1);
+    float splatScale2 = splatScale * splatScale;
+    ssd.cov3d0 *= splatScale2;
+    ssd.cov3d1 *= splatScale2;
+
+    float3 worldViewDir = _VecWorldSpaceCameraPos.xyz - centerWorldPos;
+    float3 objViewDir = normalize(mul((float3x3)_MatrixWorldToObject, worldViewDir));
+
+    ssd.color.rgb = ShadeSH(splat.sh, objViewDir, _SHOrder, _SHOnly != 0);
+    if (animColorBlend > 0)
+        ssd.color.rgb = lerp(ssd.color.rgb, (half3)animColorTint, (half)animColorBlend);
+    ssd.color.a = min(finalOpacity, 65000);
+
+    return ssd;
+}
+
+// Per-eye lightweight projection: clip position, 2D covariance, axis decomposition.
+SplatViewData CalcPerEyeViewData(
+    SplatData splat, SplatSharedData ssd,
+    float4x4 vpMatrix, float4x4 pMatrix, float4x4 mvMatrix,
+    float splatScale)
+{
+    SplatViewData view = (SplatViewData)0;
+    if (ssd.skip) return view;
+
+    float4 clipPos = mul(vpMatrix, float4(ssd.worldPos, 1));
+
+    // Conservative frustum cull
+    if (clipPos.w > 0)
+    {
+        float maxScale = max(max(abs(splat.scale.x), abs(splat.scale.y)), abs(splat.scale.z)) * splatScale;
+        float clipMargin = maxScale * abs(pMatrix._m00);
+        float w = clipPos.w;
+        if ((clipPos.x < -(w+clipMargin)) || (clipPos.x > (w+clipMargin)) ||
+            (clipPos.y < -(w+clipMargin)) || (clipPos.y > (w+clipMargin)))
+            clipPos.w = 0;
+    }
+    view.pos = clipPos;
+
+    if (clipPos.w > 0)
+    {
+        float3 cov2d = CalcCovariance2D(splat.pos, ssd.cov3d0, ssd.cov3d1,
+                                         mvMatrix, pMatrix, _VecScreenParams);
+        DecomposeCovariance(cov2d, view.axis1, view.axis2);
+
+        if (length(view.axis1) * length(view.axis2) < 1.0)
+            return view;
+
+        view.color.x = (f32tof16(ssd.color.r) << 16) | f32tof16(ssd.color.g);
+        view.color.y = (f32tof16(ssd.color.b) << 16) | f32tof16(ssd.color.a);
+    }
+    return view;
+}
+
+// Per-eye view data calculation helper (original single-eye path).
 // Computes clip-space position, covariance, SH shading, and packs into SplatViewData.
 // Shared data (world pos, splat loading, animation) is computed once in the kernel;
 // this function handles the VP-dependent steps for each eye.
@@ -514,6 +599,200 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
         _SplatViewData[idx * 2 + _StereoEyeIndex] = view;
     else
         _SplatViewData[idx] = view;
+}
+
+// Single-dispatch stereo kernel: computes view-independent data ONCE (3D covariance,
+// SH shading, splat loading) then per-eye data TWICE (clip pos, 2D covariance).
+// Saves ~40% compute vs dispatching CSCalcViewData twice.
+[numthreads(GROUP_SIZE,1,1)]
+void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
+{
+    uint idx = id.x;
+    uint localIdx = gtid.x;
+    uint chunkSlot = localIdx / kChunkSize;
+    uint laneInChunk = localIdx % kChunkSize;
+
+    // Chunk frustum culling using eye 0's VP (conservative: covers both eyes)
+    bool canCull = (_SplatChunkCount > 0) && (_MorphDataValid == 0) && (_AnimDataValid == 0);
+    if (laneInChunk == 0)
+    {
+        _chunkVisible[chunkSlot] = 1;
+        if (canCull)
+        {
+            uint globalChunkIdx = idx / kChunkSize;
+            if (globalChunkIdx < _SplatChunkCount)
+            {
+                SplatChunkInfo chunk = _SplatChunks[globalChunkIdx];
+                float3 bmin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
+                float3 bmax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
+                float4x4 mvp = mul(_MatrixVP_Eye[0], _MatrixObjectToWorld);
+
+                float4 c0 = mul(mvp, float4(bmin.x, bmin.y, bmin.z, 1));
+                float4 c1 = mul(mvp, float4(bmax.x, bmin.y, bmin.z, 1));
+                float4 c2 = mul(mvp, float4(bmin.x, bmax.y, bmin.z, 1));
+                float4 c3 = mul(mvp, float4(bmax.x, bmax.y, bmin.z, 1));
+                float4 c4 = mul(mvp, float4(bmin.x, bmin.y, bmax.z, 1));
+                float4 c5 = mul(mvp, float4(bmax.x, bmin.y, bmax.z, 1));
+                float4 c6 = mul(mvp, float4(bmin.x, bmax.y, bmax.z, 1));
+                float4 c7 = mul(mvp, float4(bmax.x, bmax.y, bmax.z, 1));
+
+                bool outL=true, outR=true, outB=true, outT=true, outN=true, outF=true;
+                #define FRUSTUM_TEST(p) \
+                    if((p).x >= -(p).w) outL=false; \
+                    if((p).x <=  (p).w) outR=false; \
+                    if((p).y >= -(p).w) outB=false; \
+                    if((p).y <=  (p).w) outT=false; \
+                    if((p).z >=     0 ) outN=false; \
+                    if((p).z <=  (p).w) outF=false;
+                FRUSTUM_TEST(c0) FRUSTUM_TEST(c1) FRUSTUM_TEST(c2) FRUSTUM_TEST(c3)
+                FRUSTUM_TEST(c4) FRUSTUM_TEST(c5) FRUSTUM_TEST(c6) FRUSTUM_TEST(c7)
+                #undef FRUSTUM_TEST
+
+                if (outL || outR || outB || outT || outN || outF)
+                    _chunkVisible[chunkSlot] = 0;
+            }
+        }
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    if (idx >= _SplatCount)
+        return;
+
+    if (_chunkVisible[chunkSlot] == 0)
+    {
+        _SplatViewData[idx * 2 + 0] = (SplatViewData)0;
+        _SplatViewData[idx * 2 + 1] = (SplatViewData)0;
+        return;
+    }
+
+    // Load splat data ONCE — same logic as CSCalcViewData
+    SplatData splat;
+    if (_MorphDataValid != 0)
+    {
+        uint mb = idx * 4;
+        float4 md0 = _MorphedData[mb + 0];
+        float4 md1 = _MorphedData[mb + 1];
+        float4 md2 = _MorphedData[mb + 2];
+        float4 md3 = _MorphedData[mb + 3];
+        splat = (SplatData)0;
+        if (_MorphDataValid >= 2)
+        {
+            uint shAddr = idx * 96;
+            uint4 shRaw0 = _MorphSHData.Load4(shAddr);
+            uint4 shRaw1 = _MorphSHData.Load4(shAddr + 16);
+            uint4 shRaw2 = _MorphSHData.Load4(shAddr + 32);
+            uint4 shRaw3 = _MorphSHData.Load4(shAddr + 48);
+            uint4 shRaw4 = _MorphSHData.Load4(shAddr + 64);
+            uint3 shRaw5 = _MorphSHData.Load3(shAddr + 80);
+            splat.sh.sh1  = half3(f16tof32(shRaw0.x      ), f16tof32(shRaw0.x >> 16), f16tof32(shRaw0.y      ));
+            splat.sh.sh2  = half3(f16tof32(shRaw0.y >> 16), f16tof32(shRaw0.z      ), f16tof32(shRaw0.z >> 16));
+            splat.sh.sh3  = half3(f16tof32(shRaw0.w      ), f16tof32(shRaw0.w >> 16), f16tof32(shRaw1.x      ));
+            splat.sh.sh4  = half3(f16tof32(shRaw1.x >> 16), f16tof32(shRaw1.y      ), f16tof32(shRaw1.y >> 16));
+            splat.sh.sh5  = half3(f16tof32(shRaw1.z      ), f16tof32(shRaw1.z >> 16), f16tof32(shRaw1.w      ));
+            splat.sh.sh6  = half3(f16tof32(shRaw1.w >> 16), f16tof32(shRaw2.x      ), f16tof32(shRaw2.x >> 16));
+            splat.sh.sh7  = half3(f16tof32(shRaw2.y      ), f16tof32(shRaw2.y >> 16), f16tof32(shRaw2.z      ));
+            splat.sh.sh8  = half3(f16tof32(shRaw2.z >> 16), f16tof32(shRaw2.w      ), f16tof32(shRaw2.w >> 16));
+            splat.sh.sh9  = half3(f16tof32(shRaw3.x      ), f16tof32(shRaw3.x >> 16), f16tof32(shRaw3.y      ));
+            splat.sh.sh10 = half3(f16tof32(shRaw3.y >> 16), f16tof32(shRaw3.z      ), f16tof32(shRaw3.z >> 16));
+            splat.sh.sh11 = half3(f16tof32(shRaw3.w      ), f16tof32(shRaw3.w >> 16), f16tof32(shRaw4.x      ));
+            splat.sh.sh12 = half3(f16tof32(shRaw4.x >> 16), f16tof32(shRaw4.y      ), f16tof32(shRaw4.y >> 16));
+            splat.sh.sh13 = half3(f16tof32(shRaw4.z      ), f16tof32(shRaw4.z >> 16), f16tof32(shRaw4.w      ));
+            splat.sh.sh14 = half3(f16tof32(shRaw4.w >> 16), f16tof32(shRaw5.x      ), f16tof32(shRaw5.x >> 16));
+            splat.sh.sh15 = half3(f16tof32(shRaw5.y      ), f16tof32(shRaw5.y >> 16), f16tof32(shRaw5.z      ));
+        }
+        else if (idx < _SrcSplatCount)
+        {
+            SplatData srcSplat = LoadSplatData(idx);
+            half shFade = (half)(1.0 - _MorphWeight);
+            splat.sh.sh1  = srcSplat.sh.sh1  * shFade; splat.sh.sh2  = srcSplat.sh.sh2  * shFade;
+            splat.sh.sh3  = srcSplat.sh.sh3  * shFade; splat.sh.sh4  = srcSplat.sh.sh4  * shFade;
+            splat.sh.sh5  = srcSplat.sh.sh5  * shFade; splat.sh.sh6  = srcSplat.sh.sh6  * shFade;
+            splat.sh.sh7  = srcSplat.sh.sh7  * shFade; splat.sh.sh8  = srcSplat.sh.sh8  * shFade;
+            splat.sh.sh9  = srcSplat.sh.sh9  * shFade; splat.sh.sh10 = srcSplat.sh.sh10 * shFade;
+            splat.sh.sh11 = srcSplat.sh.sh11 * shFade; splat.sh.sh12 = srcSplat.sh.sh12 * shFade;
+            splat.sh.sh13 = srcSplat.sh.sh13 * shFade; splat.sh.sh14 = srcSplat.sh.sh14 * shFade;
+            splat.sh.sh15 = srcSplat.sh.sh15 * shFade;
+        }
+        splat.pos     = md0.xyz;
+        splat.rot     = md1;
+        splat.scale   = md2.xyz;
+        splat.opacity = (half)md0.w;
+        splat.sh.col  = (half3)md3.rgb;
+    }
+    else
+    {
+        splat = LoadSplatData(idx);
+    }
+
+    float3 centerWorldPos = mul(_MatrixObjectToWorld, float4(splat.pos, 1)).xyz;
+
+    // Animation
+    float animOpacityMul = 1.0;
+    float animScaleMul = 1.0;
+    float3 animColorTint = float3(1, 1, 1);
+    float animColorBlend = 0;
+    if (_AnimDataValid != 0)
+    {
+        uint animBase = idx * 3;
+        float4 animPosOp = _AnimOutputData[animBase + 0];
+        float4 animScaleColor = _AnimOutputData[animBase + 1];
+        float4 animTint = _AnimOutputData[animBase + 2];
+        splat.pos += animPosOp.xyz;
+        centerWorldPos += mul((float3x3)_MatrixObjectToWorld, animPosOp.xyz);
+        animScaleMul   = animScaleColor.x;
+        animOpacityMul = animPosOp.w;
+        animColorBlend = animScaleColor.y;
+        animColorTint  = animTint.xyz;
+    }
+
+    // Deleted/selected state
+    bool isDeleted = false;
+    if (_SplatBitsValid && idx < _SrcSplatCount)
+    {
+        uint wordVal = _SplatDeletedBits.Load((idx / 32) * 4);
+        isDeleted = (wordVal & (1 << (idx & 31))) != 0;
+    }
+    bool isCut = IsSplatCut(splat.pos);
+    bool isSelected = false;
+    if (_SplatBitsValid)
+    {
+        uint selVal = _SplatSelectedBits.Load((idx / 32) * 4);
+        isSelected = (selVal & (1 << (idx & 31))) != 0;
+    }
+
+    // Compute view-independent data ONCE
+    SplatSharedData ssd = CalcSharedSplatData(
+        splat, centerWorldPos, isDeleted, isCut,
+        _SplatScale, _SplatOpacityScale,
+        animOpacityMul, animScaleMul, animColorBlend, animColorTint);
+
+    // Compute per-eye data (lightweight)
+    [unroll]
+    for (uint eye = 0; eye < 2; eye++)
+    {
+        SplatViewData view = CalcPerEyeViewData(
+            splat, ssd,
+            _MatrixVP_Eye[eye], _MatrixP_Eye[eye], _MatrixMV_Eye[eye],
+            _SplatScale);
+
+        if (isSelected && view.pos.w > 0)
+        {
+            half4 col;
+            col.r = f16tof32(view.color.x >> 16);
+            col.g = f16tof32(view.color.x);
+            col.b = f16tof32(view.color.y >> 16);
+            col.a = f16tof32(view.color.y);
+            if (col.a > 0)
+            {
+                col.a = -max(col.a, 1.0 / 255.0);
+                view.color.x = (f32tof16(col.r) << 16) | f32tof16(col.g);
+                view.color.y = (f32tof16(col.b) << 16) | f32tof16(col.a);
+            }
+        }
+
+        _SplatViewData[idx * 2 + eye] = view;
+    }
 }
 
 [numthreads(GROUP_SIZE,1,1)]

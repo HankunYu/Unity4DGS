@@ -113,6 +113,9 @@ namespace GaussianSplatting.Runtime
             public static readonly int MatrixMV = Shader.PropertyToID("_MatrixMV");
             public static readonly int MatrixVP = Shader.PropertyToID("_MatrixVP");
             public static readonly int MatrixP = Shader.PropertyToID("_MatrixP");
+            public static readonly int MatrixVPEye = Shader.PropertyToID("_MatrixVP_Eye");
+            public static readonly int MatrixPEye = Shader.PropertyToID("_MatrixP_Eye");
+            public static readonly int MatrixMVEye = Shader.PropertyToID("_MatrixMV_Eye");
             public static readonly int MatrixObjectToWorld = Shader.PropertyToID("_MatrixObjectToWorld");
             public static readonly int MatrixWorldToObject = Shader.PropertyToID("_MatrixWorldToObject");
             public static readonly int VecScreenParams = Shader.PropertyToID("_VecScreenParams");
@@ -657,29 +660,52 @@ namespace GaussianSplatting.Runtime
 
             if (isStereo)
             {
-                // Dispatch per-eye with explicit matrix params via SetComputeMatrixParam.
-                // Do NOT use SetViewProjectionMatrices — confirmed it does not update
-                // UNITY_MATRIX_VP/P for compute dispatches on Metal.
+                // Single-dispatch stereo: pass both eyes' matrices and dispatch once.
+                // The CSCalcViewDataStereo kernel computes view-independent data (3D
+                // covariance, SH) once, then per-eye data (clip pos, 2D cov) in a loop.
                 cmb.SetComputeIntParam(csSplatUtilities, Props.IsStereo, 1);
 
-                for (int eye = 0; eye < 2; eye++)
+                if (TryFindSupportedKernel("CSCalcViewDataStereo", out int stereoKernel))
                 {
-                    var stereoEye = eye == 0
-                        ? Camera.StereoscopicEye.Left
-                        : Camera.StereoscopicEye.Right;
-                    Matrix4x4 stereoView = cam.GetStereoViewMatrix(stereoEye);
-                    Matrix4x4 stereoProj = cam.GetStereoProjectionMatrix(stereoEye);
+                    Matrix4x4 leftView = cam.GetStereoViewMatrix(Camera.StereoscopicEye.Left);
+                    Matrix4x4 rightView = cam.GetStereoViewMatrix(Camera.StereoscopicEye.Right);
+                    Matrix4x4 leftGpu = GL.GetGPUProjectionMatrix(
+                        cam.GetStereoProjectionMatrix(Camera.StereoscopicEye.Left), true);
+                    Matrix4x4 rightGpu = GL.GetGPUProjectionMatrix(
+                        cam.GetStereoProjectionMatrix(Camera.StereoscopicEye.Right), true);
 
-                    Matrix4x4 stereoGpuProj = GL.GetGPUProjectionMatrix(stereoProj, true);
+                    cmb.SetComputeMatrixArrayParam(csSplatUtilities, Props.MatrixVPEye,
+                        new[] { leftGpu * leftView, rightGpu * rightView });
+                    cmb.SetComputeMatrixArrayParam(csSplatUtilities, Props.MatrixPEye,
+                        new[] { leftGpu, rightGpu });
+                    cmb.SetComputeMatrixArrayParam(csSplatUtilities, Props.MatrixMVEye,
+                        new[] { leftView * matO2W, rightView * matO2W });
 
-                    cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixVP, stereoGpuProj * stereoView);
-                    cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixP, stereoGpuProj);
-                    cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixMV, stereoView * matO2W);
-                    cmb.SetComputeIntParam(csSplatUtilities, Props.StereoEyeIndex, eye);
-
-                    cmb.DispatchCompute(csSplatUtilities, kernelIndex, groupCount, 1, 1);
+                    SetAssetDataOnCS(cmb, stereoKernel);
+                    csSplatUtilities.GetKernelThreadGroupSizes(stereoKernel, out uint gsX2, out _, out _);
+                    int stereoGroupCount = (dispatchCount + (int)gsX2 - 1) / (int)gsX2;
+                    cmb.DispatchCompute(csSplatUtilities, stereoKernel, stereoGroupCount, 1, 1);
                 }
+                else
+                {
+                    // Fallback: per-eye dispatch if stereo kernel not available
+                    for (int eye = 0; eye < 2; eye++)
+                    {
+                        var stereoEye = eye == 0
+                            ? Camera.StereoscopicEye.Left
+                            : Camera.StereoscopicEye.Right;
+                        Matrix4x4 stereoView = cam.GetStereoViewMatrix(stereoEye);
+                        Matrix4x4 stereoGpuProj = GL.GetGPUProjectionMatrix(
+                            cam.GetStereoProjectionMatrix(stereoEye), true);
 
+                        cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixVP, stereoGpuProj * stereoView);
+                        cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixP, stereoGpuProj);
+                        cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixMV, stereoView * matO2W);
+                        cmb.SetComputeIntParam(csSplatUtilities, Props.StereoEyeIndex, eye);
+
+                        cmb.DispatchCompute(csSplatUtilities, kernelIndex, groupCount, 1, 1);
+                    }
+                }
             }
             else
             {

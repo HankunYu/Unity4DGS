@@ -197,8 +197,10 @@ namespace GaussianSplatting.Runtime
                         // uses the camera's rasterization rate map, which differs from our
                         // splat RT's rate map. Instead, we sample depth manually and remap
                         // coordinates from linear to non-uniform space.
-                        commandBuffer.SetGlobalTexture(GaussianDepthTex, data.SourceDepth);
-                        commandBuffer.EnableShaderKeyword("GAUSSIAN_STEREO_DEPTH");
+                        // TODO: re-enable manual depth test after performance optimization.
+                        // The per-fragment depth Load + VRR remap is too expensive for 2M splats.
+                        // commandBuffer.SetGlobalTexture(GaussianDepthTex, data.SourceDepth);
+                        // commandBuffer.EnableShaderKeyword("GAUSSIAN_STEREO_DEPTH");
 
                         // Render left eye to slice 0
                         commandBuffer.SetRenderTarget(data.GaussianSplatRT,
@@ -212,7 +214,7 @@ namespace GaussianSplatting.Runtime
                         commandBuffer.SetViewport(eyeViewport);
                         system.RenderPreparedSplats(commandBuffer, 1);
 
-                        commandBuffer.DisableShaderKeyword("GAUSSIAN_STEREO_DEPTH");
+                        // commandBuffer.DisableShaderKeyword("GAUSSIAN_STEREO_DEPTH");
 
                         // Composite per eye: enable GAUSSIAN_STEREO so the composite shader
                         // samples from Texture2DArray instead of Texture2D.
