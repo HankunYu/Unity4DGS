@@ -14,6 +14,8 @@ CGPROGRAM
 #pragma vertex vert
 #pragma fragment fragStylize
 #pragma require compute
+#pragma require 2darray
+#pragma multi_compile _ GAUSSIAN_STEREO
 #include "UnityCG.cginc"
 
 struct v2f
@@ -29,7 +31,12 @@ v2f vert(uint vtxID : SV_VertexID)
     return o;
 }
 
+#if defined(GAUSSIAN_STEREO)
+Texture2DArray _StylizeSourceTex;
+int _CustomStereoEyeIndex;
+#else
 Texture2D _StylizeSourceTex;
+#endif
 
 float _GrainIntensity;
 float _GrainScale;
@@ -114,7 +121,11 @@ int2 ClampPixelCoord(int2 pixelPos)
 
 float3 SampleSource(int2 pixelPos)
 {
+    #if defined(GAUSSIAN_STEREO)
+    return _StylizeSourceTex.Load(int4(ClampPixelCoord(pixelPos), _CustomStereoEyeIndex, 0)).rgb;
+    #else
     return _StylizeSourceTex.Load(int3(ClampPixelCoord(pixelPos), 0)).rgb;
+    #endif
 }
 
 float BrushScale01()
@@ -245,7 +256,11 @@ float3 ApplyColorMerge(float3 color, int2 pixelPos)
 half4 fragStylize(v2f i) : SV_Target
 {
     int2 pixel = int2(i.vertex.xy);
+    #if defined(GAUSSIAN_STEREO)
+    float4 src = _StylizeSourceTex.Load(int4(pixel, _CustomStereoEyeIndex, 0));
+    #else
     float4 src = _StylizeSourceTex.Load(int3(pixel, 0));
+    #endif
 
     float3 styled = src.rgb;
     styled = ApplyVintage(styled);
@@ -273,6 +288,8 @@ CGPROGRAM
 #pragma vertex vert
 #pragma fragment fragCopy
 #pragma require compute
+#pragma require 2darray
+#pragma multi_compile _ GAUSSIAN_STEREO
 #include "UnityCG.cginc"
 
 struct v2f
@@ -288,11 +305,20 @@ v2f vert(uint vtxID : SV_VertexID)
     return o;
 }
 
+#if defined(GAUSSIAN_STEREO)
+Texture2DArray _StylizeSourceTex;
+int _CustomStereoEyeIndex;
+#else
 Texture2D _StylizeSourceTex;
+#endif
 
 half4 fragCopy(v2f i) : SV_Target
 {
+    #if defined(GAUSSIAN_STEREO)
+    return _StylizeSourceTex.Load(int4(i.vertex.xy, _CustomStereoEyeIndex, 0));
+    #else
     return _StylizeSourceTex.Load(int3(i.vertex.xy, 0));
+    #endif
 }
 ENDCG
         }

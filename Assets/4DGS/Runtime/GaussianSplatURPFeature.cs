@@ -192,16 +192,6 @@ namespace GaussianSplatting.Runtime
                         // based on camera pixel rect which differs from eye texture size).
                         commandBuffer.DisableScissorRect();
 
-                        // Pass depth texture for manual mesh occlusion in the fragment shader.
-                        // Hardware depth test doesn't work under VRR because the depth buffer
-                        // uses the camera's rasterization rate map, which differs from our
-                        // splat RT's rate map. Instead, we sample depth manually and remap
-                        // coordinates from linear to non-uniform space.
-                        // TODO: re-enable manual depth test after performance optimization.
-                        // The per-fragment depth Load + VRR remap is too expensive for 2M splats.
-                        // commandBuffer.SetGlobalTexture(GaussianDepthTex, data.SourceDepth);
-                        // commandBuffer.EnableShaderKeyword("GAUSSIAN_STEREO_DEPTH");
-
                         // Render left eye to slice 0
                         commandBuffer.SetRenderTarget(data.GaussianSplatRT,
                             0, CubemapFace.Unknown, 0);
@@ -214,20 +204,36 @@ namespace GaussianSplatting.Runtime
                         commandBuffer.SetViewport(eyeViewport);
                         system.RenderPreparedSplats(commandBuffer, 1);
 
-                        // commandBuffer.DisableShaderKeyword("GAUSSIAN_STEREO_DEPTH");
+                        // Determine composite source: apply stylize per-eye if enabled
+                        TextureHandle composeSource = data.GaussianSplatRT;
+                        if (data.ApplyStylize && data.StylizeMaterial != null)
+                        {
+                            SetStylizeMaterialProperties(data.StylizeMaterial, in data.StylizeSettings);
+                            commandBuffer.EnableShaderKeyword("GAUSSIAN_STEREO");
+                            commandBuffer.SetGlobalTexture(StylizeSourceTex, data.GaussianSplatRT);
+
+                            for (int eye = 0; eye < 2; eye++)
+                            {
+                                commandBuffer.SetRenderTarget(data.StylizedGaussianRT,
+                                    0, CubemapFace.Unknown, eye);
+                                commandBuffer.SetViewport(eyeViewport);
+                                commandBuffer.SetGlobalInt(CustomStereoEyeIndex, eye);
+                                commandBuffer.DrawProcedural(Matrix4x4.identity,
+                                    data.StylizeMaterial, 0, MeshTopology.Triangles, 3, 1);
+                            }
+
+                            commandBuffer.DisableShaderKeyword("GAUSSIAN_STEREO");
+                            composeSource = data.StylizedGaussianRT;
+                        }
 
                         // Composite per eye: enable GAUSSIAN_STEREO so the composite shader
                         // samples from Texture2DArray instead of Texture2D.
-                        // Use commandBuffer keyword ops (GPU-timeline) instead of
-                        // Material.EnableKeyword (CPU-immediate) — the render graph
-                        // defers execution, so Material state may change before the
-                        // GPU processes the draw commands.
                         if (matComposite != null)
                         {
                             commandBuffer.EnableShaderKeyword("GAUSSIAN_STEREO");
 
                             commandBuffer.BeginSample(GaussianSplatRenderSystem.ProfCompose);
-                            commandBuffer.SetGlobalTexture(GaussianSplatRT, data.GaussianSplatRT);
+                            commandBuffer.SetGlobalTexture(GaussianSplatRT, composeSource);
 
                             // Left eye composite
                             commandBuffer.SetRenderTarget(data.SourceTexture, 0, CubemapFace.Unknown, 0);
