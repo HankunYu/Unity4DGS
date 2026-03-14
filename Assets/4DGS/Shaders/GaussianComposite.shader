@@ -23,7 +23,12 @@ CGPROGRAM
 // disabled before the GPU executes the deferred draw commands.
 #pragma multi_compile _ GAUSSIAN_STEREO
 
+// Enable foveated rendering (VRR) support on visionOS Metal.
+// Must appear before including GaussianSplatting.hlsl.
+#include_with_pragmas "Packages/com.unity.render-pipelines.core/ShaderLibrary/FoveatedRenderingKeywords.hlsl"
+
 #include "UnityCG.cginc"
+#include "GaussianSplatting.hlsl"
 
 struct v2f
 {
@@ -51,7 +56,12 @@ half4 frag (v2f i) : SV_Target
 {
     half4 col;
     #if defined(GAUSSIAN_STEREO)
-        col = _GaussianSplatRT.Load(int4(i.vertex.xy, _CustomStereoEyeIndex, 0));
+        // Remap from non-uniform (VRR) screen coords to linear coords for
+        // Loading from GaussianSplatRT, which is rendered without a VRR rate map.
+        float2 uv = i.vertex.xy / _VecScreenParams.xy;
+        uv = GaussianRemapNonUniformToLinear(uv, (uint)_CustomStereoEyeIndex);
+        int2 loadCoord = int2(uv * _VecScreenParams.xy);
+        col = _GaussianSplatRT.Load(int4(loadCoord, _CustomStereoEyeIndex, 0));
     #else
         col = _GaussianSplatRT.Load(int3(i.vertex.xy, 0));
     #endif

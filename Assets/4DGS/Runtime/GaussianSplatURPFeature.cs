@@ -88,6 +88,7 @@ namespace GaussianSplatting.Runtime
             private static readonly ProfilingSampler ProfileSampler = new(ProfilerTag);
             private static readonly int GaussianSplatRT = Shader.PropertyToID(GaussianSplatRTName);
             private static readonly int CustomStereoEyeIndex = Shader.PropertyToID("_CustomStereoEyeIndex");
+            private static readonly int GaussianDepthTex = Shader.PropertyToID("_GaussianDepthTex");
 
             private readonly GaussianSplatURPFeature _owner;
 
@@ -191,17 +192,27 @@ namespace GaussianSplatting.Runtime
                         // based on camera pixel rect which differs from eye texture size).
                         commandBuffer.DisableScissorRect();
 
-                        // Render left eye to slice 0 (bind depth for mesh occlusion)
-                        commandBuffer.SetRenderTarget(data.GaussianSplatRT, data.SourceDepth,
+                        // Pass depth texture for manual mesh occlusion in the fragment shader.
+                        // Hardware depth test doesn't work under VRR because the depth buffer
+                        // uses the camera's rasterization rate map, which differs from our
+                        // splat RT's rate map. Instead, we sample depth manually and remap
+                        // coordinates from linear to non-uniform space.
+                        commandBuffer.SetGlobalTexture(GaussianDepthTex, data.SourceDepth);
+                        commandBuffer.EnableShaderKeyword("GAUSSIAN_STEREO_DEPTH");
+
+                        // Render left eye to slice 0
+                        commandBuffer.SetRenderTarget(data.GaussianSplatRT,
                             0, CubemapFace.Unknown, 0);
                         commandBuffer.SetViewport(eyeViewport);
                         system.RenderPreparedSplats(commandBuffer, 0);
 
-                        // Render right eye to slice 1 (bind depth for mesh occlusion)
-                        commandBuffer.SetRenderTarget(data.GaussianSplatRT, data.SourceDepth,
+                        // Render right eye to slice 1
+                        commandBuffer.SetRenderTarget(data.GaussianSplatRT,
                             0, CubemapFace.Unknown, 1);
                         commandBuffer.SetViewport(eyeViewport);
                         system.RenderPreparedSplats(commandBuffer, 1);
+
+                        commandBuffer.DisableShaderKeyword("GAUSSIAN_STEREO_DEPTH");
 
                         // Composite per eye: enable GAUSSIAN_STEREO so the composite shader
                         // samples from Texture2DArray instead of Texture2D.

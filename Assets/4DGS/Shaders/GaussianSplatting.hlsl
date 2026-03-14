@@ -643,4 +643,43 @@ void FlipProjectionIfBackbuffer(inout float4 vpos)
         vpos.y = -vpos.y;
 }
 
+// Foveated rendering (VRR) coordinate remap for visionOS Metal.
+// Custom wrapper that avoids SRP Core dependencies (PositionInputs etc.)
+// while using the same hlslcc VRR tokens Unity uses internally.
+#if defined(SUPPORTS_FOVEATED_RENDERING_NON_UNIFORM_RASTER) && defined(SHADER_API_METAL)
+
+float2 _UV_HlslccVRRDistort;
+float2 _UV_HlslccVRRResolve;
+
+// Non-uniform (VRR physical) UV → linear UV
+float2 GaussianRemapNonUniformToLinear(float2 uv, uint eyeIndex)
+{
+    UNITY_BRANCH if (_FOVEATED_RENDERING_NON_UNIFORM_RASTER)
+    {
+        uv.y = 1.0 - uv.y;
+        uv = mad(uv, _UV_HlslccVRRDistort, eyeIndex);
+        uv.y = 1.0 - uv.y;
+    }
+    return uv;
+}
+
+// Linear UV → non-uniform (VRR physical) UV
+float2 GaussianRemapLinearToNonUniform(float2 uv, uint eyeIndex)
+{
+    UNITY_BRANCH if (_FOVEATED_RENDERING_NON_UNIFORM_RASTER)
+    {
+        uv.y = 1.0 - uv.y;
+        uv = mad(uv, _UV_HlslccVRRResolve, eyeIndex);
+        uv.y = 1.0 - uv.y;
+    }
+    return uv;
+}
+
+#else
+
+float2 GaussianRemapNonUniformToLinear(float2 uv, uint eyeIndex) { return uv; }
+float2 GaussianRemapLinearToNonUniform(float2 uv, uint eyeIndex) { return uv; }
+
+#endif
+
 #endif // GAUSSIAN_SPLATTING_HLSL
