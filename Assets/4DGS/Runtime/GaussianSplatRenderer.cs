@@ -67,6 +67,7 @@ namespace GaussianSplatting.Runtime
 
         private GpuSorting _sorter;
         private GpuSorting.Args _sorterArgs;
+        private GpuCountingSort _countingSorter;
         private readonly Dictionary<string, int> _kernelIndexCache = new();
 
         private int _frameCounter;
@@ -81,6 +82,7 @@ namespace GaussianSplatting.Runtime
         // Forwarding properties: compute shaders come from global Config
         internal ComputeShader csSplatUtilities => GaussianSplatRenderSystem.instance.Config?.CsSplatUtilities;
         internal ComputeShader csSplatSort => GaussianSplatRenderSystem.instance.Config?.CsSplatSort;
+        internal ComputeShader csCountingSort => GaussianSplatRenderSystem.instance.Config?.CsCountingSort;
 
         internal static class Props
         {
@@ -485,9 +487,10 @@ namespace GaussianSplatting.Runtime
         public void EnsureSorterAndRegister()
         {
             if (_sorter == null && ResourcesAreSetUp && csSplatSort != null)
-            {
                 _sorter = new GpuSorting(csSplatSort);
-            }
+
+            if (_countingSorter == null && ResourcesAreSetUp && csCountingSort != null)
+                _countingSorter = new GpuCountingSort(csCountingSort);
 
             if (!_registered && ResourcesAreSetUp)
             {
@@ -593,6 +596,8 @@ namespace GaussianSplatting.Runtime
             DisposeBuffer(ref _gpuSortKeys);
 
             _sorterArgs.resources.Dispose();
+            _countingSorter?.Dispose();
+            _countingSorter = null;
 
             _splatCount = 0;
             _gpuChunksValid = false;
@@ -764,6 +769,7 @@ namespace GaussianSplatting.Runtime
             worldToCamMatrix.m22 *= -1;
 
             cmd.BeginSample(ProfSort);
+
             cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.SplatSortDistances, _gpuSortDistances);
             cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.SplatSortKeys, _gpuSortKeys);
             cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.SplatChunks, _gpuChunks);
@@ -780,7 +786,6 @@ namespace GaussianSplatting.Runtime
             csSplatUtilities.GetKernelThreadGroupSizes(kernelIndex, out uint gsX, out _, out _);
             cmd.DispatchCompute(csSplatUtilities, kernelIndex, (EffectiveSplatCount + (int)gsX - 1)/(int)gsX, 1, 1);
 
-            EnsureSorterAndRegister();
             if (_sorter != null && _sorter.Valid)
             {
                 _sorterArgs.count = (uint)EffectiveSplatCount;

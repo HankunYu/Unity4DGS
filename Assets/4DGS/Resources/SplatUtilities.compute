@@ -242,7 +242,7 @@ SplatSharedData CalcSharedSplatData(
     ssd.skip = isDeleted || isCut;
 
     float finalOpacity = splat.opacity * opacityScale * animOpacityMul;
-    if (finalOpacity < 1.0 / 255.0) { ssd.skip = true; return ssd; }
+    if (finalOpacity < 5.0 / 255.0) { ssd.skip = true; return ssd; }
     if (ssd.skip) return ssd;
 
     float3x3 splatRotScaleMat = CalcMatrixFromRotationScale(splat.rot, splat.scale * animScaleMul);
@@ -291,7 +291,7 @@ SplatViewData CalcPerEyeViewData(
                                          mvMatrix, pMatrix, _VecScreenParams);
         DecomposeCovariance(cov2d, view.axis1, view.axis2);
 
-        if (length(view.axis1) * length(view.axis2) < 1.0)
+        if (length(view.axis1) * length(view.axis2) < 2.0)
             return view;
 
         view.color.x = (f32tof16(ssd.color.r) << 16) | f32tof16(ssd.color.g);
@@ -344,7 +344,7 @@ SplatViewData CalculateEyeViewData(
 
     // Early opacity culling: skip splats with negligible opacity
     float finalOpacity = splat.opacity * opacityScale * animOpacityMul;
-    if (finalOpacity < 1.0 / 255.0)
+    if (finalOpacity < 5.0 / 255.0)
         return view;
 
     bool behindCam = centerClipPos.w <= 0;
@@ -364,9 +364,9 @@ SplatViewData CalculateEyeViewData(
 
         DecomposeCovariance(cov2d, view.axis1, view.axis2);
 
-        // Sub-pixel area culling: skip splats smaller than 1 pixel
+        // Sub-pixel area culling: skip splats smaller than ~2 pixels
         float splatArea = length(view.axis1) * length(view.axis2);
-        if (splatArea < 1.0)
+        if (splatArea < 2.0)
             return view;
 
         float3 worldViewDir = _VecWorldSpaceCameraPos.xyz - centerWorldPos;

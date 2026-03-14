@@ -28,6 +28,8 @@ namespace GaussianSplatting.Runtime
         CommandBuffer _commandBuffer;
         GpuSorting _globalSorter;
         ComputeShader _globalSorterShader;
+        GpuCountingSort _globalCountingSorter;
+        ComputeShader _globalCountingSortShader;
         int _globalFrameId;
 
         // ── Config ──────────────────────────────────────────────────────
@@ -189,6 +191,9 @@ namespace GaussianSplatting.Runtime
             _globalGroups.Clear();
             _globalSorter = null;
             _globalSorterShader = null;
+            _globalCountingSorter?.Dispose();
+            _globalCountingSorter = null;
+            _globalCountingSortShader = null;
             _tileRenderer = null;
             _hasRenderFence = false;
 
@@ -427,6 +432,19 @@ namespace GaussianSplatting.Runtime
                 _globalSorterShader = cs;
             }
             return _globalSorter != null && _globalSorter.Valid;
+        }
+
+        private bool EnsureGlobalCountingSorter()
+        {
+            var cs = _config?.CsCountingSort;
+            if (cs == null) return false;
+            if (_globalCountingSorter == null || _globalCountingSortShader != cs)
+            {
+                _globalCountingSorter?.Dispose();
+                _globalCountingSorter = new GpuCountingSort(cs);
+                _globalCountingSortShader = cs;
+            }
+            return _globalCountingSorter != null && _globalCountingSorter.Valid;
         }
 
         private bool EnsureGlobalGroupCache(int renderOrder, int splatCount, out GlobalOrderGroupCache cache)

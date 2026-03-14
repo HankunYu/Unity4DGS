@@ -1,0 +1,131 @@
+// GPU counting sort for Gaussian Splatting depth ordering.
+// Replaces multi-pass radix sort with a simpler counting sort.
+// No wave ops required — only InterlockedAdd and GroupMemoryBarrierWithGroupSync.
+
+#pragma kernel CSCountingSortClear
+#pragma kernel CSCountingSortCount
+#pragma kernel CSCountingSortPrefixSum
+#pragma kernel CSCountingSortScatter
+
+#define NUM_BUCKETS 4096
+#define BUCKET_SHIFT 20
+
+// Apple GPU Family 2 (M2) max 512 threads/threadgroup; stay safe at 256 on Metal
+#if defined(SHADER_API_METAL)
+    #define GROUP_SIZE 256
+#else
+    #define GROUP_SIZE 1024
+#endif
+
+// Elements per thread for prefix sum (NUM_BUCKETS / 256)
+#define ELEMS_PER_THREAD 16
+
+RWStructuredBuffer<uint> _Histogram;
+StructuredBuffer<uint>   _SortInput;
+RWStructuredBuffer<uint> _SortOutput;
+uint _SplatCount;
+
+// --- CSCountingSortClear ---
+// Zero the histogram buffer.
+// Dispatch: ceil(NUM_BUCKETS / GROUP_SIZE) groups.
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void CSCountingSortClear(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x < NUM_BUCKETS)
+        _Histogram[id.x] = 0;
+}
+
+// --- CSCountingSortCount ---
+// Count how many splats fall into each bucket.
+// Dispatch: ceil(_SplatCount / GROUP_SIZE) groups.
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void CSCountingSortCount(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _SplatCount)
+        return;
+
+    uint key = _SortInput[id.x];
+    uint bucket = key >> BUCKET_SHIFT;
+    InterlockedAdd(_Histogram[bucket], 1);
+}
+
+// --- CSCountingSortPrefixSum ---
+// In-place exclusive prefix sum over _Histogram.
+// Single group dispatch (1, 1, 1) with 256 threads.
+// Each thread processes ELEMS_PER_THREAD (16) consecutive elements.
+// Shared memory: gs_data = 4096 × 4 = 16KB, gs_blockSums = 256 × 4 = 1KB.
+
+groupshared uint gs_data[NUM_BUCKETS];
+groupshared uint gs_blockSums[256];
+
+[numthreads(256, 1, 1)]
+void CSCountingSortPrefixSum(uint3 gtid : SV_GroupThreadID)
+{
+    uint tid = gtid.x;
+    uint base = tid * ELEMS_PER_THREAD;
+
+    // Step 1: Load histogram counts into shared memory
+    for (uint i = 0; i < ELEMS_PER_THREAD; i++)
+        gs_data[base + i] = _Histogram[base + i];
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // Step 2: Sequential exclusive prefix sum within each thread's block of 16 elements.
+    // Store the total (partial sum) into gs_blockSums.
+    uint localSum = 0;
+    for (uint j = 0; j < ELEMS_PER_THREAD; j++)
+    {
+        uint val = gs_data[base + j];
+        gs_data[base + j] = localSum;
+        localSum += val;
+    }
+    gs_blockSums[tid] = localSum;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // Step 3: Thread 0 does sequential exclusive scan of gs_blockSums[0..255]
+    if (tid == 0)
+    {
+        uint runningSum = 0;
+        for (uint k = 0; k < 256; k++)
+        {
+            uint blockVal = gs_blockSums[k];
+            gs_blockSums[k] = runningSum;
+            runningSum += blockVal;
+        }
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // Step 4: Each thread adds its block offset to its 16 elements
+    uint blockOffset = gs_blockSums[tid];
+    for (uint m = 0; m < ELEMS_PER_THREAD; m++)
+        gs_data[base + m] += blockOffset;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    // Step 5: Write prefix sums back to _Histogram (now contains start offsets)
+    for (uint n = 0; n < ELEMS_PER_THREAD; n++)
+        _Histogram[base + n] = gs_data[base + n];
+}
+
+// --- CSCountingSortScatter ---
+// Scatter splat indices into sorted order using the prefix-summed histogram.
+// Dispatch: ceil(_SplatCount / GROUP_SIZE) groups.
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void CSCountingSortScatter(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _SplatCount)
+        return;
+
+    uint key = _SortInput[id.x];
+    uint bucket = key >> BUCKET_SHIFT;
+
+    uint pos;
+    InterlockedAdd(_Histogram[bucket], 1, pos);
+
+    _SortOutput[pos] = id.x;
+}

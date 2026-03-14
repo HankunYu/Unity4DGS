@@ -173,8 +173,10 @@ namespace GaussianSplatting.Runtime
             cmd.SetComputeBufferParam(_cs, _kernelInit, "b_globalHist", args.resources.globalHistBuffer);
             cmd.DispatchCompute(_cs, _kernelInit, 1, 1, 1);
 
-            // Execute the sort algorithm in 8-bit increments
-            for (constants.radixShift = 0; constants.radixShift < 32; constants.radixShift += DEVICE_RADIX_SORT_BITS)
+            // Execute the sort algorithm in 8-bit increments.
+            // Only sort the top 16 bits (2 passes instead of 4) for ~2x speedup.
+            // 65536 depth buckets ≈ 1.5mm precision at 100m range.
+            for (constants.radixShift = 16; constants.radixShift < 32; constants.radixShift += DEVICE_RADIX_SORT_BITS)
             {
                 cmd.SetComputeIntParam(_cs, "e_radixShift", (int)constants.radixShift);
 

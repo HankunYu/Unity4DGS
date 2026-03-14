@@ -65,7 +65,7 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
 
 		uint idx = vtxID;
 		float2 quadPos = float2(idx&1, (idx>>1)&1) * 2.0 - 1.0;
-		quadPos *= 2;
+		quadPos *= 1.8;
 
 		o.pos = quadPos;
 
@@ -99,7 +99,7 @@ half4 frag (v2f i) : SV_Target
 	}
 	#endif
 
-	float power = -dot(i.pos, i.pos);
+	half power = -dot(i.pos, i.pos);
 	half alpha = exp(power);
 	if (i.col.a >= 0)
 	{
@@ -121,7 +121,7 @@ half4 frag (v2f i) : SV_Target
 		i.col.rgb = lerp(i.col.rgb, selectedColor, 0.5);
 	}
 
-    if (alpha < 1.0/255.0)
+    if (alpha < 5.0/255.0)
         discard;
 
     half4 res = half4(i.col.rgb * alpha, alpha);

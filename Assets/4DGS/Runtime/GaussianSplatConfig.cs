@@ -24,6 +24,7 @@ namespace GaussianSplatting.Runtime
         private Shader _shaderDebugBoxes;
         private ComputeShader _csSplatUtilities;
         private ComputeShader _csSplatSort;
+        private ComputeShader _csCountingSort;
         private ComputeShader _csTileRender;
 
         public Shader ShaderSplats => _shaderSplats;
@@ -32,6 +33,7 @@ namespace GaussianSplatting.Runtime
         public Shader ShaderDebugBoxes => _shaderDebugBoxes;
         public ComputeShader CsSplatUtilities => _csSplatUtilities;
         public ComputeShader CsSplatSort => _csSplatSort;
+        public ComputeShader CsCountingSort => _csCountingSort;
         public ComputeShader CsTileRender => _csTileRender;
 
         public bool ResourcesValid =>
@@ -62,6 +64,7 @@ namespace GaussianSplatting.Runtime
                 : Shader.Find("Gaussian Splatting/Debug/Render Boxes");
             _csSplatUtilities = Resources.Load<ComputeShader>("SplatUtilities");
             _csSplatSort = Resources.Load<ComputeShader>("SplatSort");
+            _csCountingSort = Resources.Load<ComputeShader>("SplatCountingSort");
             _csTileRender = Resources.Load<ComputeShader>("GaussianTileRender");
 
             // Diagnostic: report resource loading results

@@ -35,6 +35,7 @@ namespace GaussianSplatting.Editor
 
         public void OnEnable()
         {
+            if (target == null) return;
             m_PropAsset = serializedObject.FindProperty("splatAsset");
             m_PropRenderOrder = serializedObject.FindProperty("renderOrder");
             m_PropSplatScale = serializedObject.FindProperty("splatScale");
