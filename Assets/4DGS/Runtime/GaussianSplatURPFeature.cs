@@ -103,7 +103,13 @@ namespace GaussianSplatting.Runtime
                 internal Material StylizeMaterial;
                 internal Vector2Int RenderSize;
                 internal bool IsStereo;
+                internal bool IsXRActive;
             }
+
+            private static bool _stereoConditionsLogged;
+            private static bool _renderFuncLogged;
+            private static bool _stereoPrepareLogged;
+            private static bool _stereoCompositeLogged;
 
             public GsRenderPass(GaussianSplatURPFeature owner)
             {
@@ -116,11 +122,29 @@ namespace GaussianSplatting.Runtime
                 var resourceData = frameData.Get<UniversalResourceData>();
 
                 // Detect stereo: single-pass instanced/multiview on device with Tex2DArray target
-                bool isStereo = XRSettings.enabled && cameraData.camera.stereoEnabled &&
-                                (XRSettings.stereoRenderingMode == XRSettings.StereoRenderingMode.SinglePassInstanced ||
-                                 XRSettings.stereoRenderingMode == XRSettings.StereoRenderingMode.SinglePassMultiview) &&
-                                !Application.isEditor &&
-                                cameraData.cameraTargetDescriptor.dimension == TextureDimension.Tex2DArray;
+                bool xrEnabled = XRSettings.enabled;
+                bool stereoEnabled = cameraData.camera.stereoEnabled;
+                var stereoMode = XRSettings.stereoRenderingMode;
+                bool isSPI = stereoMode == XRSettings.StereoRenderingMode.SinglePassInstanced ||
+                             stereoMode == XRSettings.StereoRenderingMode.SinglePassMultiview;
+                bool isDevice = !Application.isEditor;
+                var texDim = cameraData.cameraTargetDescriptor.dimension;
+                bool isTexArray = texDim == TextureDimension.Tex2DArray;
+
+                bool isStereo = xrEnabled && stereoEnabled && isSPI && isDevice && isTexArray;
+                // Only need to reset instance multiplier in SPI mode (URP sets it to 2)
+                // In multi-pass mode, multiplier is already 1
+                bool needsMultiplierReset = isSPI && isDevice;
+
+                // Log stereo detection conditions once for diagnostics
+                if (!_stereoConditionsLogged && xrEnabled)
+                {
+                    _stereoConditionsLogged = true;
+                    Debug.Log($"[GaussianSplat] Stereo detection: xrEnabled={xrEnabled}, " +
+                              $"stereoEnabled={stereoEnabled}, stereoMode={stereoMode}, isSPI={isSPI}, " +
+                              $"isDevice={isDevice}, texDim={texDim}, isTexArray={isTexArray}, " +
+                              $"isStereo={isStereo}");
+                }
 
                 using var builder = renderGraph.AddUnsafePass(ProfilerTag, out PassData passData);
 
@@ -146,6 +170,7 @@ namespace GaussianSplatting.Runtime
                 passData.StylizeSettings = stylizeSettings;
                 passData.StylizeMaterial = _owner._stylizeMaterial;
                 passData.IsStereo = isStereo;
+                passData.IsXRActive = needsMultiplierReset;
 
                 builder.UseTexture(resourceData.activeColorTexture, AccessFlags.ReadWrite);
                 builder.UseTexture(resourceData.activeDepthTexture);
@@ -159,49 +184,110 @@ namespace GaussianSplatting.Runtime
                     using var _ = new ProfilingScope(commandBuffer, ProfileSampler);
                     var system = GaussianSplatRenderSystem.instance;
 
+                    if (!_renderFuncLogged)
+                    {
+                        _renderFuncLogged = true;
+                        int xrEyeW = XRSettings.eyeTextureWidth;
+                        int xrEyeH = XRSettings.eyeTextureHeight;
+                        var cam = data.CameraData.camera;
+                        var rtDesc = data.CameraData.cameraTargetDescriptor;
+                        Debug.Log($"[GaussianSplat][Render] isStereo={data.IsStereo}, " +
+                                  $"renderSize={data.RenderSize}, " +
+                                  $"rtDesc=({rtDesc.width}x{rtDesc.height} dim={rtDesc.dimension}), " +
+                                  $"xrEye=({xrEyeW}x{xrEyeH}), " +
+                                  $"cam.pixel=({cam.pixelWidth}x{cam.pixelHeight}), " +
+                                  $"cam.scaled=({cam.scaledPixelWidth}x{cam.scaledPixelHeight})");
+                        // CRITICAL: check if screenParams (from CalcViewData) matches RenderSize
+                        bool sizeMatch = data.RenderSize.x == xrEyeW && data.RenderSize.y == xrEyeH;
+                        if (!sizeMatch)
+                            Debug.LogWarning($"[GaussianSplat][Render] SIZE MISMATCH! " +
+                                             $"RenderSize={data.RenderSize} != xrEye=({xrEyeW}x{xrEyeH}). " +
+                                             $"Splat covariance may be computed for wrong resolution!");
+                    }
+
+                    // When XR is active, URP sets instance multiplier to 2 for SPI.
+                    // We handle rendering manually, so reset to 1 for all our draws.
+                    if (data.IsXRActive)
+                        commandBuffer.SetInstanceMultiplier(1);
+
                     if (data.IsStereo)
                     {
                         // Prepare once (sort + compute view data for both eyes)
                         Material matComposite = system.PrepareSplats(data.CameraData.camera, commandBuffer);
 
+                        if (!_stereoPrepareLogged)
+                        {
+                            _stereoPrepareLogged = true;
+                            int preparedCount = system.PreparedItemCount;
+                            Debug.Log($"[GaussianSplat][Stereo] PrepareSplats done: " +
+                                      $"preparedItems={preparedCount}, matComposite={(matComposite != null ? "OK" : "NULL")}");
+                        }
+
                         // Clear entire RT array
                         CoreUtils.SetRenderTarget(commandBuffer, data.GaussianSplatRT,
                             ClearFlag.Color, Color.clear);
 
-                        // Render left eye to slice 0
-                        CoreUtils.SetRenderTarget(commandBuffer, data.GaussianSplatRT,
-                            ClearFlag.Color, Color.clear, 0, CubemapFace.Unknown, 0);
+                        var eyeViewport = new Rect(0, 0, data.RenderSize.x, data.RenderSize.y);
+
+                        // Disable any inherited scissor rect that could clip our rendering
+                        // to a sub-region of the render target (e.g. URP/XR may set scissor
+                        // based on camera pixel rect which differs from eye texture size).
+                        commandBuffer.DisableScissorRect();
+
+                        // Render left eye to slice 0 (bind depth for mesh occlusion)
+                        commandBuffer.SetRenderTarget(data.GaussianSplatRT, data.SourceDepth,
+                            0, CubemapFace.Unknown, 0);
+                        commandBuffer.SetViewport(eyeViewport);
                         system.RenderPreparedSplats(commandBuffer, 0);
 
-                        // Render right eye to slice 1
-                        CoreUtils.SetRenderTarget(commandBuffer, data.GaussianSplatRT,
-                            ClearFlag.Color, Color.clear, 0, CubemapFace.Unknown, 1);
+                        // Render right eye to slice 1 (bind depth for mesh occlusion)
+                        commandBuffer.SetRenderTarget(data.GaussianSplatRT, data.SourceDepth,
+                            0, CubemapFace.Unknown, 1);
+                        commandBuffer.SetViewport(eyeViewport);
                         system.RenderPreparedSplats(commandBuffer, 1);
 
-                        // Composite per eye
+                        // Composite per eye: enable GAUSSIAN_STEREO so the composite shader
+                        // samples from Texture2DArray instead of Texture2D.
+                        // Use commandBuffer keyword ops (GPU-timeline) instead of
+                        // Material.EnableKeyword (CPU-immediate) — the render graph
+                        // defers execution, so Material state may change before the
+                        // GPU processes the draw commands.
                         if (matComposite != null)
                         {
+                            commandBuffer.EnableShaderKeyword("GAUSSIAN_STEREO");
+
+                            if (!_stereoCompositeLogged)
+                            {
+                                _stereoCompositeLogged = true;
+                                Debug.Log($"[GaussianSplat][Stereo] Composite: " +
+                                          $"shader={matComposite.shader?.name ?? "NULL"}, " +
+                                          $"passCount={matComposite.passCount}");
+                            }
+
                             commandBuffer.BeginSample(GaussianSplatRenderSystem.ProfCompose);
-                            matComposite.SetTexture(GaussianSplatRT, data.GaussianSplatRT);
+                            commandBuffer.SetGlobalTexture(GaussianSplatRT, data.GaussianSplatRT);
 
                             // Left eye composite
                             commandBuffer.SetRenderTarget(data.SourceTexture, 0, CubemapFace.Unknown, 0);
+                            commandBuffer.SetViewport(eyeViewport);
                             commandBuffer.SetGlobalInt(CustomStereoEyeIndex, 0);
                             commandBuffer.DrawProcedural(Matrix4x4.identity, matComposite, 0,
                                 MeshTopology.Triangles, 3, 1);
 
                             // Right eye composite
                             commandBuffer.SetRenderTarget(data.SourceTexture, 0, CubemapFace.Unknown, 1);
+                            commandBuffer.SetViewport(eyeViewport);
                             commandBuffer.SetGlobalInt(CustomStereoEyeIndex, 1);
                             commandBuffer.DrawProcedural(Matrix4x4.identity, matComposite, 0,
                                 MeshTopology.Triangles, 3, 1);
 
                             commandBuffer.EndSample(GaussianSplatRenderSystem.ProfCompose);
+                            commandBuffer.DisableShaderKeyword("GAUSSIAN_STEREO");
                         }
                     }
                     else
                     {
-                        // Non-stereo path (unchanged)
+                        // Non-stereo path
                         commandBuffer.SetGlobalTexture(GaussianSplatRT, data.GaussianSplatRT);
                         CoreUtils.SetRenderTarget(commandBuffer, data.GaussianSplatRT,
                             data.SourceDepth, ClearFlag.Color, Color.clear);
@@ -213,6 +299,9 @@ namespace GaussianSplatting.Runtime
 
                         if (matComposite != null)
                         {
+                            // Ensure stereo keyword is off for non-stereo composite
+                            commandBuffer.DisableShaderKeyword("GAUSSIAN_STEREO");
+
                             TextureHandle composeSource = data.GaussianSplatRT;
                             if (data.ApplyStylize && data.StylizeMaterial != null)
                             {
@@ -228,6 +317,10 @@ namespace GaussianSplatting.Runtime
                             commandBuffer.EndSample(GaussianSplatRenderSystem.ProfCompose);
                         }
                     }
+
+                    // Restore instance multiplier for subsequent URP XR passes
+                    if (data.IsXRActive)
+                        commandBuffer.SetInstanceMultiplier(2);
                 });
             }
         }
@@ -310,6 +403,8 @@ namespace GaussianSplatting.Runtime
             };
         }
 
+        private bool _preCullDiagLogged;
+
         public override void OnCameraPreCull(ScriptableRenderer renderer, in CameraData cameraData)
         {
             _hasCamera = false;
@@ -318,9 +413,21 @@ namespace GaussianSplatting.Runtime
 
             var system = GaussianSplatRenderSystem.instance;
             if (!system.GatherSplatsForCamera(cameraData.camera))
+            {
+                if (!_preCullDiagLogged)
+                {
+                    _preCullDiagLogged = true;
+                    Debug.LogWarning($"[GaussianSplat][URP] GatherSplatsForCamera returned false for {cameraData.camera.name} (type={cameraData.camera.cameraType})");
+                }
                 return;
+            }
 
             _hasCamera = true;
+            if (!_preCullDiagLogged)
+            {
+                _preCullDiagLogged = true;
+                Debug.Log($"[GaussianSplat][URP] GatherSplatsForCamera OK for {cameraData.camera.name}");
+            }
         }
 
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)

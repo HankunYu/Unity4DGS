@@ -33,6 +33,11 @@ namespace GaussianSplatting.Runtime
         [Range(1,30)] [Tooltip("Sort splats only every N frames")]
         [FormerlySerializedAs("m_SortNthFrame")] public int sortNthFrame = 1;
 
+        [Header("VR Stereo Override")]
+        [Range(0.5f, 5.0f)]
+        [Tooltip("Scale factor for stereo projection FOV. >1 narrows FOV (zoom in), <1 widens FOV (zoom out). Adjusts m00/m11 of the stereo projection matrix while preserving asymmetric offsets.")]
+        public float stereoFovScale = 1.0f;
+
         public GaussianCutoutManager CutoutManager => GetComponent<GaussianCutoutManager>();
 
         // Set by GaussianCutoutManager: cutout data for CalcViewData
@@ -78,8 +83,9 @@ namespace GaussianSplatting.Runtime
 
         static readonly ProfilerMarker ProfSort = new(ProfilerCategory.Render, "GaussianSplat.Sort", MarkerFlags.SampleGPU);
 
-        // Forwarding property: compute shader comes from global Config
+        // Forwarding properties: compute shaders come from global Config
         internal ComputeShader csSplatUtilities => GaussianSplatRenderSystem.instance.Config?.CsSplatUtilities;
+        internal ComputeShader csSplatSort => GaussianSplatRenderSystem.instance.Config?.CsSplatSort;
 
         internal static class Props
         {
@@ -111,6 +117,7 @@ namespace GaussianSplatting.Runtime
             public static readonly int BufferSize = Shader.PropertyToID("_BufferSize");
             public static readonly int MatrixMV = Shader.PropertyToID("_MatrixMV");
             public static readonly int MatrixVP = Shader.PropertyToID("_MatrixVP");
+            public static readonly int MatrixP = Shader.PropertyToID("_MatrixP");
             public static readonly int MatrixObjectToWorld = Shader.PropertyToID("_MatrixObjectToWorld");
             public static readonly int MatrixWorldToObject = Shader.PropertyToID("_MatrixWorldToObject");
             public static readonly int VecScreenParams = Shader.PropertyToID("_VecScreenParams");
@@ -143,6 +150,7 @@ namespace GaussianSplatting.Runtime
             public static readonly int IsStereo = Shader.PropertyToID("_IsStereo");
             public static readonly int ViewProjMatrixLeft = Shader.PropertyToID("_ViewProjMatrixLeft");
             public static readonly int ViewProjMatrixRight = Shader.PropertyToID("_ViewProjMatrixRight");
+            public static readonly int StereoEyeIndex = Shader.PropertyToID("_StereoEyeIndex");
         }
 
         // Forwarding properties for backward compatibility with Editor code
@@ -444,25 +452,50 @@ namespace GaussianSplatting.Runtime
                 _sorterArgs.resources = GpuSorting.SupportResources.Load((uint)count);
         }
 
+        private static bool _kernelDiagLogged;
+        private static bool _stereoMatrixLogged;
+
         internal bool TryFindSupportedKernel(string kernelName, out int kernelIndex)
         {
             kernelIndex = -1;
             if (csSplatUtilities == null || string.IsNullOrEmpty(kernelName))
+            {
+                if (!_kernelDiagLogged)
+                    Debug.LogWarning($"[GaussianSplat][Kernel] {kernelName}: csSplatUtilities is NULL");
                 return false;
+            }
             if (_kernelIndexCache.TryGetValue(kernelName, out kernelIndex))
-                return csSplatUtilities.IsSupported(kernelIndex);
+            {
+                bool supported = csSplatUtilities.IsSupported(kernelIndex);
+                if (!supported && !_kernelDiagLogged)
+                    Debug.LogWarning($"[GaussianSplat][Kernel] {kernelName}: cached idx={kernelIndex}, IsSupported=false");
+                return supported;
+            }
             try
             {
                 kernelIndex = csSplatUtilities.FindKernel(kernelName);
             }
-            catch
+            catch (System.Exception e)
             {
+                if (!_kernelDiagLogged)
+                    Debug.LogWarning($"[GaussianSplat][Kernel] {kernelName}: FindKernel threw {e.Message}");
                 return false;
             }
             if (kernelIndex < 0)
+            {
+                if (!_kernelDiagLogged)
+                    Debug.LogWarning($"[GaussianSplat][Kernel] {kernelName}: FindKernel returned {kernelIndex}");
                 return false;
+            }
             if (!csSplatUtilities.IsSupported(kernelIndex))
+            {
+                if (!_kernelDiagLogged)
+                {
+                    _kernelDiagLogged = true;
+                    Debug.LogWarning($"[GaussianSplat][Kernel] {kernelName}: idx={kernelIndex}, IsSupported=false on {SystemInfo.graphicsDeviceType}");
+                }
                 return false;
+            }
             _kernelIndexCache[kernelName] = kernelIndex;
             return true;
         }
@@ -478,9 +511,9 @@ namespace GaussianSplatting.Runtime
 
         public void EnsureSorterAndRegister()
         {
-            if (_sorter == null && ResourcesAreSetUp)
+            if (_sorter == null && ResourcesAreSetUp && csSplatSort != null)
             {
-                _sorter = new GpuSorting(csSplatUtilities);
+                _sorter = new GpuSorting(csSplatSort);
             }
 
             if (!_registered && ResourcesAreSetUp)
@@ -493,11 +526,23 @@ namespace GaussianSplatting.Runtime
         private void OnEnable()
         {
             _frameCounter = 0;
+            Debug.Log($"[GaussianSplat][Renderer] OnEnable: " +
+                      $"asset={(splatAsset != null ? splatAsset.name : "NULL")}, " +
+                      $"hasValidAsset={HasValidAsset}, " +
+                      $"resourcesAreSetUp={ResourcesAreSetUp}, " +
+                      $"csUtilities={(csSplatUtilities != null ? "OK" : "NULL")}, " +
+                      $"computeSupported={SystemInfo.supportsComputeShaders}");
+
             if (!ResourcesAreSetUp)
                 return;
 
             EnsureSorterAndRegister();
             CreateResourcesForAsset();
+            Debug.Log($"[GaussianSplat][Renderer] Resources created: " +
+                      $"splatCount={_splatCount}, " +
+                      $"gpuPos={(_gpuPosData != null ? "OK" : "NULL")}, " +
+                      $"gpuView={(_gpuView != null ? "OK" : "NULL")}, " +
+                      $"registered={_registered}");
         }
 
         internal bool SetAssetDataOnCS(CommandBuffer cmb, KernelIndices kernel, out int kernelIndex)
@@ -619,8 +664,16 @@ namespace GaussianSplatting.Runtime
             if (!SetAssetDataOnCS(cmb, KernelIndices.CalcViewData, out int kernelIndex))
                 return false;
 
+            // Use renderIntoTexture=true: we always render to an intermediate RT,
+            // so the VP must include Metal's Y-flip for correct orientation.
+            // Do NOT use SetViewProjectionMatrices — it does NOT update UNITY_MATRIX_VP
+            // for compute dispatches on Metal/visionOS (confirmed via diagnostics).
+            // Also avoid SetViewProjectionMatrices to prevent corrupting Unity's
+            // stereo rendering state (which caused mesh left/right eye swap).
+            Matrix4x4 gpuProj = GL.GetGPUProjectionMatrix(cam.projectionMatrix, true);
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixMV, matView * matO2W);
-            cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixVP, GL.GetGPUProjectionMatrix(cam.projectionMatrix, false) * matView);
+            cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixVP, gpuProj * matView);
+            cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixP, gpuProj);
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixObjectToWorld, matO2W);
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixWorldToObject, matW2O);
 
@@ -630,28 +683,9 @@ namespace GaussianSplatting.Runtime
                              XRSettings.stereoRenderingMode == XRSettings.StereoRenderingMode.SinglePassMultiview) &&
                             !Application.isEditor;
 
-            if (isStereo)
-            {
-                Matrix4x4 stereoViewLeft = cam.GetStereoViewMatrix(Camera.StereoscopicEye.Left);
-                Matrix4x4 stereoProjLeft = GL.GetGPUProjectionMatrix(
-                    cam.GetStereoProjectionMatrix(Camera.StereoscopicEye.Left), true);
-                cmb.SetComputeMatrixParam(csSplatUtilities, Props.ViewProjMatrixLeft,
-                    stereoProjLeft * stereoViewLeft);
-
-                Matrix4x4 stereoViewRight = cam.GetStereoViewMatrix(Camera.StereoscopicEye.Right);
-                Matrix4x4 stereoProjRight = GL.GetGPUProjectionMatrix(
-                    cam.GetStereoProjectionMatrix(Camera.StereoscopicEye.Right), true);
-                cmb.SetComputeMatrixParam(csSplatUtilities, Props.ViewProjMatrixRight,
-                    stereoProjRight * stereoViewRight);
-
-                cmb.SetComputeIntParam(csSplatUtilities, Props.IsStereo, 1);
-            }
-            else
-            {
-                cmb.SetComputeIntParam(csSplatUtilities, Props.IsStereo, 0);
-            }
-
             cmb.SetComputeVectorParam(csSplatUtilities, Props.VecScreenParams, screenPar);
+            // Also set as global so the render shader can use the same screen params
+            cmb.SetGlobalVector(Props.VecScreenParams, screenPar);
             cmb.SetComputeVectorParam(csSplatUtilities, Props.VecWorldSpaceCameraPos, camPos);
             cmb.SetComputeFloatParam(csSplatUtilities, Props.SplatScale, splatScale);
             cmb.SetComputeFloatParam(csSplatUtilities, Props.SplatOpacityScale, opacityScale);
@@ -660,7 +694,73 @@ namespace GaussianSplatting.Runtime
 
             csSplatUtilities.GetKernelThreadGroupSizes(kernelIndex, out uint gsX, out _, out _);
             int dispatchCount = EffectiveSplatCount;
-            cmb.DispatchCompute(csSplatUtilities, kernelIndex, (dispatchCount + (int)gsX - 1)/(int)gsX, 1, 1);
+            int groupCount = (dispatchCount + (int)gsX - 1) / (int)gsX;
+
+            if (isStereo)
+            {
+                // Dispatch per-eye with explicit matrix params via SetComputeMatrixParam.
+                // Do NOT use SetViewProjectionMatrices — confirmed it does not update
+                // UNITY_MATRIX_VP/P for compute dispatches on Metal.
+                cmb.SetComputeIntParam(csSplatUtilities, Props.IsStereo, 1);
+
+                for (int eye = 0; eye < 2; eye++)
+                {
+                    var stereoEye = eye == 0
+                        ? Camera.StereoscopicEye.Left
+                        : Camera.StereoscopicEye.Right;
+                    Matrix4x4 stereoView = cam.GetStereoViewMatrix(stereoEye);
+                    Matrix4x4 stereoProj = cam.GetStereoProjectionMatrix(stereoEye);
+
+                    // Apply stereo FOV scale override: adjust m00/m11 to narrow/widen FOV
+                    // while preserving asymmetric frustum offsets (m02/m12).
+                    // >1 = narrower FOV (zoom in), <1 = wider FOV (zoom out).
+                    if (Mathf.Abs(stereoFovScale - 1.0f) > 0.001f)
+                    {
+                        stereoProj.m00 *= stereoFovScale;
+                        stereoProj.m11 *= stereoFovScale;
+                    }
+
+                    Matrix4x4 stereoGpuProj = GL.GetGPUProjectionMatrix(stereoProj, true);
+
+                    cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixVP, stereoGpuProj * stereoView);
+                    cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixP, stereoGpuProj);
+                    cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixMV, stereoView * matO2W);
+                    cmb.SetComputeIntParam(csSplatUtilities, Props.StereoEyeIndex, eye);
+
+                    cmb.DispatchCompute(csSplatUtilities, kernelIndex, groupCount, 1, 1);
+                }
+
+                if (!_stereoMatrixLogged)
+                {
+                    _stereoMatrixLogged = true;
+                    Matrix4x4 rawProjLeft = cam.GetStereoProjectionMatrix(Camera.StereoscopicEye.Left);
+                    Matrix4x4 stereoGpuLeft = GL.GetGPUProjectionMatrix(rawProjLeft, true);
+                    Matrix4x4 stereoGpuLeftNoRT = GL.GetGPUProjectionMatrix(rawProjLeft, false);
+                    Debug.Log($"[GaussianSplat][Stereo] Using explicit _MatrixVP/_MatrixP");
+                    // Full 4x4 stereo GPU projection — each row on a separate log to avoid truncation
+                    Debug.Log($"[GaussianSplat][Stereo] StereoGpuProj(RT=true) row0=[{stereoGpuLeft.m00:F4}, {stereoGpuLeft.m01:F4}, {stereoGpuLeft.m02:F4}, {stereoGpuLeft.m03:F4}]");
+                    Debug.Log($"[GaussianSplat][Stereo] StereoGpuProj(RT=true) row1=[{stereoGpuLeft.m10:F4}, {stereoGpuLeft.m11:F4}, {stereoGpuLeft.m12:F4}, {stereoGpuLeft.m13:F4}]");
+                    Debug.Log($"[GaussianSplat][Stereo] StereoGpuProj(RT=true) row2=[{stereoGpuLeft.m20:F4}, {stereoGpuLeft.m21:F4}, {stereoGpuLeft.m22:F4}, {stereoGpuLeft.m23:F4}]");
+                    Debug.Log($"[GaussianSplat][Stereo] StereoGpuProj(RT=true) row3=[{stereoGpuLeft.m30:F4}, {stereoGpuLeft.m31:F4}, {stereoGpuLeft.m32:F4}, {stereoGpuLeft.m33:F4}]");
+                    Debug.Log($"[GaussianSplat][Stereo] StereoGpuProj(RT=false) m00={stereoGpuLeftNoRT.m00:F4} m11={stereoGpuLeftNoRT.m11:F4}");
+                    Debug.Log($"[GaussianSplat][Stereo] StereoRawProj m00={rawProjLeft.m00:F4} m11={rawProjLeft.m11:F4} m02={rawProjLeft.m02:F4} m12={rawProjLeft.m12:F4}");
+                    Debug.Log($"[GaussianSplat][Stereo] MonoGpuProj  m00={gpuProj.m00:F4} m11={gpuProj.m11:F4}");
+                    Debug.Log($"[GaussianSplat][Stereo] screenParams=({screenPar.x},{screenPar.y}) cam.pixel=({screenW},{screenH}) eye=({eyeW},{eyeH})");
+                    Debug.Log($"[GaussianSplat][Stereo] cam.scaledPixel=({cam.scaledPixelWidth},{cam.scaledPixelHeight}) cam.fov={cam.fieldOfView:F1}");
+                    float absFocalX = screenPar.x * Mathf.Abs(stereoGpuLeft.m00) / 2;
+                    float absFocalY = screenPar.y * Mathf.Abs(stereoGpuLeft.m11) / 2;
+                    Debug.Log($"[GaussianSplat][Stereo] focalX={absFocalX:F1} focalY={absFocalY:F1} ratio={absFocalX / absFocalY:F3}");
+                    // Sort validity diagnostic
+                    bool sortValid = _sorter != null && _sorter.Valid;
+                    Debug.Log($"[GaussianSplat][Stereo] sorter={(sortValid ? "VALID" : "INVALID/NULL — rendering UNSORTED!")} " +
+                              $"csSplatSort={(csSplatSort != null ? "OK" : "NULL")}");
+                }
+            }
+            else
+            {
+                cmb.SetComputeIntParam(csSplatUtilities, Props.IsStereo, 0);
+                cmb.DispatchCompute(csSplatUtilities, kernelIndex, groupCount, 1, 1);
+            }
             return true;
         }
 
@@ -730,8 +830,11 @@ namespace GaussianSplatting.Runtime
             cmd.DispatchCompute(csSplatUtilities, kernelIndex, (EffectiveSplatCount + (int)gsX - 1)/(int)gsX, 1, 1);
 
             EnsureSorterAndRegister();
-            _sorterArgs.count = (uint)EffectiveSplatCount;
-            _sorter.Dispatch(cmd, _sorterArgs);
+            if (_sorter != null && _sorter.Valid)
+            {
+                _sorterArgs.count = (uint)EffectiveSplatCount;
+                _sorter.Dispatch(cmd, _sorterArgs);
+            }
             cmd.EndSample(ProfSort);
         }
 

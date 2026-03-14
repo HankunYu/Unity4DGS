@@ -123,7 +123,7 @@ namespace GaussianSplatting.Runtime
                 cache.tileSorterArgs.resources =
                     GpuSorting.SupportResources.Load((uint)GaussianSplatRenderSystem.GlobalOrderGroupCache.MaxTilePairs);
             }
-            _tileSorter ??= new GpuSorting(config.CsSplatUtilities);
+            _tileSorter ??= new GpuSorting(config.CsSplatSort);
 
             return true;
         }

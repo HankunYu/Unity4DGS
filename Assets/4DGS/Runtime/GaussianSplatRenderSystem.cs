@@ -104,6 +104,7 @@ namespace GaussianSplatting.Runtime
         }
 
         private readonly List<StereoRenderItem> _preparedItems = new();
+        public int PreparedItemCount => _preparedItems.Count;
 
         // ── Tile renderer ─────────────────────────────────────────────
         int _lastRetiredCleanupFrame = -1;
@@ -242,6 +243,8 @@ namespace GaussianSplatting.Runtime
             }
         }
 
+        private bool _gatherDiagLogged;
+
         // ReSharper disable once MemberCanBePrivate.Global - used by HDRP/URP features that are not always compiled
         public bool GatherSplatsForCamera(Camera cam)
         {
@@ -250,7 +253,16 @@ namespace GaussianSplatting.Runtime
 
             var config = Config;
             if (config == null || !config.ResourcesValid)
+            {
+                if (!_gatherDiagLogged)
+                {
+                    _gatherDiagLogged = true;
+                    Debug.LogWarning($"[GaussianSplat][Gather] FAILED: config={(config != null ? "found" : "NULL")}, " +
+                                    $"resourcesValid={(config != null ? config.ResourcesValid.ToString() : "N/A")}, " +
+                                    $"registeredSplats={_splats.Count}");
+                }
                 return false;
+            }
 
             EnsureMaterials();
 
@@ -264,7 +276,33 @@ namespace GaussianSplatting.Runtime
                 _activeSplats.Add((kvp.Key, kvp.Value));
             }
             if (_activeSplats.Count == 0)
+            {
+                if (!_gatherDiagLogged)
+                {
+                    _gatherDiagLogged = true;
+                    int total = _splats.Count;
+                    int active = 0, validAsset = 0, validSetup = 0;
+                    foreach (var kvp in _splats)
+                    {
+                        var gs = kvp.Key;
+                        if (gs == null) continue;
+                        if (gs.isActiveAndEnabled) active++;
+                        if (gs.HasValidAsset) validAsset++;
+                        if (gs.HasValidRenderSetup) validSetup++;
+                    }
+                    Debug.LogWarning($"[GaussianSplat][Gather] No active splats: registered={total}, " +
+                                    $"active={active}, validAsset={validAsset}, validSetup={validSetup}");
+                }
                 return false;
+            }
+
+            if (!_gatherDiagLogged)
+            {
+                _gatherDiagLogged = true;
+                Debug.Log($"[GaussianSplat][Gather] OK: {_activeSplats.Count} active splats, " +
+                          $"matSplats={(_matSplats != null ? "OK" : "NULL")}, " +
+                          $"matComposite={(_matComposite != null ? "OK" : "NULL")}");
+            }
 
             // sort them by order and depth from camera
             var camTr = cam.transform;
@@ -309,7 +347,11 @@ namespace GaussianSplatting.Runtime
         // Only supports per-object path (no global sort) for now.
         public Material PrepareSplats(Camera cam, CommandBuffer cmb)
         {
-            if (_hasRenderFence)
+            // Skip async fence on XR devices — visionOS Metal may stall on
+            // cross-frame AsyncGraphicsFence, blocking all subsequent GPU work.
+            bool useFence = Application.isEditor || !XRSettings.enabled;
+
+            if (_hasRenderFence && useFence)
                 cmb.WaitOnAsyncGraphicsFence(_lastRenderFence);
 
             _preparedItems.Clear();
@@ -372,10 +414,15 @@ namespace GaussianSplatting.Runtime
                 });
             }
 
-            _lastRenderFence = cmb.CreateAsyncGraphicsFence();
-            _hasRenderFence = true;
+            if (useFence)
+            {
+                _lastRenderFence = cmb.CreateAsyncGraphicsFence();
+                _hasRenderFence = true;
+            }
             return matComposite;
         }
+
+        private bool _stereoDrawLogged;
 
         // Draw all prepared items for a specific eye (0 = left, 1 = right).
         public void RenderPreparedSplats(CommandBuffer cmb, int eyeIndex)
@@ -385,11 +432,24 @@ namespace GaussianSplatting.Runtime
                 item.mpb.SetInteger(GaussianSplatRenderer.Props.EyeIndex, eyeIndex);
                 item.mpb.SetInteger(GaussianSplatRenderer.Props.IsStereo, eyeIndex >= 0 ? 1 : 0);
 
+                if (!_stereoDrawLogged)
+                {
+                    Debug.Log($"[GaussianSplat][Stereo] DrawProcedural: eye={eyeIndex}, " +
+                              $"instances={item.instanceCount}, indices={item.indexCount}, " +
+                              $"mat={item.displayMat?.name ?? "NULL"}, " +
+                              $"gpuView={item.gs.GpuView?.count ?? 0}, " +
+                              $"sortKeys={item.gs.GpuSortKeys?.count ?? 0}, " +
+                              $"indexBuf={(item.gs.GpuIndexBuffer != null ? "OK" : "NULL")}");
+                }
+
                 cmb.BeginSample(ProfDraw);
                 cmb.DrawProcedural(item.gs.GpuIndexBuffer, item.gs.transform.localToWorldMatrix,
                     item.displayMat, 0, item.topology, item.indexCount, item.instanceCount, item.mpb);
                 cmb.EndSample(ProfDraw);
             }
+
+            if (!_stereoDrawLogged && eyeIndex == 1)
+                _stereoDrawLogged = true;
         }
 
         private bool CanUseGlobalSortPath()
@@ -411,7 +471,7 @@ namespace GaussianSplatting.Runtime
 
         private bool EnsureGlobalSorter()
         {
-            var cs = _config?.CsSplatUtilities;
+            var cs = _config?.CsSplatSort;
             if (cs == null) return false;
             if (_globalSorter == null || _globalSorterShader != cs)
             {
@@ -631,6 +691,8 @@ namespace GaussianSplatting.Runtime
             return matComposite;
         }
 
+        private bool _perObjectDiagLogged;
+
         Material SortAndRenderSplatsPerObject(Camera cam, CommandBuffer cmb)
         {
             Material matComposite = _matComposite;
@@ -675,7 +737,14 @@ namespace GaussianSplatting.Runtime
                 bool calcSuccess = gs.CalcViewData(cmb, cam);
                 cmb.EndSample(ProfCalcView);
                 if (!calcSuccess)
+                {
+                    if (!_perObjectDiagLogged)
+                    {
+                        _perObjectDiagLogged = true;
+                        Debug.LogWarning($"[GaussianSplat][Draw] CalcViewData FAILED for {gs.name}");
+                    }
                     continue;
+                }
 
                 // draw
                 int indexCount = 6;
@@ -685,6 +754,16 @@ namespace GaussianSplatting.Runtime
                     indexCount = 36;
                 if (_config.renderMode == GaussianSplatRenderMode.DebugChunkBounds)
                     instanceCount = gs.GpuChunksValid ? gs.GpuChunksBuffer.count : 0;
+
+                if (!_perObjectDiagLogged)
+                {
+                    _perObjectDiagLogged = true;
+                    Debug.Log($"[GaussianSplat][Draw] DrawProcedural: instances={instanceCount}, " +
+                              $"indices={indexCount}, mat={displayMat.name}, " +
+                              $"gpuView={gs.GpuView?.count ?? 0}, " +
+                              $"sortKeys={gs.GpuSortKeys?.count ?? 0}, " +
+                              $"composite={(_matComposite != null ? _matComposite.shader.name : "NULL")}");
+                }
 
                 cmb.BeginSample(ProfDraw);
                 cmb.DrawProcedural(gs.GpuIndexBuffer, matrix, displayMat, 0, topology, indexCount, instanceCount, mpb);

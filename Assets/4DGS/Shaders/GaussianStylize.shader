@@ -14,7 +14,6 @@ CGPROGRAM
 #pragma vertex vert
 #pragma fragment fragStylize
 #pragma require compute
-#pragma use_dxc
 #include "UnityCG.cginc"
 
 struct v2f
@@ -274,7 +273,6 @@ CGPROGRAM
 #pragma vertex vert
 #pragma fragment fragCopy
 #pragma require compute
-#pragma use_dxc
 #include "UnityCG.cginc"
 
 struct v2f

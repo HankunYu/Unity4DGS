@@ -15,7 +15,6 @@ CGPROGRAM
 #pragma vertex vert
 #pragma fragment frag
 #pragma require compute
-#pragma use_dxc
 
 #include "UnityCG.cginc"
 #include "GaussianSplatting.hlsl"

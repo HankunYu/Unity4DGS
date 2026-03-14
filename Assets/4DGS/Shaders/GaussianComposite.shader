@@ -14,9 +14,14 @@ CGPROGRAM
 #pragma vertex vert
 #pragma fragment frag
 #pragma require compute
-#pragma use_dxc
 #pragma require 2darray
-#pragma multi_compile_local _ UNITY_SINGLE_PASS_STEREO STEREO_INSTANCING_ON STEREO_MULTIVIEW_ON
+// Use custom keyword instead of Unity stereo instancing macros.
+// Unity's STEREO_INSTANCING_ON pulls in UnityInstancing.cginc which assigns to
+// const-qualified unity_StereoEyeIndex — a Metal compiler error.
+// NOTE: Must be global (not _local) so commandBuffer.EnableShaderKeyword works
+// in the render graph — Material.EnableKeyword is CPU-immediate and gets
+// disabled before the GPU executes the deferred draw commands.
+#pragma multi_compile _ GAUSSIAN_STEREO
 
 #include "UnityCG.cginc"
 
@@ -33,20 +38,31 @@ v2f vert (uint vtxID : SV_VertexID)
     return o;
 }
 
-#if defined(UNITY_SINGLE_PASS_STEREO) || defined(STEREO_INSTANCING_ON) || defined(STEREO_MULTIVIEW_ON)
-UNITY_DECLARE_TEX2DARRAY(_GaussianSplatRT);
+#if defined(GAUSSIAN_STEREO)
+Texture2DArray _GaussianSplatRT;
 #else
 Texture2D _GaussianSplatRT;
 #endif
 
+float4 _VecScreenParams;
 int _CustomStereoEyeIndex;
+
+// DEBUG: set to 1 to show UV gradient instead of splats (viewport mapping test)
+#define DEBUG_COMPOSITE_UV 0
 
 half4 frag (v2f i) : SV_Target
 {
+    #if DEBUG_COMPOSITE_UV
+        // Visual diagnostic: red/green gradient across full viewport.
+        // If this gradient fills the entire VR view, composite mapping is correct.
+        // If it only fills a portion, there's a viewport/scissor mismatch.
+        half2 uv = i.vertex.xy / _VecScreenParams.xy;
+        return half4(uv.x, uv.y, 0.2, 1);
+    #endif
+
     half4 col;
-    #if defined(UNITY_SINGLE_PASS_STEREO) || defined(STEREO_INSTANCING_ON) || defined(STEREO_MULTIVIEW_ON)
-        float2 normalizedUV = float2(i.vertex.x / _ScreenParams.x, i.vertex.y / _ScreenParams.y);
-        col = UNITY_SAMPLE_TEX2DARRAY(_GaussianSplatRT, float3(normalizedUV, _CustomStereoEyeIndex));
+    #if defined(GAUSSIAN_STEREO)
+        col = _GaussianSplatRT.Load(int4(i.vertex.xy, _CustomStereoEyeIndex, 0));
     #else
         col = _GaussianSplatRT.Load(int3(i.vertex.xy, 0));
     #endif

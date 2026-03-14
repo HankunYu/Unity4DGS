@@ -141,7 +141,8 @@ namespace GaussianSplatting.Runtime
 
         public void Dispatch(CommandBuffer cmd, Args args)
         {
-            Assert.IsTrue(Valid);
+            if (!Valid)
+                return;
 
             GraphicsBuffer srcKeyBuffer = args.inputKeys;
             GraphicsBuffer srcPayloadBuffer = args.inputValues;

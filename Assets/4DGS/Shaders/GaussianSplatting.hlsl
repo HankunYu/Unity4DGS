@@ -58,20 +58,27 @@ float3 CalcCovariance2D(float3 worldPos, float3 cov3d0, float3 cov3d1, float4x4 
     float4x4 viewMatrix = matrixV;
     float3 viewPos = mul(viewMatrix, float4(worldPos, 1)).xyz;
 
-    // this is needed in order for splats that are visible in view but clipped "quite a lot" to work
-    float aspect = matrixP._m00 / matrixP._m11;
-    float tanFovX = rcp(matrixP._m00);
-    float tanFovY = rcp(matrixP._m11 * aspect);
+    // Clamp view-space positions for splats near frustum edges to avoid
+    // extreme covariance values. Use abs() because Metal render-to-texture
+    // Y-flip makes m11 negative.
+    float absM00 = abs(matrixP._m00);
+    float absM11 = abs(matrixP._m11);
+    float tanFovX = rcp(absM00);
+    float tanFovY = rcp(absM11);
     float limX = 1.3 * tanFovX;
     float limY = 1.3 * tanFovY;
     viewPos.x = clamp(viewPos.x / viewPos.z, -limX, limX) * viewPos.z;
     viewPos.y = clamp(viewPos.y / viewPos.z, -limY, limY) * viewPos.z;
 
-    float focal = screenParams.x * matrixP._m00 / 2;
+    // Separate focal lengths per axis — critical for asymmetric projections
+    // (e.g. Vision Pro where focalX != focalY). Original CUDA reference uses
+    // separate focal_x / focal_y in the Jacobian.
+    float focalX = screenParams.x * absM00 / 2;
+    float focalY = screenParams.y * absM11 / 2;
 
     float3x3 J = float3x3(
-        focal / viewPos.z, 0, -(focal * viewPos.x) / (viewPos.z * viewPos.z),
-        0, focal / viewPos.z, -(focal * viewPos.y) / (viewPos.z * viewPos.z),
+        focalX / viewPos.z, 0, -(focalX * viewPos.x) / (viewPos.z * viewPos.z),
+        0, focalY / viewPos.z, -(focalY * viewPos.y) / (viewPos.z * viewPos.z),
         0, 0, 0
     );
     float3x3 W = (float3x3)viewMatrix;
