@@ -17,7 +17,6 @@ namespace GaussianSplatting.Editor
         SerializedProperty m_PropSHOrder;
         SerializedProperty m_PropSHOnly;
         SerializedProperty m_PropSortNthFrame;
-        SerializedProperty m_PropStereoFovScale;
 
         int m_CameraIndex;
 
@@ -43,7 +42,6 @@ namespace GaussianSplatting.Editor
             m_PropSHOrder = serializedObject.FindProperty("shOrder");
             m_PropSHOnly = serializedObject.FindProperty("shOnly");
             m_PropSortNthFrame = serializedObject.FindProperty("sortNthFrame");
-            m_PropStereoFovScale = serializedObject.FindProperty("stereoFovScale");
 
             s_AllEditors.Add(this);
         }
@@ -82,11 +80,6 @@ namespace GaussianSplatting.Editor
             EditorGUILayout.PropertyField(m_PropSHOrder);
             EditorGUILayout.PropertyField(m_PropSHOnly);
             EditorGUILayout.PropertyField(m_PropSortNthFrame);
-
-            // VR Stereo Override
-            EditorGUILayout.Space();
-            GUILayout.Label("VR Stereo Override", EditorStyles.boldLabel);
-            EditorGUILayout.PropertyField(m_PropStereoFovScale);
 
             // Validation
             bool validAndEnabled = gs && gs.enabled && gs.gameObject.activeInHierarchy && gs.HasValidAsset;

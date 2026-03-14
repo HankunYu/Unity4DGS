@@ -47,19 +47,8 @@ Texture2D _GaussianSplatRT;
 float4 _VecScreenParams;
 int _CustomStereoEyeIndex;
 
-// DEBUG: set to 1 to show UV gradient instead of splats (viewport mapping test)
-#define DEBUG_COMPOSITE_UV 0
-
 half4 frag (v2f i) : SV_Target
 {
-    #if DEBUG_COMPOSITE_UV
-        // Visual diagnostic: red/green gradient across full viewport.
-        // If this gradient fills the entire VR view, composite mapping is correct.
-        // If it only fills a portion, there's a viewport/scissor mismatch.
-        half2 uv = i.vertex.xy / _VecScreenParams.xy;
-        return half4(uv.x, uv.y, 0.2, 1);
-    #endif
-
     half4 col;
     #if defined(GAUSSIAN_STEREO)
         col = _GaussianSplatRT.Load(int4(i.vertex.xy, _CustomStereoEyeIndex, 0));

@@ -33,11 +33,6 @@ namespace GaussianSplatting.Runtime
         [Range(1,30)] [Tooltip("Sort splats only every N frames")]
         [FormerlySerializedAs("m_SortNthFrame")] public int sortNthFrame = 1;
 
-        [Header("VR Stereo Override")]
-        [Range(0.5f, 5.0f)]
-        [Tooltip("Scale factor for stereo projection FOV. >1 narrows FOV (zoom in), <1 widens FOV (zoom out). Adjusts m00/m11 of the stereo projection matrix while preserving asymmetric offsets.")]
-        public float stereoFovScale = 1.0f;
-
         public GaussianCutoutManager CutoutManager => GetComponent<GaussianCutoutManager>();
 
         // Set by GaussianCutoutManager: cutout data for CalcViewData
@@ -452,50 +447,25 @@ namespace GaussianSplatting.Runtime
                 _sorterArgs.resources = GpuSorting.SupportResources.Load((uint)count);
         }
 
-        private static bool _kernelDiagLogged;
-        private static bool _stereoMatrixLogged;
-
         internal bool TryFindSupportedKernel(string kernelName, out int kernelIndex)
         {
             kernelIndex = -1;
             if (csSplatUtilities == null || string.IsNullOrEmpty(kernelName))
-            {
-                if (!_kernelDiagLogged)
-                    Debug.LogWarning($"[GaussianSplat][Kernel] {kernelName}: csSplatUtilities is NULL");
                 return false;
-            }
             if (_kernelIndexCache.TryGetValue(kernelName, out kernelIndex))
-            {
-                bool supported = csSplatUtilities.IsSupported(kernelIndex);
-                if (!supported && !_kernelDiagLogged)
-                    Debug.LogWarning($"[GaussianSplat][Kernel] {kernelName}: cached idx={kernelIndex}, IsSupported=false");
-                return supported;
-            }
+                return csSplatUtilities.IsSupported(kernelIndex);
             try
             {
                 kernelIndex = csSplatUtilities.FindKernel(kernelName);
             }
-            catch (System.Exception e)
+            catch (System.Exception)
             {
-                if (!_kernelDiagLogged)
-                    Debug.LogWarning($"[GaussianSplat][Kernel] {kernelName}: FindKernel threw {e.Message}");
                 return false;
             }
             if (kernelIndex < 0)
-            {
-                if (!_kernelDiagLogged)
-                    Debug.LogWarning($"[GaussianSplat][Kernel] {kernelName}: FindKernel returned {kernelIndex}");
                 return false;
-            }
             if (!csSplatUtilities.IsSupported(kernelIndex))
-            {
-                if (!_kernelDiagLogged)
-                {
-                    _kernelDiagLogged = true;
-                    Debug.LogWarning($"[GaussianSplat][Kernel] {kernelName}: idx={kernelIndex}, IsSupported=false on {SystemInfo.graphicsDeviceType}");
-                }
                 return false;
-            }
             _kernelIndexCache[kernelName] = kernelIndex;
             return true;
         }
@@ -526,23 +496,12 @@ namespace GaussianSplatting.Runtime
         private void OnEnable()
         {
             _frameCounter = 0;
-            Debug.Log($"[GaussianSplat][Renderer] OnEnable: " +
-                      $"asset={(splatAsset != null ? splatAsset.name : "NULL")}, " +
-                      $"hasValidAsset={HasValidAsset}, " +
-                      $"resourcesAreSetUp={ResourcesAreSetUp}, " +
-                      $"csUtilities={(csSplatUtilities != null ? "OK" : "NULL")}, " +
-                      $"computeSupported={SystemInfo.supportsComputeShaders}");
 
             if (!ResourcesAreSetUp)
                 return;
 
             EnsureSorterAndRegister();
             CreateResourcesForAsset();
-            Debug.Log($"[GaussianSplat][Renderer] Resources created: " +
-                      $"splatCount={_splatCount}, " +
-                      $"gpuPos={(_gpuPosData != null ? "OK" : "NULL")}, " +
-                      $"gpuView={(_gpuView != null ? "OK" : "NULL")}, " +
-                      $"registered={_registered}");
         }
 
         internal bool SetAssetDataOnCS(CommandBuffer cmb, KernelIndices kernel, out int kernelIndex)
@@ -711,15 +670,6 @@ namespace GaussianSplatting.Runtime
                     Matrix4x4 stereoView = cam.GetStereoViewMatrix(stereoEye);
                     Matrix4x4 stereoProj = cam.GetStereoProjectionMatrix(stereoEye);
 
-                    // Apply stereo FOV scale override: adjust m00/m11 to narrow/widen FOV
-                    // while preserving asymmetric frustum offsets (m02/m12).
-                    // >1 = narrower FOV (zoom in), <1 = wider FOV (zoom out).
-                    if (Mathf.Abs(stereoFovScale - 1.0f) > 0.001f)
-                    {
-                        stereoProj.m00 *= stereoFovScale;
-                        stereoProj.m11 *= stereoFovScale;
-                    }
-
                     Matrix4x4 stereoGpuProj = GL.GetGPUProjectionMatrix(stereoProj, true);
 
                     cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixVP, stereoGpuProj * stereoView);
@@ -730,31 +680,6 @@ namespace GaussianSplatting.Runtime
                     cmb.DispatchCompute(csSplatUtilities, kernelIndex, groupCount, 1, 1);
                 }
 
-                if (!_stereoMatrixLogged)
-                {
-                    _stereoMatrixLogged = true;
-                    Matrix4x4 rawProjLeft = cam.GetStereoProjectionMatrix(Camera.StereoscopicEye.Left);
-                    Matrix4x4 stereoGpuLeft = GL.GetGPUProjectionMatrix(rawProjLeft, true);
-                    Matrix4x4 stereoGpuLeftNoRT = GL.GetGPUProjectionMatrix(rawProjLeft, false);
-                    Debug.Log($"[GaussianSplat][Stereo] Using explicit _MatrixVP/_MatrixP");
-                    // Full 4x4 stereo GPU projection — each row on a separate log to avoid truncation
-                    Debug.Log($"[GaussianSplat][Stereo] StereoGpuProj(RT=true) row0=[{stereoGpuLeft.m00:F4}, {stereoGpuLeft.m01:F4}, {stereoGpuLeft.m02:F4}, {stereoGpuLeft.m03:F4}]");
-                    Debug.Log($"[GaussianSplat][Stereo] StereoGpuProj(RT=true) row1=[{stereoGpuLeft.m10:F4}, {stereoGpuLeft.m11:F4}, {stereoGpuLeft.m12:F4}, {stereoGpuLeft.m13:F4}]");
-                    Debug.Log($"[GaussianSplat][Stereo] StereoGpuProj(RT=true) row2=[{stereoGpuLeft.m20:F4}, {stereoGpuLeft.m21:F4}, {stereoGpuLeft.m22:F4}, {stereoGpuLeft.m23:F4}]");
-                    Debug.Log($"[GaussianSplat][Stereo] StereoGpuProj(RT=true) row3=[{stereoGpuLeft.m30:F4}, {stereoGpuLeft.m31:F4}, {stereoGpuLeft.m32:F4}, {stereoGpuLeft.m33:F4}]");
-                    Debug.Log($"[GaussianSplat][Stereo] StereoGpuProj(RT=false) m00={stereoGpuLeftNoRT.m00:F4} m11={stereoGpuLeftNoRT.m11:F4}");
-                    Debug.Log($"[GaussianSplat][Stereo] StereoRawProj m00={rawProjLeft.m00:F4} m11={rawProjLeft.m11:F4} m02={rawProjLeft.m02:F4} m12={rawProjLeft.m12:F4}");
-                    Debug.Log($"[GaussianSplat][Stereo] MonoGpuProj  m00={gpuProj.m00:F4} m11={gpuProj.m11:F4}");
-                    Debug.Log($"[GaussianSplat][Stereo] screenParams=({screenPar.x},{screenPar.y}) cam.pixel=({screenW},{screenH}) eye=({eyeW},{eyeH})");
-                    Debug.Log($"[GaussianSplat][Stereo] cam.scaledPixel=({cam.scaledPixelWidth},{cam.scaledPixelHeight}) cam.fov={cam.fieldOfView:F1}");
-                    float absFocalX = screenPar.x * Mathf.Abs(stereoGpuLeft.m00) / 2;
-                    float absFocalY = screenPar.y * Mathf.Abs(stereoGpuLeft.m11) / 2;
-                    Debug.Log($"[GaussianSplat][Stereo] focalX={absFocalX:F1} focalY={absFocalY:F1} ratio={absFocalX / absFocalY:F3}");
-                    // Sort validity diagnostic
-                    bool sortValid = _sorter != null && _sorter.Valid;
-                    Debug.Log($"[GaussianSplat][Stereo] sorter={(sortValid ? "VALID" : "INVALID/NULL — rendering UNSORTED!")} " +
-                              $"csSplatSort={(csSplatSort != null ? "OK" : "NULL")}");
-                }
             }
             else
             {

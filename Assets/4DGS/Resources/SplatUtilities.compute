@@ -494,21 +494,6 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
         _MatrixVP, isDeleted, isCut, splatScale, opacityScale,
         animOpacityMul, animScaleMul, animColorBlend, animColorTint);
 
-    // DEBUG: set to 1 to replace splat color with NDC-based color coding.
-    // This verifies (a) compute shader recompiled, (b) clip position range.
-    // Red = NDC.x [0,1], Green = NDC.y [0,1], Blue = 0.3 constant.
-    #define DEBUG_NDC_COLOR 0
-    #if DEBUG_NDC_COLOR
-    if (view.pos.w > 0)
-    {
-        float2 ndc = view.pos.xy / view.pos.w; // [-1,1]
-        float2 uv = ndc * 0.5 + 0.5;           // [0,1]
-        half4 debugCol = half4((half)uv.x, (half)uv.y, 0.3h, 1.0h);
-        view.color.x = (f32tof16(debugCol.r) << 16) | f32tof16(debugCol.g);
-        view.color.y = (f32tof16(debugCol.b) << 16) | f32tof16(debugCol.a);
-    }
-    #endif
-
     // Apply selection highlight (negate alpha to signal selected state)
     if (isSelected)
     {

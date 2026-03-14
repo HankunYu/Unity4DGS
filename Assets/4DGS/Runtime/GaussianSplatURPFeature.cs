@@ -106,11 +106,6 @@ namespace GaussianSplatting.Runtime
                 internal bool IsXRActive;
             }
 
-            private static bool _stereoConditionsLogged;
-            private static bool _renderFuncLogged;
-            private static bool _stereoPrepareLogged;
-            private static bool _stereoCompositeLogged;
-
             public GsRenderPass(GaussianSplatURPFeature owner)
             {
                 _owner = owner;
@@ -137,15 +132,6 @@ namespace GaussianSplatting.Runtime
                 bool needsMultiplierReset = isSPI && isDevice;
 
                 // Log stereo detection conditions once for diagnostics
-                if (!_stereoConditionsLogged && xrEnabled)
-                {
-                    _stereoConditionsLogged = true;
-                    Debug.Log($"[GaussianSplat] Stereo detection: xrEnabled={xrEnabled}, " +
-                              $"stereoEnabled={stereoEnabled}, stereoMode={stereoMode}, isSPI={isSPI}, " +
-                              $"isDevice={isDevice}, texDim={texDim}, isTexArray={isTexArray}, " +
-                              $"isStereo={isStereo}");
-                }
-
                 using var builder = renderGraph.AddUnsafePass(ProfilerTag, out PassData passData);
 
                 RenderTextureDescriptor rtDesc = cameraData.cameraTargetDescriptor;
@@ -184,27 +170,6 @@ namespace GaussianSplatting.Runtime
                     using var _ = new ProfilingScope(commandBuffer, ProfileSampler);
                     var system = GaussianSplatRenderSystem.instance;
 
-                    if (!_renderFuncLogged)
-                    {
-                        _renderFuncLogged = true;
-                        int xrEyeW = XRSettings.eyeTextureWidth;
-                        int xrEyeH = XRSettings.eyeTextureHeight;
-                        var cam = data.CameraData.camera;
-                        var rtDesc = data.CameraData.cameraTargetDescriptor;
-                        Debug.Log($"[GaussianSplat][Render] isStereo={data.IsStereo}, " +
-                                  $"renderSize={data.RenderSize}, " +
-                                  $"rtDesc=({rtDesc.width}x{rtDesc.height} dim={rtDesc.dimension}), " +
-                                  $"xrEye=({xrEyeW}x{xrEyeH}), " +
-                                  $"cam.pixel=({cam.pixelWidth}x{cam.pixelHeight}), " +
-                                  $"cam.scaled=({cam.scaledPixelWidth}x{cam.scaledPixelHeight})");
-                        // CRITICAL: check if screenParams (from CalcViewData) matches RenderSize
-                        bool sizeMatch = data.RenderSize.x == xrEyeW && data.RenderSize.y == xrEyeH;
-                        if (!sizeMatch)
-                            Debug.LogWarning($"[GaussianSplat][Render] SIZE MISMATCH! " +
-                                             $"RenderSize={data.RenderSize} != xrEye=({xrEyeW}x{xrEyeH}). " +
-                                             $"Splat covariance may be computed for wrong resolution!");
-                    }
-
                     // When XR is active, URP sets instance multiplier to 2 for SPI.
                     // We handle rendering manually, so reset to 1 for all our draws.
                     if (data.IsXRActive)
@@ -214,14 +179,6 @@ namespace GaussianSplatting.Runtime
                     {
                         // Prepare once (sort + compute view data for both eyes)
                         Material matComposite = system.PrepareSplats(data.CameraData.camera, commandBuffer);
-
-                        if (!_stereoPrepareLogged)
-                        {
-                            _stereoPrepareLogged = true;
-                            int preparedCount = system.PreparedItemCount;
-                            Debug.Log($"[GaussianSplat][Stereo] PrepareSplats done: " +
-                                      $"preparedItems={preparedCount}, matComposite={(matComposite != null ? "OK" : "NULL")}");
-                        }
 
                         // Clear entire RT array
                         CoreUtils.SetRenderTarget(commandBuffer, data.GaussianSplatRT,
@@ -255,14 +212,6 @@ namespace GaussianSplatting.Runtime
                         if (matComposite != null)
                         {
                             commandBuffer.EnableShaderKeyword("GAUSSIAN_STEREO");
-
-                            if (!_stereoCompositeLogged)
-                            {
-                                _stereoCompositeLogged = true;
-                                Debug.Log($"[GaussianSplat][Stereo] Composite: " +
-                                          $"shader={matComposite.shader?.name ?? "NULL"}, " +
-                                          $"passCount={matComposite.passCount}");
-                            }
 
                             commandBuffer.BeginSample(GaussianSplatRenderSystem.ProfCompose);
                             commandBuffer.SetGlobalTexture(GaussianSplatRT, data.GaussianSplatRT);
@@ -403,8 +352,6 @@ namespace GaussianSplatting.Runtime
             };
         }
 
-        private bool _preCullDiagLogged;
-
         public override void OnCameraPreCull(ScriptableRenderer renderer, in CameraData cameraData)
         {
             _hasCamera = false;
@@ -413,21 +360,9 @@ namespace GaussianSplatting.Runtime
 
             var system = GaussianSplatRenderSystem.instance;
             if (!system.GatherSplatsForCamera(cameraData.camera))
-            {
-                if (!_preCullDiagLogged)
-                {
-                    _preCullDiagLogged = true;
-                    Debug.LogWarning($"[GaussianSplat][URP] GatherSplatsForCamera returned false for {cameraData.camera.name} (type={cameraData.camera.cameraType})");
-                }
                 return;
-            }
 
             _hasCamera = true;
-            if (!_preCullDiagLogged)
-            {
-                _preCullDiagLogged = true;
-                Debug.Log($"[GaussianSplat][URP] GatherSplatsForCamera OK for {cameraData.camera.name}");
-            }
         }
 
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)

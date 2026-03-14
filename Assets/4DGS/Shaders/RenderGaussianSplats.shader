@@ -32,35 +32,9 @@ float4 _VecScreenParams;
 uint _EyeIndex;
 uint _IsStereo;
 
-// DEBUG: set to 1 to render a colored dot grid covering NDC [-1,1].
-// Dots at the edges of the VR view = clip-to-viewport mapping is correct.
-// Dots only in center = viewport is larger than expected.
-#define DEBUG_RENDER_GRID 0
-
 v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
 {
     v2f o = (v2f)0;
-
-    #if DEBUG_RENDER_GRID
-    {
-        // Arrange first 10000 splats in a 100x100 grid covering full NDC
-        uint gridIdx = instID;
-        if (gridIdx >= 10000) { o.vertex = asfloat(0x7fc00000); return o; }
-        float2 gridUV = float2(gridIdx % 100, gridIdx / 100) / 99.0; // [0,1]
-        float2 ndc = gridUV * 2.0 - 1.0; // [-1,1]
-        uint idx = vtxID;
-        float2 quadPos = float2(idx&1, (idx>>1)&1) * 2.0 - 1.0;
-        o.pos = quadPos;
-        // Each dot is 8 pixels radius
-        float2 dotSize = 8.0 * 2.0 / _VecScreenParams.xy;
-        o.vertex = float4(ndc + quadPos * dotSize, 0.5, 1.0);
-        // Color: red=x, green=y, blue for border dots
-        bool border = gridUV.x < 0.02 || gridUV.x > 0.98 || gridUV.y < 0.02 || gridUV.y > 0.98;
-        o.col = half4(gridUV.x, gridUV.y, border ? 1.0 : 0.0, 1.0);
-        return o;
-    }
-    #endif
-
     instID = _OrderBuffer[instID];
 	uint viewIndex = _IsStereo ? instID * 2 + _EyeIndex : instID;
 	SplatViewData view = _SplatViewData[viewIndex];
