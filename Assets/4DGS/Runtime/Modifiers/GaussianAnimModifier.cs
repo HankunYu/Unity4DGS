@@ -25,5 +25,19 @@ namespace GaussianSplatting.Runtime
         /// Each modifier subclass interprets these differently.
         /// </summary>
         public abstract void FillParams(float time, out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3);
+
+        /// <summary>
+        /// Capture current serialized field values into 4 Vector4s for state machine snapshots.
+        /// Unlike <see cref="FillParams"/>, this captures raw field values without time injection
+        /// or normalization, making them suitable for interpolation between states.
+        /// </summary>
+        public abstract void CaptureParams(out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3);
+
+        /// <summary>
+        /// Apply parameter values from a state machine snapshot back to serialized fields.
+        /// Values may be interpolated between states, so enum-like or discrete values
+        /// should be rounded to the nearest valid value before assignment.
+        /// </summary>
+        public abstract void ApplyParams(Vector4 p0, Vector4 p1, Vector4 p2, Vector4 p3);
     }
 }
