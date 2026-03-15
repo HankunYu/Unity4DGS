@@ -17,6 +17,7 @@ namespace GaussianSplatting.Runtime
         private ComputeShader _animateShader;
         private GaussianSplatRenderer _renderer;
         private GraphicsBuffer _animOutputBuffer;
+        private GraphicsBuffer _activationBuffer;
 
         // Auto-collected from children each frame
         private readonly List<GaussianAnimVolume> _volumes = new();
@@ -41,6 +42,8 @@ namespace GaussianSplatting.Runtime
         private static readonly int PropAnimSplatChunks = Shader.PropertyToID("_AnimSplatChunks");
         private static readonly int PropAnimOutput = Shader.PropertyToID("_AnimOutput");
         private static readonly int PropAnimMatrixO2W = Shader.PropertyToID("_AnimMatrixObjectToWorld");
+        private static readonly int PropAnimActivation = Shader.PropertyToID("_AnimActivation");
+        private static readonly int PropAnimDeltaTime = Shader.PropertyToID("_AnimDeltaTime");
 
         // Must match struct sizes in compute shader
         const int VolumeSizeBytes = 64 + 16 + 16; // float4x4 + float4 + float4 = 96
@@ -67,6 +70,8 @@ namespace GaussianSplatting.Runtime
         {
             _animOutputBuffer?.Dispose();
             _animOutputBuffer = null;
+            _activationBuffer?.Dispose();
+            _activationBuffer = null;
             _volumeBuffer?.Dispose();
             _volumeBuffer = null;
             _modifierBuffer?.Dispose();
@@ -158,6 +163,16 @@ namespace GaussianSplatting.Runtime
                 {
                     name = "GaussianAnimOutput"
                 };
+
+                // Per-splat activation for trail persistence (1 float per splat)
+                _activationBuffer?.Dispose();
+                _activationBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, splatCount, 4)
+                {
+                    name = "GaussianAnimActivation"
+                };
+                // Zero-initialize so no residual trail on first frame
+                _activationBuffer.SetData(new float[splatCount]);
+
                 _lastSplatCount = splatCount;
             }
 
@@ -255,6 +270,9 @@ namespace GaussianSplatting.Runtime
             cs.SetBuffer(kernel, PropAnimSplatChunks, _renderer.GpuChunksBuffer);
 
             cs.SetMatrix(PropAnimMatrixO2W, transform.localToWorldMatrix);
+
+            cs.SetBuffer(kernel, PropAnimActivation, _activationBuffer);
+            cs.SetFloat(PropAnimDeltaTime, Time.deltaTime);
 
             cs.GetKernelThreadGroupSizes(kernel, out uint gsX, out _, out _);
             cs.Dispatch(kernel, (splatCount + (int)gsX - 1) / (int)gsX, 1, 1);

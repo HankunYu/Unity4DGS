@@ -15,6 +15,8 @@ namespace GaussianSplatting.Runtime
         public const int TypeWave = 1;
         public const int TypeWarp = 2;
         public const int TypeProperty = 3;
+        public const int TypeCaustic = 4;
+        public const int TypeWheatWave = 5;
 
         public abstract int ModifierType { get; }
 

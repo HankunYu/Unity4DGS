@@ -8,13 +8,15 @@ namespace GaussianSplatting.Editor
     [CanEditMultipleObjects]
     public class GaussianAnimVolumeEditor : UnityEditor.Editor
     {
-        private static readonly string[] ModifierNames = { "Dissolve", "Wave", "Warp", "Property" };
+        private static readonly string[] ModifierNames = { "Dissolve", "Wave", "Warp", "Property", "Caustic", "Wheat Wave" };
         private static readonly System.Type[] ModifierTypes =
         {
             typeof(DissolveModifier),
             typeof(WaveModifier),
             typeof(WarpModifier),
-            typeof(PropertyModifier)
+            typeof(PropertyModifier),
+            typeof(CausticModifier),
+            typeof(WheatWaveModifier)
         };
 
         public override void OnInspectorGUI()

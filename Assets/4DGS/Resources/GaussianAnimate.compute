@@ -70,6 +70,10 @@ StructuredBuffer<AnimSplatChunkInfo> _AnimSplatChunks;
 // Layout: float4(posOffset.xyz, opacityMul), float4(scaleMul, colorBlend, 0, 0), float4(colorTint)
 RWStructuredBuffer<float4> _AnimOutput; // 3 float4s per splat
 
+// Per-splat activation for trail persistence (persists across frames)
+RWStructuredBuffer<float> _AnimActivation;
+float _AnimDeltaTime;
+
 float4x4 _AnimMatrixObjectToWorld;
 
 // ── Noise functions ──
@@ -366,6 +370,110 @@ void ApplyWarp(float3 localPos, float weight, AnimModifierData mod,
     }
 }
 
+// Voronoi distance: returns distance to nearest cell center
+float Voronoi(float2 p)
+{
+    float2 ip = floor(p);
+    float2 fp = frac(p);
+    float minDist = 1.0;
+    for (int y = -1; y <= 1; y++)
+    {
+        for (int x = -1; x <= 1; x++)
+        {
+            float2 neighbor = float2(x, y);
+            float2 cell = ip + neighbor;
+            // Animated cell center
+            float2 cellCenter = float2(
+                Hash31(float3(cell, 0.0)),
+                Hash31(float3(cell, 1.0))
+            );
+            float d = length(neighbor + cellCenter - fp);
+            minDist = min(minDist, d);
+        }
+    }
+    return minDist;
+}
+
+// Caustic pattern 0: dual-layer Voronoi — realistic water-refraction light network
+float CausticVoronoi(float2 uv, float lineWidth, float t)
+{
+    float v1 = Voronoi(uv + float2(t * 0.3, t * 0.2));
+    float v2 = Voronoi(uv * 1.4 + float2(-t * 0.25, t * 0.35) + 37.0);
+    float edgeDist = min(v1, v2);
+    float c = 1.0 - smoothstep(0.0, lineWidth, edgeDist);
+    return pow(c, 1.5);
+}
+
+// Caustic pattern 1: layered sine interference — soft ripple rings
+float CausticSineWave(float2 uv, float lineWidth, float t)
+{
+    float c0 = sin(uv.x * 3.1 + uv.y * 1.7 + t * 1.3);
+    float c1 = sin(uv.x * 2.3 - uv.y * 3.5 + t * 0.9 + 2.1);
+    float c2 = sin(uv.x * -1.4 + uv.y * 4.1 + t * 1.1 + 4.3);
+    // Sharpen with abs and invert — creates bright lines at zero crossings
+    float edge = min(min(abs(c0), abs(c1)), abs(c2));
+    float c = 1.0 - smoothstep(0.0, lineWidth * 2.0, edge);
+    return c * c;
+}
+
+// Caustic pattern 2: animated noise — organic dappled light
+// noiseThreshold: higher = smaller/sparser bright spots (0~1)
+float CausticNoise(float2 uv, float lineWidth, float t, float noiseThreshold)
+{
+    float n1 = ValueNoise3D(float3(uv, t * 0.4));
+    float n2 = ValueNoise3D(float3(uv * 2.3 + 17.0, t * 0.6 + 5.0));
+    float combined = n1 * n2;
+    float edge0 = noiseThreshold * 0.5;
+    float edge1 = edge0 + lineWidth * 0.5;
+    float c = smoothstep(edge0, edge1, combined);
+    return c;
+}
+
+// Caustic: select algorithm and apply color modulation
+void ApplyCaustic(float3 worldPos, float weight, AnimModifierData mod,
+    inout float3 colorTint, inout float colorBlend)
+{
+    float speed = mod.params0.x;
+    float cellSize = mod.params0.y;
+    float lineWidth = mod.params0.z;
+    float intensity = mod.params0.w;
+    float3 tint = mod.params1.xyz;
+    float time = mod.params1.w;
+    int patternType = (int)mod.params2.x;
+    float noiseThreshold = mod.params2.y;
+
+    float t = time * speed;
+    float2 uv = worldPos.xz / max(cellSize, 0.01);
+
+    float caustic = 0;
+    if (patternType == 0)
+        caustic = CausticVoronoi(uv, lineWidth, t);
+    else if (patternType == 1)
+        caustic = CausticSineWave(uv, lineWidth, t);
+    else
+        caustic = CausticNoise(uv, lineWidth, t, noiseThreshold);
+
+    caustic = saturate(caustic * intensity);
+
+    float3 highlight = lerp(float3(1, 1, 1), tint, 0.7) * (1.0 + caustic);
+    colorTint *= lerp(float3(1, 1, 1), highlight, caustic * weight);
+    colorBlend = max(colorBlend, caustic * weight * 0.5);
+}
+
+// WheatWave: travelling wave displacement along Y, phase from XZ
+void ApplyWheatWave(float3 worldPos, float weight, AnimModifierData mod,
+    inout float3 posOffset)
+{
+    float2 waveDir = mod.params0.xy;
+    float freq = mod.params0.z;
+    float amplitude = mod.params0.w;
+    float speed = mod.params1.x;
+    float time = mod.params1.y;
+
+    float phase = dot(worldPos.xz, waveDir) * freq - time * speed;
+    posOffset.y += sin(phase) * amplitude * weight;
+}
+
 // Property: modify opacity, scale, color
 void ApplyProperty(float weight, AnimModifierData mod,
     inout float opacityMul, inout float scaleMul, inout float3 colorTint, inout float colorBlend)
@@ -401,6 +509,12 @@ void CSAnimateSplats(uint3 id : SV_DispatchThreadID)
     float3 colorTint = float3(1, 1, 1);
     float colorBlend = 0;
 
+    // Per-splat activation: tracks the peak volume weight over time,
+    // decaying gradually to produce a lingering trail effect.
+    float storedActivation = _AnimActivation[idx];
+    float maxTrailWeight = 0;
+    float maxTrailDuration = 0;
+
     // Process each modifier
     for (uint m = 0; m < _AnimModifierCount; m++)
     {
@@ -410,7 +524,17 @@ void CSAnimateSplats(uint3 id : SV_DispatchThreadID)
             continue;
 
         AnimVolumeData vol = _AnimVolumes[volIdx];
-        float weight = CalcVolumeWeight(worldPos, vol);
+        float liveWeight = CalcVolumeWeight(worldPos, vol);
+        float trailDuration = vol.shapeParams.z;
+
+        // Use trail-extended weight: either the live weight or the decaying activation
+        float weight = liveWeight;
+        if (trailDuration > 0)
+        {
+            maxTrailWeight = max(maxTrailWeight, liveWeight);
+            maxTrailDuration = max(maxTrailDuration, trailDuration);
+            weight = max(liveWeight, storedActivation);
+        }
 
         if (weight <= 0)
             continue;
@@ -434,6 +558,25 @@ void CSAnimateSplats(uint3 id : SV_DispatchThreadID)
         {
             ApplyProperty(weight, mod, opacityMul, scaleMul, colorTint, colorBlend);
         }
+        else if (mType == 4) // Caustic
+        {
+            ApplyCaustic(worldPos, weight, mod, colorTint, colorBlend);
+        }
+        else if (mType == 5) // WheatWave
+        {
+            ApplyWheatWave(worldPos, weight, mod, posOffset);
+        }
+    }
+
+    // Update stored activation: ramp up instantly, decay over trailDuration
+    if (maxTrailDuration > 0)
+    {
+        float newActivation = max(maxTrailWeight, storedActivation - _AnimDeltaTime / maxTrailDuration);
+        _AnimActivation[idx] = saturate(newActivation);
+    }
+    else
+    {
+        _AnimActivation[idx] = 0;
     }
 
     // Write output: 3 float4s per splat

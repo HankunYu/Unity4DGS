@@ -25,6 +25,10 @@ namespace GaussianSplatting.Runtime
         [Tooltip("Falloff distance at the volume boundary. 0 = hard edge, higher = softer gradient.")]
         public float falloff = 0.5f;
 
+        [Range(0f, 5f)]
+        [Tooltip("How long the effect lingers after the volume moves away (seconds). 0 = instant off.")]
+        public float trailDuration = 0f;
+
         /// <summary>
         /// GPU-uploadable data matching AnimVolumeData in the compute shader.
         /// </summary>
@@ -53,7 +57,7 @@ namespace GaussianSplatting.Runtime
             ShaderData sd = default;
             var tr = transform;
             sd.worldToLocal = tr.worldToLocalMatrix;
-            sd.shapeParams = new Vector4((float)shape, falloff, 0, 0);
+            sd.shapeParams = new Vector4((float)shape, falloff, trailDuration, 0);
 
             Vector3 scale = tr.lossyScale;
             if (shape == VolumeShape.Box)
