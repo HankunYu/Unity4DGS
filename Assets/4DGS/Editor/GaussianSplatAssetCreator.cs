@@ -85,7 +85,7 @@ namespace GaussianSplatting.Editor
         {
             EditorGUILayout.Space();
             GUILayout.Label("Input data", EditorStyles.boldLabel);
-            currentMode = (Mode)GUILayout.Toolbar((int)currentMode, new string[] { "单选", "批量" });
+            currentMode = (Mode)GUILayout.Toolbar((int)currentMode, new string[] { "Single", "Batch" });
             var rect = EditorGUILayout.GetControlRect(true);
             switch (currentMode)
             {
@@ -93,7 +93,7 @@ namespace GaussianSplatting.Editor
                     m_InputFile = m_FilePicker.PathFieldGUI(rect, new GUIContent("Input PLY/SPZ File"), m_InputFile, "ply,spz", "PointCloudFile");
                     break;
                 case Mode.Batch:
-                    m_InputFolder = m_FilePicker.PathFieldGUI(rect, new GUIContent("Intput Folder"), m_InputFolder, null, "GaussianAssetInputFolder");
+                    m_InputFolder = m_FilePicker.PathFieldGUI(rect, new GUIContent("Input Folder"), m_InputFolder, null, "GaussianAssetInputFolder");
                     break;
             }
             m_ImportCameras = EditorGUILayout.Toggle("Import Cameras", m_ImportCameras);
@@ -267,13 +267,24 @@ namespace GaussianSplatting.Editor
                 case Mode.Batch:
                     if (!Directory.Exists(m_InputFolder))
                     {
-                        Debug.LogWarning("文件夹路径无效：" + m_InputFolder);
+                        Debug.LogWarning("Invalid folder path: " + m_InputFolder);
                         break;
                     }
 
-                    string[] m_InputFiles = Directory.GetFiles(m_InputFolder, "*.ply", SearchOption.TopDirectoryOnly);
-                    Debug.Log(m_InputFiles.Length);
-                    foreach (string file in m_InputFiles)
+                    var plyFiles = Directory.GetFiles(m_InputFolder, "*.ply", SearchOption.TopDirectoryOnly);
+                    var spzFiles = Directory.GetFiles(m_InputFolder, "*.spz", SearchOption.TopDirectoryOnly);
+                    var inputFiles = new string[plyFiles.Length + spzFiles.Length];
+                    plyFiles.CopyTo(inputFiles, 0);
+                    spzFiles.CopyTo(inputFiles, plyFiles.Length);
+
+                    if (inputFiles.Length == 0)
+                    {
+                        Debug.LogWarning("No PLY or SPZ files found in: " + m_InputFolder);
+                        break;
+                    }
+
+                    Debug.Log($"Batch import: found {inputFiles.Length} files in {m_InputFolder}");
+                    foreach (string file in inputFiles)
                     {
                         m_InputFile = file;
                         CreateAssetSingle();
