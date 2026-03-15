@@ -39,6 +39,22 @@ namespace GaussianSplatting.Runtime
             p3 = Vector4.zero;
         }
 
+        public override void CaptureParams(out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3)
+        {
+            p0 = new Vector4(direction.x, direction.y, direction.z, strength);
+            p1 = new Vector4(noiseScale, noiseSpeed, 0, 0);
+            p2 = Vector4.zero;
+            p3 = Vector4.zero;
+        }
+
+        public override void ApplyParams(Vector4 p0, Vector4 p1, Vector4 p2, Vector4 p3)
+        {
+            direction = new Vector3(p0.x, p0.y, p0.z);
+            strength = p0.w;
+            noiseScale = p1.x;
+            noiseSpeed = p1.y;
+        }
+
         public void SetStrength(float targetStrength)
         {
             strength = targetStrength;

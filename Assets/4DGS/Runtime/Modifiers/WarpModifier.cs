@@ -44,5 +44,21 @@ namespace GaussianSplatting.Runtime
             p2 = new Vector4(time, 0, 0, 0);
             p3 = Vector4.zero;
         }
+
+        public override void CaptureParams(out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3)
+        {
+            p0 = new Vector4(axis.x, axis.y, axis.z, strength);
+            p1 = new Vector4(center.x, center.y, center.z, (float)warpType);
+            p2 = Vector4.zero;
+            p3 = Vector4.zero;
+        }
+
+        public override void ApplyParams(Vector4 p0, Vector4 p1, Vector4 p2, Vector4 p3)
+        {
+            axis = new Vector3(p0.x, p0.y, p0.z);
+            strength = p0.w;
+            center = new Vector3(p1.x, p1.y, p1.z);
+            warpType = (WarpType)Mathf.RoundToInt(p1.w);
+        }
     }
 }

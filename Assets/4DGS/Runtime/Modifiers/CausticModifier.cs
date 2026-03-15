@@ -50,5 +50,24 @@ namespace GaussianSplatting.Runtime
             p2 = new Vector4((float)pattern, noiseThreshold, 0, 0);
             p3 = Vector4.zero;
         }
+
+        public override void CaptureParams(out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3)
+        {
+            p0 = new Vector4(speed, cellSize, lineWidth, intensity);
+            p1 = new Vector4(tint.r, tint.g, tint.b, tint.a);
+            p2 = new Vector4((float)pattern, noiseThreshold, 0, 0);
+            p3 = Vector4.zero;
+        }
+
+        public override void ApplyParams(Vector4 p0, Vector4 p1, Vector4 p2, Vector4 p3)
+        {
+            speed = p0.x;
+            cellSize = p0.y;
+            lineWidth = p0.z;
+            intensity = p0.w;
+            tint = new Color(p1.x, p1.y, p1.z, p1.w);
+            pattern = (CausticPattern)Mathf.RoundToInt(p2.x);
+            noiseThreshold = p2.y;
+        }
     }
 }

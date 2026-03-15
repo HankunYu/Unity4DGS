@@ -36,5 +36,21 @@ namespace GaussianSplatting.Runtime
             p2 = Vector4.zero;
             p3 = Vector4.zero;
         }
+
+        public override void CaptureParams(out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3)
+        {
+            p0 = new Vector4(opacityMultiplier, scaleMultiplier, colorBlend, 0);
+            p1 = new Vector4(colorTint.r, colorTint.g, colorTint.b, colorTint.a);
+            p2 = Vector4.zero;
+            p3 = Vector4.zero;
+        }
+
+        public override void ApplyParams(Vector4 p0, Vector4 p1, Vector4 p2, Vector4 p3)
+        {
+            opacityMultiplier = p0.x;
+            scaleMultiplier = p0.y;
+            colorBlend = p0.z;
+            colorTint = new Color(p1.x, p1.y, p1.z, p1.w);
+        }
     }
 }

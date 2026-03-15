@@ -47,5 +47,22 @@ namespace GaussianSplatting.Runtime
             p2 = Vector4.zero;
             p3 = Vector4.zero;
         }
+
+        public override void CaptureParams(out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3)
+        {
+            p0 = new Vector4(waveAxis.x, waveAxis.y, waveAxis.z, amplitude);
+            p1 = new Vector4(frequency, speed, (float)waveType, 0);
+            p2 = Vector4.zero;
+            p3 = Vector4.zero;
+        }
+
+        public override void ApplyParams(Vector4 p0, Vector4 p1, Vector4 p2, Vector4 p3)
+        {
+            waveAxis = new Vector3(p0.x, p0.y, p0.z);
+            amplitude = p0.w;
+            frequency = p1.x;
+            speed = p1.y;
+            waveType = (WaveType)Mathf.RoundToInt(p1.z);
+        }
     }
 }

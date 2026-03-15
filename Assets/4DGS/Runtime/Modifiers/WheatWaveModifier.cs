@@ -34,5 +34,21 @@ namespace GaussianSplatting.Runtime
             p2 = Vector4.zero;
             p3 = Vector4.zero;
         }
+
+        public override void CaptureParams(out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3)
+        {
+            p0 = new Vector4(waveDirection.x, waveDirection.y, frequency, amplitude);
+            p1 = new Vector4(speed, 0, 0, 0);
+            p2 = Vector4.zero;
+            p3 = Vector4.zero;
+        }
+
+        public override void ApplyParams(Vector4 p0, Vector4 p1, Vector4 p2, Vector4 p3)
+        {
+            waveDirection = new Vector2(p0.x, p0.y);
+            frequency = p0.z;
+            amplitude = p0.w;
+            speed = p1.x;
+        }
     }
 }
