@@ -38,5 +38,10 @@ namespace GaussianSplatting.Runtime
             p2 = Vector4.zero;
             p3 = Vector4.zero;
         }
+
+        public void SetStrength(float targetStrength)
+        {
+            strength = targetStrength;
+        }
     }
 }
