@@ -3,6 +3,7 @@ using Unity.Collections.LowLevel.Unsafe;
 using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
+using UnityEngine.Serialization;
 
 namespace GaussianSplatting.Runtime
 {
@@ -13,10 +14,15 @@ namespace GaussianSplatting.Runtime
         public const int TextureWidth = 2048; // allows up to 32M splats on desktop GPU (2k width x 16k height)
         public const int MaxSplats = 8_600_000; // mostly due to 2GB GPU buffer size limit when exporting a splat (2GB / 248B is just over 8.6M)
 
+        [FormerlySerializedAs("m_FormatVersion"), FormerlySerializedAs("_formatVersion")]
         public int formatVersion;
+        [FormerlySerializedAs("m_SplatCount"), FormerlySerializedAs("_splatCount")]
         public int splatCount;
+        [FormerlySerializedAs("m_BoundsMin"), FormerlySerializedAs("_boundsMin")]
         public Vector3 boundsMin;
+        [FormerlySerializedAs("m_BoundsMax"), FormerlySerializedAs("_boundsMax")]
         public Vector3 boundsMax;
+        [FormerlySerializedAs("m_DataHash"), FormerlySerializedAs("_dataHash")]
         public Hash128 dataHash;
 
         // Match VECTOR_FMT_* in HLSL
@@ -194,18 +200,28 @@ namespace GaussianSplatting.Runtime
             return chunkCount * UnsafeUtility.SizeOf<ChunkInfo>();
         }
 
+        [FormerlySerializedAs("m_PosFormat"), FormerlySerializedAs("_posFormat")]
         public VectorFormat posFormat = VectorFormat.Norm11;
+        [FormerlySerializedAs("m_ScaleFormat"), FormerlySerializedAs("_scaleFormat")]
         public VectorFormat scaleFormat = VectorFormat.Norm11;
+        [FormerlySerializedAs("m_SHFormat"), FormerlySerializedAs("_shFormat")]
         public SHFormat shFormat = SHFormat.Norm11;
+        [FormerlySerializedAs("m_ColorFormat"), FormerlySerializedAs("_colorFormat")]
         public ColorFormat colorFormat;
 
+        [FormerlySerializedAs("m_PosData"), FormerlySerializedAs("_posData")]
         public TextAsset posData;
+        [FormerlySerializedAs("m_ColorData"), FormerlySerializedAs("_colorData")]
         public TextAsset colorData;
+        [FormerlySerializedAs("m_OtherData"), FormerlySerializedAs("_otherData")]
         public TextAsset otherData;
+        [FormerlySerializedAs("m_SHData"), FormerlySerializedAs("_shData")]
         public TextAsset shData;
         // Chunk data is optional (if data formats are fully lossless then there's no chunking)
+        [FormerlySerializedAs("m_ChunkData"), FormerlySerializedAs("_chunkData")]
         public TextAsset chunkData;
 
+        [FormerlySerializedAs("m_Cameras"), FormerlySerializedAs("_cameras")]
         public CameraInfo[] cameras;
 
         public struct ChunkInfo

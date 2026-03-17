@@ -8,6 +8,7 @@ using Unity.Profiling.LowLevel;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
+using UnityEngine.Serialization;
 using UnityEngine.XR;
 
 namespace GaussianSplatting.Runtime
@@ -15,21 +16,29 @@ namespace GaussianSplatting.Runtime
     [ExecuteInEditMode]
     public class GaussianSplatRenderer : MonoBehaviour
     {
+        [FormerlySerializedAs("m_Asset")]
         public GaussianSplatAsset splatAsset;
+        [FormerlySerializedAs("m_NextAsset")]
         public GaussianSplatAsset nextAsset;
 
         [Tooltip("Rendering order compared to other splats. Within same order splats are sorted by distance. Higher order splats render 'on top of' lower order splats.")]
+        [FormerlySerializedAs("m_RenderOrder")]
         public int renderOrder;
         [Range(0.1f, 2.0f)] [Tooltip("Additional scaling factor for the splats")]
+        [FormerlySerializedAs("m_SplatScale")]
         public float splatScale = 1.0f;
         [Range(0.05f, 20.0f)]
         [Tooltip("Additional scaling factor for opacity")]
+        [FormerlySerializedAs("m_OpacityScale")]
         public float opacityScale = 1.0f;
         [Range(0, 3)] [Tooltip("Spherical Harmonics order to use")]
+        [FormerlySerializedAs("m_SHOrder")]
         public int shOrder = 3;
         [Tooltip("Show only Spherical Harmonics contribution, using gray color")]
+        [FormerlySerializedAs("m_SHOnly")]
         public bool shOnly;
         [Range(1,30)] [Tooltip("Sort splats only every N frames")]
+        [FormerlySerializedAs("m_SortNthFrame")]
         public int sortNthFrame = 1;
 
         public GaussianCutoutManager CutoutManager => GetComponent<GaussianCutoutManager>();
