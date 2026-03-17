@@ -43,6 +43,14 @@ namespace GaussianSplatting.Runtime
 
         public override int ModifierType => TypeCaustic;
 
+        public override string[] GetParamLabels() => new[]
+        {
+            "Speed", "Cell Size", "Line Width", "Intensity",
+            "Tint R", "Tint G", "Tint B", "Tint A",
+            "Pattern", "Noise Threshold", "", "",
+            "", "", "", ""
+        };
+
         public override void FillParams(float time, out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3)
         {
             p0 = new Vector4(speed, cellSize, lineWidth, intensity);

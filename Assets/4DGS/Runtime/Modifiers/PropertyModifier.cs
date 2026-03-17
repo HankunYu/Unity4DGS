@@ -27,6 +27,14 @@ namespace GaussianSplatting.Runtime
 
         public override int ModifierType => TypeProperty;
 
+        public override string[] GetParamLabels() => new[]
+        {
+            "Opacity", "Scale", "Color Blend", "",
+            "Tint R", "Tint G", "Tint B", "Tint A",
+            "", "", "", "",
+            "", "", "", ""
+        };
+
         public override void FillParams(float time, out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3)
         {
             // p0: opacity multiplier, scale multiplier, color blend, unused

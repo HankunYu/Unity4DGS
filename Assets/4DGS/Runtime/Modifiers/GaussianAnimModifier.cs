@@ -17,8 +17,19 @@ namespace GaussianSplatting.Runtime
         public const int TypeProperty = 3;
         public const int TypeCaustic = 4;
         public const int TypeWheatWave = 5;
+        public const int TypeTurbulence = 6;
+
+        public const int ParamSlotCount = 16;
 
         public abstract int ModifierType { get; }
+
+        /// <summary>
+        /// Returns 16 human-readable labels for the parameter slots (4 Vector4s × 4 components).
+        /// Empty string means the slot is unused. Used by editors to display meaningful names
+        /// instead of generic p0.x, p0.y, etc.
+        /// Labels must match the packing order of <see cref="CaptureParams"/>.
+        /// </summary>
+        public virtual string[] GetParamLabels() => new string[ParamSlotCount];
 
         /// <summary>
         /// Pack modifier parameters into 4 Vector4s for GPU upload.

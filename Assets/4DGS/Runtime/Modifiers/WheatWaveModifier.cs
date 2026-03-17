@@ -24,6 +24,14 @@ namespace GaussianSplatting.Runtime
 
         public override int ModifierType => TypeWheatWave;
 
+        public override string[] GetParamLabels() => new[]
+        {
+            "Direction X", "Direction Y", "Frequency", "Amplitude",
+            "Speed", "", "", "",
+            "", "", "", "",
+            "", "", "", ""
+        };
+
         public override void FillParams(float time, out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3)
         {
             Vector2 dir = waveDirection.sqrMagnitude > 0.001f

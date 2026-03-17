@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+using System.Collections;
 using UnityEngine;
 
 namespace GaussianSplatting.Runtime
@@ -12,6 +13,8 @@ namespace GaussianSplatting.Runtime
     /// </summary>
     public class GaussianAnimVolume : MonoBehaviour
     {
+        private Vector3 _originalScale;
+        private Coroutine _scaleCoroutine;
         public enum VolumeShape
         {
             Box = 0,
@@ -73,6 +76,49 @@ namespace GaussianSplatting.Runtime
             }
 
             return sd;
+        }
+
+        /// <summary>
+        /// Shrink the volume to zero over duration seconds, then optionally disable the GameObject.
+        /// Trail persistence will handle the fade-out. Call from UnityEvent when tracking is lost.
+        /// </summary>
+        public void Release(float duration = 0.1f)
+        {
+            if (_scaleCoroutine != null)
+                StopCoroutine(_scaleCoroutine);
+            _originalScale = transform.localScale;
+            _scaleCoroutine = StartCoroutine(ScaleTo(Vector3.zero, duration, true));
+        }
+
+        /// <summary>
+        /// Restore the volume to its original scale over duration seconds.
+        /// Call from UnityEvent when tracking is regained.
+        /// </summary>
+        public void Restore(float duration = 0.1f)
+        {
+            if (_originalScale == Vector3.zero)
+                return;
+            gameObject.SetActive(true);
+            if (_scaleCoroutine != null)
+                StopCoroutine(_scaleCoroutine);
+            _scaleCoroutine = StartCoroutine(ScaleTo(_originalScale, duration, false));
+        }
+
+        private IEnumerator ScaleTo(Vector3 target, float duration, bool disableOnComplete)
+        {
+            Vector3 start = transform.localScale;
+            float elapsed = 0f;
+            while (elapsed < duration)
+            {
+                elapsed += Time.deltaTime;
+                float t = Mathf.Clamp01(elapsed / duration);
+                transform.localScale = Vector3.Lerp(start, target, t);
+                yield return null;
+            }
+            transform.localScale = target;
+            _scaleCoroutine = null;
+            if (disableOnComplete)
+                gameObject.SetActive(false);
         }
 
 #if UNITY_EDITOR

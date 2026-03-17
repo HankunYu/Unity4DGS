@@ -37,6 +37,14 @@ namespace GaussianSplatting.Runtime
 
         public override int ModifierType => TypeWave;
 
+        public override string[] GetParamLabels() => new[]
+        {
+            "Axis X", "Axis Y", "Axis Z", "Amplitude",
+            "Frequency", "Speed", "Wave Type", "",
+            "", "", "", "",
+            "", "", "", ""
+        };
+
         public override void FillParams(float time, out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3)
         {
             Vector3 axis = waveAxis.normalized;

@@ -460,6 +460,47 @@ void ApplyCaustic(float3 worldPos, float weight, AnimModifierData mod,
     colorBlend = max(colorBlend, caustic * weight * 0.5);
 }
 
+// Turbulence: fBm-based chaotic displacement with wind scrolling
+void ApplyTurbulence(float3 worldPos, float weight, AnimModifierData mod,
+    inout float3 posOffset)
+{
+    float strength = mod.params0.x;
+    float freq = mod.params0.y;
+    int octaves = (int)mod.params0.z;
+    float lacunarity = mod.params0.w;
+    float g = mod.params1.x;
+    float time = mod.params1.y;
+    float3 wind = mod.params2.xyz;
+
+    float3 samplePos = worldPos * freq + wind * time;
+
+    // fBm with 3 offset samples for independent xyz displacement
+    float3 disp = float3(0, 0, 0);
+    float amp = 1.0;
+    float f = 1.0;
+    float totalAmp = 0.0;
+
+    // Offsets to decorrelate the 3 channels
+    static const float3 offY = float3(127.1, 311.7, 74.7);
+    static const float3 offZ = float3(269.5, 183.3, 246.1);
+
+    [loop]
+    for (int i = 0; i < octaves; i++)
+    {
+        float3 p = samplePos * f;
+        disp.x += (ValueNoise3D(p) * 2.0 - 1.0) * amp;
+        disp.y += (ValueNoise3D(p + offY) * 2.0 - 1.0) * amp;
+        disp.z += (ValueNoise3D(p + offZ) * 2.0 - 1.0) * amp;
+        totalAmp += amp;
+        f *= lacunarity;
+        amp *= g;
+    }
+
+    // Normalize so output range stays consistent regardless of octave count
+    disp /= max(totalAmp, 0.001);
+    posOffset += disp * strength * weight;
+}
+
 // WheatWave: travelling wave displacement along Y, phase from XZ
 void ApplyWheatWave(float3 worldPos, float weight, AnimModifierData mod,
     inout float3 posOffset)
@@ -565,6 +606,10 @@ void CSAnimateSplats(uint3 id : SV_DispatchThreadID)
         else if (mType == 5) // WheatWave
         {
             ApplyWheatWave(worldPos, weight, mod, posOffset);
+        }
+        else if (mType == 6) // Turbulence
+        {
+            ApplyTurbulence(worldPos, weight, mod, posOffset);
         }
     }
 

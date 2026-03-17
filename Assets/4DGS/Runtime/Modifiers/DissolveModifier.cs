@@ -28,6 +28,14 @@ namespace GaussianSplatting.Runtime
 
         public override int ModifierType => TypeDissolve;
 
+        public override string[] GetParamLabels() => new[]
+        {
+            "Direction X", "Direction Y", "Direction Z", "Strength",
+            "Noise Scale", "Noise Speed", "", "",
+            "", "", "", "",
+            "", "", "", ""
+        };
+
         public override void FillParams(float time, out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3)
         {
             Vector3 dir = direction.normalized;

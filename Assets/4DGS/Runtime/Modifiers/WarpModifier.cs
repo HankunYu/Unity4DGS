@@ -33,6 +33,14 @@ namespace GaussianSplatting.Runtime
 
         public override int ModifierType => TypeWarp;
 
+        public override string[] GetParamLabels() => new[]
+        {
+            "Axis X", "Axis Y", "Axis Z", "Strength",
+            "Center X", "Center Y", "Center Z", "Warp Type",
+            "", "", "", "",
+            "", "", "", ""
+        };
+
         public override void FillParams(float time, out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3)
         {
             Vector3 ax = axis.normalized;

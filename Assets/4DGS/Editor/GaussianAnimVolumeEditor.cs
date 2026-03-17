@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using GaussianSplatting.Runtime;
 using UnityEditor;
 using UnityEngine;
@@ -8,16 +11,36 @@ namespace GaussianSplatting.Editor
     [CanEditMultipleObjects]
     public class GaussianAnimVolumeEditor : UnityEditor.Editor
     {
-        private static readonly string[] ModifierNames = { "Dissolve", "Wave", "Warp", "Property", "Caustic", "Wheat Wave" };
-        private static readonly System.Type[] ModifierTypes =
+        private static List<Type> _modifierTypes;
+        private static List<string> _modifierNames;
+
+        private static void EnsureModifierCache()
         {
-            typeof(DissolveModifier),
-            typeof(WaveModifier),
-            typeof(WarpModifier),
-            typeof(PropertyModifier),
-            typeof(CausticModifier),
-            typeof(WheatWaveModifier)
-        };
+            if (_modifierTypes != null)
+                return;
+
+            _modifierTypes = new List<Type>();
+            _modifierNames = new List<string>();
+
+            var types = TypeCache.GetTypesDerivedFrom<GaussianAnimModifier>();
+            foreach (var type in types)
+            {
+                if (type.IsAbstract)
+                    continue;
+                _modifierTypes.Add(type);
+                _modifierNames.Add(NicifyTypeName(type));
+            }
+        }
+
+        // "TurbulenceModifier" -> "Turbulence", "WheatWaveModifier" -> "Wheat Wave"
+        private static string NicifyTypeName(Type type)
+        {
+            string name = type.Name;
+            if (name.EndsWith("Modifier"))
+                name = name.Substring(0, name.Length - "Modifier".Length);
+            // Insert space before each uppercase letter that follows a lowercase letter
+            return Regex.Replace(name, "(?<=\\p{Ll})(?=\\p{Lu})", " ");
+        }
 
         public override void OnInspectorGUI()
         {
@@ -44,27 +67,24 @@ namespace GaussianSplatting.Editor
             }
 
             // Add modifier dropdown
+            EnsureModifierCache();
             EditorGUILayout.Space();
             var rect = EditorGUILayout.GetControlRect();
             if (EditorGUI.DropdownButton(rect, new GUIContent("Add Modifier"), FocusType.Passive))
             {
                 var menu = new GenericMenu();
-                for (int i = 0; i < ModifierNames.Length; i++)
+                for (int i = 0; i < _modifierTypes.Count; i++)
                 {
                     int idx = i;
-                    bool alreadyExists = volume.GetComponent(ModifierTypes[idx]) != null;
+                    bool alreadyExists = volume.GetComponent(_modifierTypes[idx]) != null;
                     if (alreadyExists)
-                        menu.AddDisabledItem(new GUIContent(ModifierNames[idx]));
+                        menu.AddDisabledItem(new GUIContent(_modifierNames[idx]));
                     else
-                        menu.AddItem(new GUIContent(ModifierNames[idx]), false, () => AddModifier(volume, idx));
+                        menu.AddItem(new GUIContent(_modifierNames[idx]), false, () =>
+                            Undo.AddComponent(volume.gameObject, _modifierTypes[idx]));
                 }
                 menu.DropDown(rect);
             }
-        }
-
-        private static void AddModifier(GaussianAnimVolume volume, int typeIndex)
-        {
-            Undo.AddComponent(volume.gameObject, ModifierTypes[typeIndex]);
         }
     }
 }
