@@ -46,7 +46,7 @@ namespace GaussianSplatting.Runtime
         private static readonly int PropAnimDeltaTime = Shader.PropertyToID("_AnimDeltaTime");
 
         // Must match struct sizes in compute shader
-        const int VolumeSizeBytes = 64 + 16 + 16; // float4x4 + float4 + float4 = 96
+        const int VolumeSizeBytes = 64 + 64 + 16 + 16; // 2x float4x4 + float4 + float4 = 160
         const int ModifierSizeBytes = 16 + 16 + 16 + 16 + 16; // 2 ints + 2 floats + 4 float4s = 80
 
         const int MaxVolumes = 16;

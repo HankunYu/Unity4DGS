@@ -18,6 +18,7 @@ namespace GaussianSplatting.Runtime
         public const int TypeCaustic = 4;
         public const int TypeWheatWave = 5;
         public const int TypeTurbulence = 6;
+        public const int TypeSwirl = 7;
 
         public const int ParamSlotCount = 16;
 

@@ -38,6 +38,7 @@ namespace GaussianSplatting.Runtime
         public struct ShaderData
         {
             public Matrix4x4 worldToLocal;  // 64 bytes
+            public Matrix4x4 localToWorld;  // 64 bytes
             public Vector4 shapeParams;     // x: type(0=box,1=sphere), y: falloff, zw: reserved
             public Vector4 boundsSize;      // box half-extents from scale, or sphere radius
         }
@@ -60,6 +61,7 @@ namespace GaussianSplatting.Runtime
             ShaderData sd = default;
             var tr = transform;
             sd.worldToLocal = tr.worldToLocalMatrix;
+            sd.localToWorld = tr.localToWorldMatrix;
             sd.shapeParams = new Vector4((float)shape, falloff, trailDuration, 0);
 
             Vector3 scale = tr.lossyScale;

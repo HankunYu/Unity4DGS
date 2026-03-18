@@ -35,6 +35,7 @@ struct AnimSplatChunkInfo
 struct AnimVolumeData
 {
     float4x4 worldToLocal;
+    float4x4 localToWorld;
     float4   shapeParams;   // x: type (0=box, 1=sphere), y: falloff, zw: reserved
     float4   boundsSize;    // box half-extents or sphere radius
 };
@@ -401,7 +402,7 @@ float CausticVoronoi(float2 uv, float lineWidth, float t)
     float v2 = Voronoi(uv * 1.4 + float2(-t * 0.25, t * 0.35) + 37.0);
     float edgeDist = min(v1, v2);
     float c = 1.0 - smoothstep(0.0, lineWidth, edgeDist);
-    return pow(c, 1.5);
+    return pow(abs(c), 1.5);
 }
 
 // Caustic pattern 1: layered sine interference — soft ripple rings
@@ -515,6 +516,70 @@ void ApplyWheatWave(float3 worldPos, float weight, AnimModifierData mod,
     posOffset.y += sin(phase) * amplitude * weight;
 }
 
+float3 RotateAroundAxis(float3 v, float3 axis, float angle)
+{
+    float s = sin(angle);
+    float c = cos(angle);
+    return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0 - c);
+}
+
+// Swirl: animated twist around an axis, bounded by cylindrical radius.
+// Based on the Twist warp approach: orthonormal frame decomposition + 2D rotation.
+// Angle varies along axis (twist) and over time (animation).
+void ApplySwirl(float3 worldPos, float weight, AnimVolumeData vol, AnimModifierData mod,
+    inout float3 posOffset)
+{
+    float3 localPos = mul(vol.worldToLocal, float4(worldPos, 1)).xyz;
+    float axisLen = length(mod.params0.xyz);
+    if (axisLen <= 0.0001)
+        return;
+
+    float3 axis = mod.params0.xyz / axisLen;
+    float strength = mod.params0.w;
+    float3 center = mod.params1.xyz;
+    float radius = max(mod.params1.w, 0.0001);
+    float speed = mod.params2.x;
+    float softness = saturate(mod.params2.y);
+    float time = mod.params2.z;
+
+    float3 p = localPos - center;
+
+    // Decompose into parallel (along axis) and perpendicular components
+    float3 parallel = axis * dot(p, axis);
+    float3 perp = p - parallel;
+    float radialDist = length(perp);
+
+    // Cylindrical bounding by radial distance from axis
+    float t = radialDist / radius;
+    if (t >= 1.0)
+        return;
+
+    // Edge softness fade
+    float fade = softness > 0.0001
+        ? 1.0 - smoothstep(1.0 - softness, 1.0, t)
+        : 1.0;
+    if (fade <= 0.0)
+        return;
+
+    // Twist-style angle: varies along axis + time animation
+    float angle = (dot(p, axis) * strength + time * speed) * fade;
+
+    // Build orthonormal frame perpendicular to axis (same as Twist in Warp)
+    float3 up = abs(axis.y) > 0.9 ? float3(1, 0, 0) : float3(0, 1, 0);
+    float3 right = normalize(cross(axis, up));
+    float3 fwd = cross(right, axis);
+
+    // 2D rotation of perpendicular component in the orthonormal frame
+    float cosA = cos(angle);
+    float sinA = sin(angle);
+    float2 c = float2(dot(perp, right), dot(perp, fwd));
+    float2 rotated = float2(c.x * cosA - c.y * sinA, c.x * sinA + c.y * cosA);
+    float3 newPerp = right * rotated.x + fwd * rotated.y;
+
+    float3 delta = (parallel + newPerp + center) - localPos;
+    posOffset += delta * weight;
+}
+
 // Property: modify opacity, scale, color
 void ApplyProperty(float weight, AnimModifierData mod,
     inout float opacityMul, inout float scaleMul, inout float3 colorTint, inout float colorBlend)
@@ -610,6 +675,10 @@ void CSAnimateSplats(uint3 id : SV_DispatchThreadID)
         else if (mType == 6) // Turbulence
         {
             ApplyTurbulence(worldPos, weight, mod, posOffset);
+        }
+        else if (mType == 7) // Swirl
+        {
+            ApplySwirl(worldPos, weight, vol, mod, posOffset);
         }
     }
 
