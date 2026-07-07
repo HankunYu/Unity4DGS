@@ -1,0 +1,214 @@
+// Gaussian Splat morph transition compute shader.
+// Decodes two assets and blends per-splat properties (including SH) into output buffers.
+// Includes Morton code computation and correspondence building for spatial matching.
+
+#define GROUP_SIZE 64
+
+#pragma kernel CSMorphSplats
+#pragma kernel CSComputeMorton
+#pragma kernel CSBuildCorrespondence
+
+#include "GaussianSplatDecode.hlsl"
+
+// ── Source asset buffers ──
+ByteAddressBuffer _SrcPos;
+ByteAddressBuffer _SrcOther;
+ByteAddressBuffer _SrcSH;
+Texture2D         _SrcColor;
+StructuredBuffer<SplatChunkData> _SrcChunks;
+uint _SrcFormat;
+uint _SrcChunkCount;
+uint _SrcSplatCount;
+
+// ── Target asset buffers ──
+ByteAddressBuffer _TgtPos;
+ByteAddressBuffer _TgtOther;
+ByteAddressBuffer _TgtSH;
+Texture2D         _TgtColor;
+StructuredBuffer<SplatChunkData> _TgtChunks;
+uint _TgtFormat;
+uint _TgtChunkCount;
+uint _TgtSplatCount;
+
+// ── Morph parameters ──
+float _MorphWeight;
+
+// ── Correspondence ──
+StructuredBuffer<uint> _Correspondence;
+uint _UseCorrespondence;
+
+// ── Output: 4 float4 per splat ──
+// [0]: pos.xyz, opacity
+// [1]: rot.xyzw
+// [2]: scale.xyz, 0
+// [3]: color.rgb, 1
+RWStructuredBuffer<float4> _MorphOutput;
+
+// ── SH Output: 15 float4 per splat, one band per element (xyz = coefficients) ──
+// Deliberately unpacked: the previous fp16 bit-packing (15 half3 function
+// parameters + f32tof16 + Store3) miscompiled on some HLSL translation
+// backends — bands read back as garbage and splats rendered white.
+RWStructuredBuffer<float4> _MorphSHOutput;
+
+// ── Morton code + correspondence buffers ──
+float4 _BoundsMin;
+float4 _BoundsMax;
+RWStructuredBuffer<uint> _MortonCodes;
+RWStructuredBuffer<uint> _MortonIndices;
+StructuredBuffer<uint> _SrcSorted;
+StructuredBuffer<uint> _TgtSorted;
+RWStructuredBuffer<uint> _CorrespondenceOut;
+
+// ── Morton code helpers ──
+
+uint MortonExpandBits(uint v)
+{
+    v = (v * 0x00010001u) & 0xFF0000FFu;
+    v = (v * 0x00000101u) & 0x0F00F00Fu;
+    v = (v * 0x00000011u) & 0xC30C30C3u;
+    v = (v * 0x00000005u) & 0x49249249u;
+    return v;
+}
+
+uint Morton3D(float3 pos, float3 bmin, float3 bmax)
+{
+    float3 extent = max(bmax - bmin, 1e-6);
+    float3 n = saturate((pos - bmin) / extent);
+    uint3 q = min((uint3)(n * 1023.0), 1023);
+    return MortonExpandBits(q.x) | (MortonExpandBits(q.y) << 1) | (MortonExpandBits(q.z) << 2);
+}
+
+// ── Kernel: Compute Morton codes for an asset ──
+// Reuses _Src* buffers: bind source data for first pass, target data for second pass.
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void CSComputeMorton(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SrcSplatCount)
+        return;
+
+    half4 srcCol = _SrcColor.Load(SplatIndexToPixelIndex(idx));
+    DecodedSplat s = SplatDecodeFromBuffers(
+        _SrcPos, _SrcOther, _SrcSH, srcCol, _SrcChunks,
+        _SrcChunkCount, idx, _SrcFormat);
+
+    _MortonCodes[idx] = Morton3D(s.pos, _BoundsMin.xyz, _BoundsMax.xyz);
+    _MortonIndices[idx] = idx;
+}
+
+// ── Kernel: Build correspondence from sorted ranks ──
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void CSBuildCorrespondence(uint3 id : SV_DispatchThreadID)
+{
+    uint srcRank = id.x;
+    if (srcRank >= _SrcSplatCount)
+        return;
+
+    // Proportional rank mapping (float to avoid uint overflow)
+    float t = (float)srcRank / (float)_SrcSplatCount;
+    uint tgtRank = min((uint)(t * (float)_TgtSplatCount), _TgtSplatCount - 1);
+
+    uint srcOrigIdx = _SrcSorted[srcRank];
+    uint tgtOrigIdx = _TgtSorted[tgtRank];
+
+    _CorrespondenceOut[srcOrigIdx] = tgtOrigIdx;
+}
+
+// ── Kernel: Morph splats ──
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void CSMorphSplats(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    uint maxCount = max(_SrcSplatCount, _TgtSplatCount);
+    if (idx >= maxCount)
+        return;
+
+    float w = saturate(_MorphWeight);
+    uint outBase = idx * 4;
+
+    bool hasSrc = idx < _SrcSplatCount;
+
+    // Determine target index: use correspondence for source splats, identity for extras
+    uint tgtIdx = idx;
+    if (_UseCorrespondence != 0 && hasSrc)
+        tgtIdx = _Correspondence[idx];
+
+    bool hasTgt = tgtIdx < _TgtSplatCount;
+
+    if (hasSrc && hasTgt)
+    {
+        // Both source and target exist: decode both and blend
+        half4 srcCol = _SrcColor.Load(SplatIndexToPixelIndex(idx));
+        DecodedSplat src = SplatDecodeFromBuffers(
+            _SrcPos, _SrcOther, _SrcSH, srcCol, _SrcChunks,
+            _SrcChunkCount, idx, _SrcFormat);
+
+        half4 tgtCol = _TgtColor.Load(SplatIndexToPixelIndex(tgtIdx));
+        DecodedSplat tgt = SplatDecodeFromBuffers(
+            _TgtPos, _TgtOther, _TgtSH, tgtCol, _TgtChunks,
+            _TgtChunkCount, tgtIdx, _TgtFormat);
+
+        float3 blendPos   = lerp(src.pos, tgt.pos, w);
+        float4 blendRot   = SplatQuatSlerp(src.rot, tgt.rot, w);
+        float3 blendScale = lerp(src.scale, tgt.scale, w);
+        float  blendOp    = lerp((float)src.opacity, (float)tgt.opacity, w);
+        float3 blendCol   = lerp((float3)src.color, (float3)tgt.color, w);
+
+        _MorphOutput[outBase + 0] = float4(blendPos, blendOp);
+        _MorphOutput[outBase + 1] = blendRot;
+        _MorphOutput[outBase + 2] = float4(blendScale, 0);
+        _MorphOutput[outBase + 3] = float4(blendCol, 1);
+
+        // Blend SH coefficients
+        uint shBase = idx * 15;
+        [unroll]
+        for (uint si = 0; si < 15; si++)
+            _MorphSHOutput[shBase + si] = float4(lerp((float3)src.sh[si], (float3)tgt.sh[si], w), 0);
+    }
+    else if (hasSrc)
+    {
+        // Source only: fade out as weight increases
+        half4 srcCol = _SrcColor.Load(SplatIndexToPixelIndex(idx));
+        DecodedSplat src = SplatDecodeFromBuffers(
+            _SrcPos, _SrcOther, _SrcSH, srcCol, _SrcChunks,
+            _SrcChunkCount, idx, _SrcFormat);
+
+        float fadedOp = (float)src.opacity * (1.0 - w);
+
+        _MorphOutput[outBase + 0] = float4(src.pos, fadedOp);
+        _MorphOutput[outBase + 1] = src.rot;
+        _MorphOutput[outBase + 2] = float4(src.scale, 0);
+        _MorphOutput[outBase + 3] = float4((float3)src.color, 1);
+
+        // Fade source SH by (1-w)
+        float fade = 1.0 - w;
+        uint shBase = idx * 15;
+        [unroll]
+        for (uint si = 0; si < 15; si++)
+            _MorphSHOutput[shBase + si] = float4((float3)src.sh[si] * fade, 0);
+    }
+    else if (hasTgt)
+    {
+        // Target only: fade in as weight increases
+        half4 tgtCol = _TgtColor.Load(SplatIndexToPixelIndex(tgtIdx));
+        DecodedSplat tgt = SplatDecodeFromBuffers(
+            _TgtPos, _TgtOther, _TgtSH, tgtCol, _TgtChunks,
+            _TgtChunkCount, tgtIdx, _TgtFormat);
+
+        float fadedOp = (float)tgt.opacity * w;
+
+        _MorphOutput[outBase + 0] = float4(tgt.pos, fadedOp);
+        _MorphOutput[outBase + 1] = tgt.rot;
+        _MorphOutput[outBase + 2] = float4(tgt.scale, 0);
+        _MorphOutput[outBase + 3] = float4((float3)tgt.color, 1);
+
+        // Fade target SH by w
+        uint shBase = idx * 15;
+        [unroll]
+        for (uint si = 0; si < 15; si++)
+            _MorphSHOutput[shBase + si] = float4((float3)tgt.sh[si] * w, 0);
+    }
+}
