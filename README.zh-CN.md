@@ -2,7 +2,7 @@
 
 [English](README.md) · **中文**
 
-面向 Unity 2022.3+ / URP 的实时 3D/4D 高斯泼溅(Gaussian Splatting)渲染器与程序化动画工具集,支持 visionOS / VR 立体渲染。
+面向 Unity 6+ / URP 的实时 3D/4D 高斯泼溅(Gaussian Splatting)渲染器与程序化动画工具集,支持 visionOS / VR 立体渲染。
 
 [![Unity4DGS 演示视频](https://img.youtube.com/vi/X9RL0WqCAvM/maxresdefault.jpg)](https://youtu.be/X9RL0WqCAvM)
 
