@@ -2,7 +2,7 @@
 
 **English** · [中文](README.zh-CN.md)
 
-Real-time 3D/4D Gaussian Splatting renderer and procedural animation toolkit for Unity 2022.3+ / URP, with visionOS / VR stereo support.
+Real-time 3D/4D Gaussian Splatting renderer and procedural animation toolkit for Unity 6+ / URP, with visionOS / VR stereo support.
 
 [![Unity4DGS demo video](https://img.youtube.com/vi/X9RL0WqCAvM/maxresdefault.jpg)](https://youtu.be/X9RL0WqCAvM)
 
