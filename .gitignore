@@ -68,3 +68,6 @@ AGENTS.md
 # Internal design notes
 /Assets/docs/
 /Assets/docs.meta
+
+# Capture output (frame sequences, encoded video)
+/Recordings/
