@@ -725,12 +725,18 @@ namespace GaussianSplatting.Runtime
 
             var tr = transform;
 
-            Matrix4x4 matView = cam.worldToCameraMatrix;
+            // SRP features may render this camera with pipeline-level matrices
+            // that never touch the Camera object (cubemap faces during 360
+            // capture); an active override is then the source of truth.
+            var matrixOverride = GaussianSplatRenderSystem.instance.MatrixOverride;
+            Matrix4x4 matView = matrixOverride?.View ?? cam.worldToCameraMatrix;
             Matrix4x4 matO2W = tr.localToWorldMatrix;
             Matrix4x4 matW2O = tr.worldToLocalMatrix;
             int screenW = cam.pixelWidth, screenH = cam.pixelHeight;
             int eyeW = XRSettings.eyeTextureWidth, eyeH = XRSettings.eyeTextureHeight;
             Vector4 screenPar = new Vector4(eyeW != 0 ? eyeW : screenW, eyeH != 0 ? eyeH : screenH, 0, 0);
+            if (matrixOverride is { ScreenSize: { x: > 0, y: > 0 } overrideSize })
+                screenPar = new Vector4(overrideSize.x, overrideSize.y, 0, 0);
             Vector4 camPos = cam.transform.position;
 
             if (!SetAssetDataOnCS(cmb, KernelIndices.CalcViewData, out int kernelIndex))
@@ -742,7 +748,7 @@ namespace GaussianSplatting.Runtime
             // for compute dispatches on Metal/visionOS (confirmed via diagnostics).
             // Also avoid SetViewProjectionMatrices to prevent corrupting Unity's
             // stereo rendering state (which caused mesh left/right eye swap).
-            Matrix4x4 gpuProj = GL.GetGPUProjectionMatrix(cam.projectionMatrix, true);
+            Matrix4x4 gpuProj = GL.GetGPUProjectionMatrix(matrixOverride?.Proj ?? cam.projectionMatrix, true);
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixMV, matView * matO2W);
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixVP, gpuProj * matView);
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixP, gpuProj);
@@ -839,7 +845,8 @@ namespace GaussianSplatting.Runtime
                 return false;
             SetAssetDataOnCS(cmb, kernelIndex);
 
-            Matrix4x4 worldToCamMatrix = cam.worldToCameraMatrix;
+            Matrix4x4 worldToCamMatrix =
+                GaussianSplatRenderSystem.instance.MatrixOverride?.View ?? cam.worldToCameraMatrix;
             worldToCamMatrix.m20 *= -1;
             worldToCamMatrix.m21 *= -1;
             worldToCamMatrix.m22 *= -1;
@@ -866,7 +873,8 @@ namespace GaussianSplatting.Runtime
             if (!TryFindSupportedKernel(KernelIndices.CalcDistances, out int kernelIndex))
                 return;
 
-            Matrix4x4 worldToCamMatrix = cam.worldToCameraMatrix;
+            Matrix4x4 worldToCamMatrix =
+                GaussianSplatRenderSystem.instance.MatrixOverride?.View ?? cam.worldToCameraMatrix;
             worldToCamMatrix.m20 *= -1;
             worldToCamMatrix.m21 *= -1;
             worldToCamMatrix.m22 *= -1;

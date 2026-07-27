@@ -75,6 +75,10 @@ namespace GaussianSplatting.Runtime
         [SerializeField] private StylizeTarget stylizeTarget = StylizeTarget.GaussianOnly;
         [SerializeField] private RenderPassEvent stylizeEvent = RenderPassEvent.BeforeRenderingPostProcessing;
         [SerializeField] private Shader stylizeShader;
+        [Tooltip("Feed splat culling/projection with the matrices URP actually renders with, " +
+                 "instead of reading the Camera object. Required for cubemap/360 capture " +
+                 "(RenderToCubemap, Recorder 360 View). Forces a re-sort on every render.")]
+        [SerializeField] private bool useRenderContextMatrices;
 
         private Material _stylizeMaterial;
         private bool _loggedMissingStylizeShader;
@@ -105,6 +109,9 @@ namespace GaussianSplatting.Runtime
                 internal Vector2Int RenderSize;
                 internal bool IsStereo;
                 internal bool IsXRActive;
+                internal bool UseMatrixOverride;
+                internal Matrix4x4 OverrideView;
+                internal Matrix4x4 OverrideProj;
             }
 
             public GsRenderPass(GaussianSplatURPFeature owner)
@@ -161,6 +168,14 @@ namespace GaussianSplatting.Runtime
                 passData.StylizeMaterial = _owner._stylizeMaterial;
                 passData.IsStereo = isStereo;
                 passData.IsXRActive = needsMultiplierReset;
+                // Capture the matrices URP uses for this specific render: during
+                // cubemap capture they differ per face from the Camera object.
+                passData.UseMatrixOverride = _owner.useRenderContextMatrices && !isStereo;
+                if (passData.UseMatrixOverride)
+                {
+                    passData.OverrideView = cameraData.GetViewMatrix();
+                    passData.OverrideProj = cameraData.GetProjectionMatrix();
+                }
 
                 builder.UseTexture(resourceData.activeColorTexture, AccessFlags.ReadWrite);
                 builder.UseTexture(resourceData.activeDepthTexture);
@@ -266,7 +281,17 @@ namespace GaussianSplatting.Runtime
                         // renderer can write directly via UAV without SetRenderTarget/Blit.
                         system.TileOutputTarget = data.GaussianSplatRT;
                         system.TileRenderSize = data.RenderSize;
+                        if (data.UseMatrixOverride)
+                        {
+                            system.MatrixOverride = new GaussianSplatRenderSystem.RenderMatrixOverride
+                            {
+                                View = data.OverrideView,
+                                Proj = data.OverrideProj,
+                                ScreenSize = data.RenderSize,
+                            };
+                        }
                         Material matComposite = system.SortAndRenderSplats(data.CameraData.camera, commandBuffer);
+                        system.MatrixOverride = null;
 
                         if (matComposite != null)
                         {

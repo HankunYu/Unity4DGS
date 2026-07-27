@@ -196,6 +196,18 @@ namespace GaussianSplatting.Runtime
             set { _tileRenderer ??= new GaussianTileRenderer(); _tileRenderer.TileRenderSize = value; }
         }
 
+        // Per-render view/projection supplied by SRP features when the pipeline
+        // renders a camera with matrices that never touch the Camera object
+        // (e.g. cubemap faces during 360 capture). Null = read the Camera.
+        public struct RenderMatrixOverride
+        {
+            public Matrix4x4 View;
+            public Matrix4x4 Proj;
+            public Vector2Int ScreenSize;
+        }
+
+        public RenderMatrixOverride? MatrixOverride { get; set; }
+
         private static void DisposeBuffer(ref GraphicsBuffer buf)
         {
             buf?.Dispose();
@@ -749,7 +761,10 @@ namespace GaussianSplatting.Runtime
                 // Sorted keys are only valid for the camera that sorted them: a
                 // different camera must re-sort regardless of the throttle, and
                 // the throttle counts real frames, not per-camera renders.
+                // A matrix override means the same camera renders multiple views
+                // this frame (cubemap faces), so every render must re-sort.
                 bool groupSortNeeded = !groupCache.hasSortedKeys
+                    || MatrixOverride.HasValue
                     || groupCache.lastSortCameraId != cam.GetInstanceID()
                     || Time.frameCount - groupCache.lastSortFrame >= minSortNth;
                 if (groupCache.groupSignature != groupSignature)
@@ -859,7 +874,8 @@ namespace GaussianSplatting.Runtime
                         _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointSizeScale, _config.pointCloudSizeScale);
                         _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointMinSize, _config.pointCloudMinDisplaySize);
                         _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointMinWorldSize, _config.pointCloudMinWorldSize);
-                        _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointProjectionScale, cam.projectionMatrix.m11);
+                        _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointProjectionScale,
+                            MatrixOverride?.Proj.m11 ?? cam.projectionMatrix.m11);
                         _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointMaxSize, _config.pointCloudMaxDisplaySize);
                         _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointOpacityBoost, _config.pointCloudOpacityBoost);
                     }
@@ -919,7 +935,8 @@ namespace GaussianSplatting.Runtime
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointSizeScale, _config.pointCloudSizeScale);
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointMinSize, _config.pointCloudMinDisplaySize);
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointMinWorldSize, _config.pointCloudMinWorldSize);
-                mpb.SetFloat(GaussianSplatRenderer.Props.PointProjectionScale, cam.projectionMatrix.m11);
+                mpb.SetFloat(GaussianSplatRenderer.Props.PointProjectionScale,
+                    MatrixOverride?.Proj.m11 ?? cam.projectionMatrix.m11);
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointMaxSize, _config.pointCloudMaxDisplaySize);
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointOpacityBoost, _config.pointCloudOpacityBoost);
                 mpb.SetInteger(GaussianSplatRenderer.Props.SHOrder, gs.shOrder);
@@ -936,7 +953,9 @@ namespace GaussianSplatting.Runtime
 
                 // Sort after view data so distance keys can read visibility
                 // (invisible splats sink to the tail; indirect draw skips them).
-                if (gs.NeedsSort(cam))
+                // A matrix override means the same camera renders multiple views
+                // this frame (cubemap faces), so every render must re-sort.
+                if (MatrixOverride.HasValue || gs.NeedsSort(cam))
                 {
                     gs.SortPoints(cmb, cam, matrix);
                     gs.MarkSorted(cam);
