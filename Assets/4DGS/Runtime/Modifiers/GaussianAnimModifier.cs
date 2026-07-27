@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+using Unity.Collections;
 using UnityEngine;
 
 namespace GaussianSplatting.Runtime
@@ -20,6 +21,7 @@ namespace GaussianSplatting.Runtime
         public const int TypeTurbulence = 6;
         public const int TypeSwirl = 7;
         public const int TypeConverge = 8;
+        public const int TypeAudioRipple = 9;
 
         public const int ParamSlotCount = 16;
 
@@ -62,6 +64,22 @@ namespace GaussianSplatting.Runtime
         /// Each modifier subclass interprets these differently.
         /// </summary>
         public abstract void FillParams(float time, out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3);
+
+        /// <summary>
+        /// Number of floats this modifier uploads to the shared extra-data
+        /// buffer each frame (0 = none). Use for variable-size payloads that
+        /// do not fit the 4 packed Vector4s, e.g. audio history or LUTs.
+        /// The GPU receives the segment via extraOffset/extraCount in the
+        /// modifier struct.
+        /// </summary>
+        public virtual int ExtraDataCount => 0;
+
+        /// <summary>
+        /// Write exactly <see cref="ExtraDataCount"/> floats into
+        /// <paramref name="dest"/> starting at <paramref name="offset"/>.
+        /// Called once per frame right after <see cref="FillParams"/>.
+        /// </summary>
+        public virtual void FillExtraData(NativeArray<float> dest, int offset) { }
 
         /// <summary>
         /// Capture current serialized field values into 4 Vector4s for state machine snapshots.

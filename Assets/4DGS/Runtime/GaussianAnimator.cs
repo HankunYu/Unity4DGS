@@ -26,6 +26,7 @@ namespace GaussianSplatting.Runtime
         // Structured buffers for GPU upload
         private GraphicsBuffer _volumeBuffer;
         private GraphicsBuffer _modifierBuffer;
+        private GraphicsBuffer _extraDataBuffer;
 
         private int _kernelAnimate = -1;
         private int _lastSplatCount;
@@ -46,10 +47,11 @@ namespace GaussianSplatting.Runtime
         private static readonly int PropAnimMatrixO2W = Shader.PropertyToID("_AnimMatrixObjectToWorld");
         private static readonly int PropAnimActivation = Shader.PropertyToID("_AnimActivation");
         private static readonly int PropAnimDeltaTime = Shader.PropertyToID("_AnimDeltaTime");
+        private static readonly int PropAnimExtraData = Shader.PropertyToID("_AnimExtraData");
 
         // Must match struct sizes in compute shader
         const int VolumeSizeBytes = 64 + 64 + 16 + 16; // 2x float4x4 + float4 + float4 = 160
-        const int ModifierSizeBytes = 16 + 16 + 16 + 16 + 16; // 2 ints + 2 floats + 4 float4s = 80
+        const int ModifierSizeBytes = 16 + 16 + 16 + 16 + 16; // 4 ints + 4 float4s = 80
 
         const int MaxVolumes = 16;
         const int MaxModifiers = 64;
@@ -78,6 +80,8 @@ namespace GaussianSplatting.Runtime
             _volumeBuffer = null;
             _modifierBuffer?.Dispose();
             _modifierBuffer = null;
+            _extraDataBuffer?.Dispose();
+            _extraDataBuffer = null;
             _kernelAnimate = -1;
         }
 
@@ -113,6 +117,7 @@ namespace GaussianSplatting.Runtime
             // Count active volumes and modifiers
             int volumeCount = 0;
             int modifierCount = 0;
+            int extraFloatCount = 0;
             for (int i = 0; i < _volumes.Count && volumeCount < MaxVolumes; i++)
             {
                 if (!_volumes[i].isActiveAndEnabled) continue;
@@ -122,7 +127,10 @@ namespace GaussianSplatting.Runtime
                 for (int j = 0; j < mods.Length && modifierCount < MaxModifiers; j++)
                 {
                     if (mods[j] != null && mods[j].isActiveAndEnabled)
+                    {
                         modifierCount++;
+                        extraFloatCount += mods[j].ExtraDataCount;
+                    }
                 }
             }
 
@@ -133,13 +141,13 @@ namespace GaussianSplatting.Runtime
             }
 
             int splatCount = _renderer.splatCount;
-            EnsureBuffers(splatCount, volumeCount, modifierCount);
+            EnsureBuffers(splatCount, volumeCount, modifierCount, extraFloatCount);
 
             if (_kernelAnimate < 0)
                 return;
 
             // Upload volume data
-            UploadVolumeAndModifierData(volumeCount, modifierCount);
+            UploadVolumeAndModifierData(volumeCount, modifierCount, extraFloatCount);
 
             // Dispatch compute
             DispatchAnimation(splatCount, volumeCount, modifierCount);
@@ -148,7 +156,7 @@ namespace GaussianSplatting.Runtime
             _renderer.SetAnimationOutput(_animOutputBuffer);
         }
 
-        private void EnsureBuffers(int splatCount, int volumeCount, int modifierCount)
+        private void EnsureBuffers(int splatCount, int volumeCount, int modifierCount, int extraFloatCount)
         {
             // Find kernel
             if (_kernelAnimate < 0)
@@ -207,14 +215,27 @@ namespace GaussianSplatting.Runtime
                     name = "GaussianAnimModifiers"
                 };
             }
+
+            // Shared extra-data buffer (variable-size per-modifier payloads)
+            int extraCount = Mathf.Max(extraFloatCount, 1);
+            if (_extraDataBuffer == null || _extraDataBuffer.count < extraCount)
+            {
+                _extraDataBuffer?.Dispose();
+                _extraDataBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, extraCount, 4)
+                {
+                    name = "GaussianAnimExtraData"
+                };
+            }
         }
 
-        private void UploadVolumeAndModifierData(int volumeCount, int modifierCount)
+        private void UploadVolumeAndModifierData(int volumeCount, int modifierCount, int extraFloatCount)
         {
             // Pack volume data
             var volData = new NativeArray<GaussianAnimVolume.ShaderData>(volumeCount, Allocator.Temp);
             // Pack modifier data
             var modData = new NativeArray<ModifierShaderData>(modifierCount, Allocator.Temp);
+            // Pack shared extra data (concatenated per-modifier segments)
+            var extraData = new NativeArray<float>(Mathf.Max(extraFloatCount, 1), Allocator.Temp);
 
             float time = Time.time;
 #if UNITY_EDITOR
@@ -224,6 +245,7 @@ namespace GaussianSplatting.Runtime
 
             int vi = 0;
             int mi = 0;
+            int extraOffset = 0;
             for (int i = 0; i < _volumes.Count && vi < MaxVolumes; i++)
             {
                 if (!_volumes[i].isActiveAndEnabled) continue;
@@ -235,17 +257,21 @@ namespace GaussianSplatting.Runtime
                 {
                     if (mods[j] == null || !mods[j].isActiveAndEnabled) continue;
                     mods[j].FillParams(time, out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3);
+                    int extraCount = mods[j].ExtraDataCount;
+                    if (extraCount > 0)
+                        mods[j].FillExtraData(extraData, extraOffset);
                     modData[mi] = new ModifierShaderData
                     {
                         volumeIndex = vi,
                         modifierType = mods[j].ModifierType,
-                        pad0 = 0,
-                        pad1 = 0,
+                        extraOffset = extraOffset,
+                        extraCount = extraCount,
                         params0 = p0,
                         params1 = p1,
                         params2 = p2,
                         params3 = p3
                     };
+                    extraOffset += extraCount;
                     mi++;
                 }
                 vi++;
@@ -253,9 +279,11 @@ namespace GaussianSplatting.Runtime
 
             _volumeBuffer.SetData(volData, 0, 0, volumeCount);
             _modifierBuffer.SetData(modData, 0, 0, modifierCount);
+            _extraDataBuffer.SetData(extraData, 0, 0, extraData.Length);
 
             volData.Dispose();
             modData.Dispose();
+            extraData.Dispose();
         }
 
         private void DispatchAnimation(int splatCount, int volumeCount, int modifierCount)
@@ -265,6 +293,7 @@ namespace GaussianSplatting.Runtime
 
             cs.SetBuffer(kernel, PropAnimVolumes, _volumeBuffer);
             cs.SetBuffer(kernel, PropAnimModifiers, _modifierBuffer);
+            cs.SetBuffer(kernel, PropAnimExtraData, _extraDataBuffer);
             cs.SetBuffer(kernel, PropAnimOutput, _animOutputBuffer);
             cs.SetInt(PropAnimVolumeCount, volumeCount);
             cs.SetInt(PropAnimModifierCount, modifierCount);
@@ -296,8 +325,8 @@ namespace GaussianSplatting.Runtime
         {
             public int volumeIndex;
             public int modifierType;
-            public float pad0;
-            public float pad1;
+            public int extraOffset;
+            public int extraCount;
             public Vector4 params0;
             public Vector4 params1;
             public Vector4 params2;

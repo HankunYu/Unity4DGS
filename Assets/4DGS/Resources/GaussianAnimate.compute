@@ -43,9 +43,9 @@ struct AnimVolumeData
 struct AnimModifierData
 {
     int      volumeIndex;
-    int      modifierType;  // 0=dissolve, 1=wave, 2=warp, 3=property
-    float    pad0;
-    float    pad1;
+    int      modifierType;  // GaussianAnimModifier.Type* constants (0=dissolve .. 9=audioRipple)
+    int      extraOffset;   // start of this modifier's segment in _AnimExtraData
+    int      extraCount;    // number of floats owned in _AnimExtraData (0 = none)
     float4   params0;
     float4   params1;
     float4   params2;
@@ -56,6 +56,9 @@ struct AnimModifierData
 
 StructuredBuffer<AnimVolumeData>    _AnimVolumes;
 StructuredBuffer<AnimModifierData>  _AnimModifiers;
+// Shared per-frame payloads that do not fit the packed params
+// (audio history, LUTs, ...); segments addressed via extraOffset/extraCount
+StructuredBuffer<float>             _AnimExtraData;
 
 uint _AnimVolumeCount;
 uint _AnimModifierCount;
@@ -639,6 +642,96 @@ void ApplyConverge(float3 worldPos, float weight, AnimVolumeData vol, AnimModifi
     posOffset += pull + spiral;
 }
 
+// AudioRipple: audio-reactive rings expanding from a world-space center.
+// Band energies travel outward through a history ring buffer stored in
+// _AnimExtraData, so a beat spawns a ring that keeps expanding over time.
+// Extra data layout: [0..2] bass color, [3..5] treble color,
+// [6..] interleaved (low, high) pairs, AUDIO_HISTORY_LEN entries.
+// Must match AudioRippleModifier.HistoryLength
+#define AUDIO_HISTORY_LEN 128
+
+void ApplyAudioRipple(float3 worldPos, float weight, AnimModifierData mod,
+    inout float3 posOffset, inout float3 colorTint, inout float colorBlend)
+{
+    if (mod.extraCount < 6 + AUDIO_HISTORY_LEN * 2)
+        return;
+
+    float3 center = mod.params0.xyz;
+    float amplitude = mod.params0.w;
+    float ringFreq = mod.params1.x;
+    float waveSpeed = max(mod.params1.y, 0.0001);
+    float headF = mod.params1.z;
+    float interval = max(mod.params1.w, 0.0001);
+    float3 axis = mod.params2.xyz;
+    float cBlend = mod.params2.w;
+    int mode = (int)mod.params3.x;
+    float falloff = mod.params3.y;
+    float phaseLow = mod.params3.z;  // accumulated on CPU (integral of speed dt)
+    float phaseHigh = mod.params3.w; // accumulated on CPU (integral of speed dt)
+
+    float3 rel = worldPos - center;
+    float dist;
+    float3 dispDir;
+    if (mode == 0) // Height: rings in the plane perpendicular to axis
+    {
+        float3 planar = rel - axis * dot(rel, axis);
+        dist = length(planar);
+        dispDir = axis;
+    }
+    else // Radial: spherical shells pushed away from the center
+    {
+        dist = length(rel);
+        dispDir = dist > 0.0001 ? rel / dist : axis;
+    }
+
+    // Sample the band history at this ring's emission time: rings farther
+    // out carry older audio, which is what makes the wave travel outward
+    float delaySamples = dist / (waveSpeed * interval);
+    float sampleF = headF - delaySamples;
+    float lowAmp = 0;
+    float highAmp = 0;
+    if (sampleF >= 0 && delaySamples <= AUDIO_HISTORY_LEN - 2)
+    {
+        int newest = (int)floor(headF);
+        int i0 = min((int)floor(sampleF), newest);
+        int i1 = min(i0 + 1, newest);
+        float f = saturate(sampleF - i0);
+        int e0 = mod.extraOffset + 6 + (i0 % AUDIO_HISTORY_LEN) * 2;
+        int e1 = mod.extraOffset + 6 + (i1 % AUDIO_HISTORY_LEN) * 2;
+        lowAmp = lerp(_AnimExtraData[e0], _AnimExtraData[e1], f);
+        highAmp = lerp(_AnimExtraData[e0 + 1], _AnimExtraData[e1 + 1], f);
+    }
+
+    float atten = exp(-dist * falloff);
+    lowAmp *= atten;
+    highAmp *= atten;
+
+    // Two carriers moving at waveSpeed: broad bass rings plus a tighter
+    // treble shimmer (2.7x ring density, must match AudioRippleModifier)
+    float k = ringFreq * 6.2831853;
+    float wave = lowAmp * sin(dist * k - phaseLow)
+               + highAmp * 0.5 * sin(dist * k * 2.7 - phaseHigh);
+
+    posOffset += dispDir * wave * amplitude * weight;
+
+    // Optional color: bass/treble mix, brightened by local ripple energy
+    float energy = saturate(lowAmp + highAmp);
+    float s = energy * cBlend * weight;
+    if (s > 0.0001)
+    {
+        float hueT = saturate(highAmp / (lowAmp + highAmp + 0.0001));
+        float3 bassCol = float3(_AnimExtraData[mod.extraOffset],
+                                _AnimExtraData[mod.extraOffset + 1],
+                                _AnimExtraData[mod.extraOffset + 2]);
+        float3 trebleCol = float3(_AnimExtraData[mod.extraOffset + 3],
+                                  _AnimExtraData[mod.extraOffset + 4],
+                                  _AnimExtraData[mod.extraOffset + 5]);
+        float3 rippleColor = lerp(bassCol, trebleCol, hueT) * (1.0 + energy * 1.5);
+        colorTint *= lerp(float3(1, 1, 1), rippleColor, s);
+        colorBlend = max(colorBlend, s);
+    }
+}
+
 // Property: modify opacity, scale, color
 void ApplyProperty(float weight, AnimModifierData mod,
     inout float opacityMul, inout float scaleMul, inout float3 colorTint, inout float colorBlend)
@@ -742,6 +835,10 @@ void CSAnimateSplats(uint3 id : SV_DispatchThreadID)
         else if (mType == 8) // Converge
         {
             ApplyConverge(worldPos, weight, vol, mod, posOffset);
+        }
+        else if (mType == 9) // AudioRipple
+        {
+            ApplyAudioRipple(worldPos, weight, mod, posOffset, colorTint, colorBlend);
         }
     }
 
