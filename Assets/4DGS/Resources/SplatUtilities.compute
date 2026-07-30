@@ -48,6 +48,17 @@ float4x4 _MatrixP_Eye[2];
 float4x4 _MatrixMV_Eye[2];
 float4 _VecScreenParams;
 float4 _VecWorldSpaceCameraPos;
+
+// ── Omni-directional stereo projection ────────────────────────────────────
+// When enabled the whole sphere is projected into one 2:1 equirect image and
+// _MatrixVP / _MatrixP are unused: ODS has no single view-projection matrix,
+// because the eye position rotates with the view azimuth.
+uint _OdsEnabled;
+float4x4 _MatrixWorldToRig;
+// x = signed eye offset (m), y = pole merge start (rad), z = pole merge end (rad)
+float4 _OdsParams;
+#define kOdsPi 3.14159265358979
+
 int _SelectionMode;
 
 RWStructuredBuffer<uint> _SplatSortDistances;
@@ -128,8 +139,14 @@ void CSCalcDistances (uint3 id : SV_DispatchThreadID)
         pos = LoadSplatPos(origIdx);
     pos = mul(_MatrixMV, float4(pos.xyz, 1)).xyz;
 
+    // ODS covers the whole sphere, so view-space z is not a depth: everything
+    // behind the rig would sort negative and land in front. Use the radial
+    // distance from the rig instead — the eye offset is at most IPD/2, far
+    // below the spacing that matters for back-to-front ordering.
+    float sortDepth = (_OdsEnabled != 0) ? length(pos) : pos.z;
+
     // Clamp below the sentinel so a garbage depth can never join the tail.
-    _SplatSortDistances[idx] = min(FloatToSortableUint(pos.z), 0xFFFFFFFEu);
+    _SplatSortDistances[idx] = min(FloatToSortableUint(sortDepth), 0xFFFFFFFEu);
     InterlockedAdd(_VisibleCounter[0], 1);
 }
 
@@ -334,6 +351,52 @@ SplatViewData CalcPerEyeViewData(
     return view;
 }
 
+// Solves the ODS tangency condition in closed form.
+//
+// In rig-local space (+x right, +y up, +z forward) the eye for azimuth t sits
+// at E(t) = r*(cos t, 0, -sin t) and looks along d(t) = (sin t, 0, cos t).
+// Requiring E->p to be parallel to d gives
+//     p.x*cos t - p.z*sin t - r = 0   ->   rho*sin(phi - t) = r
+// so t = phi - asin(r/rho): one asin per splat, no iteration, no stitching.
+//
+// Returns clip space with w carrying the eye-to-splat distance, so every
+// downstream consumer that divides by w (quad sizing, the world-space size
+// floor in the point shader) keeps working untouched.
+float4 OdsProjectSplat(float3 worldPos, out float distOut)
+{
+    float3 p = mul(_MatrixWorldToRig, float4(worldPos, 1)).xyz;
+
+    float rho = length(p.xz);
+    float phi = atan2(p.x, p.z);
+
+    // Pole merge: fade the circle radius to zero approaching the poles, where
+    // a baseline perpendicular to the view direction cannot exist. Elevation
+    // is measured from the rig centre to keep the solve non-circular — using
+    // the final elevation would make the radius depend on its own result.
+    float elev0 = atan2(p.y, max(rho, 1e-6));
+    float merge = 1.0 - smoothstep(_OdsParams.y, _OdsParams.z, abs(elev0));
+    float r = _OdsParams.x * merge;
+
+    // No tangent line exists from inside the viewing circle; collapse to mono.
+    float sinA = (rho > abs(r)) ? (r / rho) : 0.0;
+    float theta = phi - asin(clamp(sinA, -1.0, 1.0));
+
+    float3 eye = float3(r * cos(theta), 0.0, -r * sin(theta));
+    float3 v = p - eye;
+
+    float elev = atan2(v.y, max(length(v.xz), 1e-6));
+    distOut = max(length(v), 1e-4);
+
+    // Azimuth spans [-pi, pi] across the width, elevation [-pi/2, pi/2] across
+    // the height. _OdsParams.w carries the render-target Y sign that a GPU
+    // projection matrix would normally apply — there is no matrix here.
+    // Depth is a constant mid-range value that passes a cleared depth buffer
+    // under both normal and reversed Z; ODS has no meaningful z, and the point
+    // cloud pass resolves occlusion through the sort order instead.
+    float2 ndc = float2(theta / kOdsPi, elev / (0.5 * kOdsPi) * _OdsParams.w);
+    return float4(ndc * distOut, 0.5 * distOut, distOut);
+}
+
 // Per-eye view data calculation helper (original single-eye path).
 // Computes clip-space position, covariance, SH shading, and packs into SplatViewData.
 // Shared data (world pos, splat loading, animation) is computed once in the kernel;
@@ -353,14 +416,19 @@ SplatViewData CalculateEyeViewData(
 {
     SplatViewData view = (SplatViewData)0;
 
-    float4 centerClipPos = mul(viewProjMatrix, float4(centerWorldPos, 1));
+    float odsDist = 0;
+    float4 centerClipPos = (_OdsEnabled != 0)
+        ? OdsProjectSplat(centerWorldPos, odsDist)
+        : mul(viewProjMatrix, float4(centerWorldPos, 1));
 
     // Mark deleted or cut splats as invisible
     if (isDeleted || isCut)
         centerClipPos.w = 0;
 
-    // Conservative frustum cull: max scale as bounding radius -> clip-space margin
-    if (centerClipPos.w > 0)
+    // Conservative frustum cull: max scale as bounding radius -> clip-space margin.
+    // Skipped under ODS: the projection covers the whole sphere, so nothing is
+    // ever off-screen and there is no _MatrixP to derive a clip margin from.
+    if (_OdsEnabled == 0 && centerClipPos.w > 0)
     {
         float maxScale = max(max(abs(splat.scale.x), abs(splat.scale.y)), abs(splat.scale.z))
                        * splatScale * animScaleMul;
@@ -394,8 +462,10 @@ SplatViewData CalculateEyeViewData(
         float splatScale2 = splatScale * splatScale;
         cov3d0 *= splatScale2;
         cov3d1 *= splatScale2;
-        float alphaScale;
-        float3 cov2d = CalcCovariance2D(splat.pos, cov3d0, cov3d1, _MatrixMV, _MatrixP, _VecScreenParams, alphaScale);
+        float alphaScale = 1.0;
+        float3 cov2d = 0;
+        if (_OdsEnabled == 0)
+            cov2d = CalcCovariance2D(splat.pos, cov3d0, cov3d1, _MatrixMV, _MatrixP, _VecScreenParams, alphaScale);
 
         // Cull on compensated opacity instead of projected area: a splat only
         // gets culled once it has faded to invisible, so nothing pops at the
@@ -404,7 +474,27 @@ SplatViewData CalculateEyeViewData(
         if (finalAlpha < 5.0 / 255.0)
             return view;
 
-        DecomposeCovariance(cov2d, view.axis1, view.axis2);
+        if (_OdsEnabled != 0)
+        {
+            // ODS has no projection matrix, so a screen-space covariance is not
+            // defined. PointCloud mode only consumes sqrt(|axis1|*|axis2|) as a
+            // size, so synthesise an isotropic footprint from the angular
+            // radius: a world radius R at distance D subtends R/D radians, and
+            // the equirect maps 2*pi radians of azimuth across the full width.
+            // Bounded: a splat sitting almost on the eye divides by a near-zero
+            // distance and would otherwise emit a quad millions of pixels wide,
+            // which stalls the rasteriser hard enough to lose the device. The
+            // cap sits far above any usable point size.
+            float worldRadius = max(max(abs(boxSize.x), abs(boxSize.y)), abs(boxSize.z)) * splatScale;
+            float footprintPx = min((worldRadius / odsDist) * (_VecScreenParams.x / (2.0 * kOdsPi)),
+                                    _VecScreenParams.x * 0.125);
+            view.axis1 = float2(footprintPx, 0);
+            view.axis2 = float2(0, footprintPx);
+        }
+        else
+        {
+            DecomposeCovariance(cov2d, view.axis1, view.axis2);
+        }
 
         float3 worldViewDir = _VecWorldSpaceCameraPos.xyz - centerWorldPos;
         float3 objViewDir = mul((float3x3)_MatrixWorldToObject, worldViewDir);
@@ -439,7 +529,9 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
 
     // Phase 1: chunk frustum culling (first thread per 256-splat chunk)
     // Skip when morph or animation is active (positions may differ from chunk AABB)
-    bool canCull = (_SplatChunkCount > 0) && (_MorphDataValid == 0) && (_AnimDataValid == 0);
+    // Chunk culling tests AABB corners against the _MatrixVP frustum, which
+    // does not exist under ODS — and nothing is off-screen there anyway.
+    bool canCull = (_SplatChunkCount > 0) && (_MorphDataValid == 0) && (_AnimDataValid == 0) && (_OdsEnabled == 0);
 
     if (laneInChunk == 0)
     {
@@ -644,7 +736,9 @@ void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_Group
     uint laneInChunk = localIdx % kChunkSize;
 
     // Chunk frustum culling using eye 0's VP (conservative: covers both eyes)
-    bool canCull = (_SplatChunkCount > 0) && (_MorphDataValid == 0) && (_AnimDataValid == 0);
+    // Chunk culling tests AABB corners against the _MatrixVP frustum, which
+    // does not exist under ODS — and nothing is off-screen there anyway.
+    bool canCull = (_SplatChunkCount > 0) && (_MorphDataValid == 0) && (_AnimDataValid == 0) && (_OdsEnabled == 0);
     if (laneInChunk == 0)
     {
         _chunkVisible[chunkSlot] = 1;

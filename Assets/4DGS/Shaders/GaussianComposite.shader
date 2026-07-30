@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: MIT
 Shader "Hidden/Gaussian Splatting/Composite"
 {
+    // Material-driven blend so the AOV variant can write raw values straight
+    // through without a second pass — every DrawProcedural site for this
+    // material hardcodes pass index 0. Defaults are the beauty alpha blend.
+    Properties
+    {
+        [HideInInspector] _SrcBlend ("", Float) = 5    // SrcAlpha
+        [HideInInspector] _DstBlend ("", Float) = 10   // OneMinusSrcAlpha
+    }
+
     SubShader
     {
         Pass
@@ -8,7 +17,7 @@ Shader "Hidden/Gaussian Splatting/Composite"
             ZWrite Off
             ZTest Always
             Cull Off
-            Blend SrcAlpha OneMinusSrcAlpha
+            Blend [_SrcBlend] [_DstBlend]
 
 CGPROGRAM
 #pragma vertex vert
@@ -22,6 +31,7 @@ CGPROGRAM
 // in the render graph — Material.EnableKeyword is CPU-immediate and gets
 // disabled before the GPU executes the deferred draw commands.
 #pragma multi_compile _ GAUSSIAN_STEREO
+#pragma multi_compile _ GAUSSIAN_AOV
 
 // Enable foveated rendering (VRR) support on visionOS Metal.
 // Must appear before including GaussianSplatting.hlsl.
@@ -51,6 +61,9 @@ Texture2D _GaussianSplatRT;
 
 float4 _VecScreenParams;
 int _CustomStereoEyeIndex;
+// Multiplies the depth AOV so a scene deeper than the target's usable range
+// still fits inside it. Consumers divide by the same number to get metres.
+float _AovDepthScale;
 
 half4 frag (v2f i) : SV_Target
 {
@@ -65,9 +78,22 @@ half4 frag (v2f i) : SV_Target
     #else
         col = _GaussianSplatRT.Load(int3(i.vertex.xy, 0));
     #endif
-    col.rgb = GammaToLinearSpace(col.rgb);
-    col.a = saturate(col.a * 1.5);
-    return col;
+    #if defined(GAUSSIAN_AOV)
+        // Raw channel data, not an image: no gamma conversion, no alpha shaping,
+        // and the material blend is set to overwrite rather than composite.
+        // The point pass emitted reciprocal distance so BlendOp Max could pick
+        // the nearest sample; invert it back to linear metres here. Background
+        // stays 0 — alpha is the coverage matte that tells it apart from a
+        // genuine zero distance.
+        // Scale is applied here rather than in the point pass so it acts on the
+        // value actually written out — which is what a downstream clamp sees.
+        col.rgb = col.r > 0 ? _AovDepthScale / col.r : 0.0;
+        return col;
+    #else
+        col.rgb = GammaToLinearSpace(col.rgb);
+        col.a = saturate(col.a * 1.5);
+        return col;
+    #endif
 }
 ENDCG
         }

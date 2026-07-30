@@ -140,6 +140,9 @@ namespace GaussianSplatting.Runtime
             public static readonly int MatrixMVEye = Shader.PropertyToID("_MatrixMV_Eye");
             public static readonly int MatrixObjectToWorld = Shader.PropertyToID("_MatrixObjectToWorld");
             public static readonly int MatrixWorldToObject = Shader.PropertyToID("_MatrixWorldToObject");
+            public static readonly int OdsEnabled = Shader.PropertyToID("_OdsEnabled");
+            public static readonly int MatrixWorldToRig = Shader.PropertyToID("_MatrixWorldToRig");
+            public static readonly int OdsParams = Shader.PropertyToID("_OdsParams");
             public static readonly int VecScreenParams = Shader.PropertyToID("_VecScreenParams");
             public static readonly int VecWorldSpaceCameraPos = Shader.PropertyToID("_VecWorldSpaceCameraPos");
             public static readonly int CameraTargetTexture = Shader.PropertyToID("_CameraTargetTexture");
@@ -754,6 +757,35 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixP, gpuProj);
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixObjectToWorld, matO2W);
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixWorldToObject, matW2O);
+
+            // ODS bypasses _MatrixVP / _MatrixP entirely: the eye position rides
+            // a circle that rotates with the view azimuth, so no single
+            // view-projection matrix exists. Bind the rig transform and the
+            // circle parameters instead.
+            var odsConfig = GaussianSplatRenderSystem.instance.Config;
+            bool useOds = odsConfig != null &&
+                          odsConfig.projectionMode == GaussianSplatProjectionMode.OmniDirectionalStereo;
+            cmb.SetComputeIntParam(csSplatUtilities, Props.OdsEnabled, useOds ? 1 : 0);
+            if (useOds)
+            {
+                // Built from position/rotation only: a scaled camera transform
+                // would otherwise leak into the rig-local splat positions.
+                Transform camTr = cam.transform;
+                Matrix4x4 rigToWorld = Matrix4x4.TRS(camTr.position, camTr.rotation, Vector3.one);
+                cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixWorldToRig, rigToWorld.inverse);
+
+                // smoothstep needs edge0 < edge1, and gpuProj.m11's sign is the
+                // render-target Y flip that a projection matrix would normally
+                // apply — without one, ODS has to carry that sign itself or the
+                // equirect comes out vertically mirrored.
+                float mergeEnd = Mathf.Max(odsConfig.odsPoleMergeEnd, 0.01f);
+                float mergeStart = Mathf.Min(odsConfig.odsPoleMergeStart, mergeEnd - 0.01f);
+                cmb.SetComputeVectorParam(csSplatUtilities, Props.OdsParams, new Vector4(
+                    odsConfig.odsEyeOffset,
+                    mergeStart * Mathf.Deg2Rad,
+                    mergeEnd * Mathf.Deg2Rad,
+                    gpuProj.m11 < 0f ? -1f : 1f));
+            }
 
             // Stereo rendering: pass per-eye view-projection matrices
             bool isStereo = IsStereoCapture(cam);

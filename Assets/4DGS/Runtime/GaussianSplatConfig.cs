@@ -28,7 +28,31 @@ namespace GaussianSplatting.Runtime
         // Pushes low-opacity gaussians towards solid points in PointCloud mode
         // while keeping opacity-driven effects (dissolve, cutouts) working.
         [Range(1.0f, 10.0f)] public float pointCloudOpacityBoost = 3.0f;
+        // Replaces the beauty image with a raw data channel. PointCloud mode
+        // only — the splat path has no equivalent nearest-sample resolve.
+        public GaussianSplatAovMode pointCloudAov = GaussianSplatAovMode.None;
+        // Multiplier on the depth AOV. A depth pass measured in metres runs past
+        // whatever range the output can hold, and everything beyond it flattens
+        // to one value; scaling brings the scene back inside. Divide by the same
+        // number downstream to recover metres. 0.1 fits a 10 m scene into 1.0.
+        [Range(0.001f, 10.0f)] public float pointCloudAovDepthScale = 1.0f;
         public bool useTileRenderer = true;
+
+        [Header("Omni-Directional Stereo (360 capture)")]
+        // Projects the full sphere into one 2:1 equirect image instead of a
+        // single frustum. Meant for Stereo360Capture, not for the viewport:
+        // only splat centres go through it, so any scene geometry in the same
+        // camera still renders with the ordinary perspective matrices.
+        public GaussianSplatProjectionMode projectionMode = GaussianSplatProjectionMode.Perspective;
+        // Signed offset along the ODS viewing-circle radius, in meters. The
+        // capture drives this per eye (-IPD/2, then +IPD/2); 0 gives mono 360.
+        [Range(-0.1f, 0.1f)] public float odsEyeOffset = 0.0f;
+        // Elevation (degrees off the horizon) where stereo starts fading to
+        // mono, and where it is fully mono. Disparity is geometrically
+        // impossible looking straight up or down, so every ODS pipeline merges
+        // the poles; without it the zenith and nadir fight the viewer's eyes.
+        [Range(0.0f, 90.0f)] public float odsPoleMergeStart = 60.0f;
+        [Range(0.0f, 90.0f)] public float odsPoleMergeEnd = 80.0f;
 
         [Header("Shader References")]
         [SerializeField] private Shader _shaderSplatsRef;

@@ -127,6 +127,66 @@ namespace GaussianSplatting.Runtime
             }
         }
 
+        private static readonly int PropSrcBlend = Shader.PropertyToID("_SrcBlend");
+        private static readonly int PropDstBlend = Shader.PropertyToID("_DstBlend");
+        private static readonly int PropBlendOp = Shader.PropertyToID("_BlendOp");
+        private static readonly int PropAovDepthScale = Shader.PropertyToID("_AovDepthScale");
+
+        // Switches the point pass and the composite between beauty and AOV.
+        //
+        // The AOV path resolves nearest-sample through the blend unit — the
+        // splat render target has no depth buffer, and depth is not something
+        // an alpha blend can average. BlendOp Max over reciprocal distance gets
+        // the same result order-independently.
+        //
+        // Keywords go through the command buffer, not Material.EnableKeyword:
+        // the latter is CPU-immediate and would be cleared again before the
+        // render graph executes the deferred draw.
+        internal void ApplyAovState(CommandBuffer cmb)
+        {
+            bool aov = _config != null &&
+                       _config.pointCloudAov != GaussianSplatAovMode.None &&
+                       _config.renderMode == GaussianSplatRenderMode.PointCloud;
+
+            if (aov)
+            {
+                cmb.EnableShaderKeyword("GAUSSIAN_POINT_AOV");
+                cmb.EnableShaderKeyword("GAUSSIAN_AOV");
+            }
+            else
+            {
+                cmb.DisableShaderKeyword("GAUSSIAN_POINT_AOV");
+                cmb.DisableShaderKeyword("GAUSSIAN_AOV");
+            }
+
+            if (_matPointCloud != null)
+            {
+                _matPointCloud.SetFloat(PropSrcBlend, (float)(aov ? BlendMode.One : BlendMode.OneMinusDstAlpha));
+                _matPointCloud.SetFloat(PropDstBlend, (float)BlendMode.One);
+                _matPointCloud.SetFloat(PropBlendOp, (float)(aov ? BlendOp.Max : BlendOp.Add));
+            }
+            if (_matComposite != null)
+            {
+                _matComposite.SetFloat(PropSrcBlend, (float)(aov ? BlendMode.One : BlendMode.SrcAlpha));
+                _matComposite.SetFloat(PropDstBlend, (float)(aov ? BlendMode.Zero : BlendMode.OneMinusSrcAlpha));
+                _matComposite.SetFloat(PropAovDepthScale,
+                    _config != null ? Mathf.Max(_config.pointCloudAovDepthScale, 1e-4f) : 1.0f);
+            }
+        }
+
+        // Pixel scale the point shader uses to turn the world-space size floor
+        // into pixels. The perspective path passes cot(fovY/2) from the
+        // projection matrix; ODS has no projection matrix, and its equirect
+        // spreads 2*pi radians of azimuth across the width, which against a 2:1
+        // target reduces to the constant 2/pi.
+        private float PointProjectionScale(float perspectiveScale)
+        {
+            if (_config != null &&
+                _config.projectionMode == GaussianSplatProjectionMode.OmniDirectionalStereo)
+                return 2.0f / Mathf.PI;
+            return perspectiveScale;
+        }
+
         // ── Materials (created from Config shaders) ─────────────────────
         private Material _matSplats;
         private Material _matComposite;
@@ -445,6 +505,8 @@ namespace GaussianSplatting.Runtime
             if (_hasRenderFence)
                 cmb.WaitOnAsyncGraphicsFence(_lastRenderFence);
 
+            ApplyAovState(cmb);
+
             Material result = CanUseGlobalSortPath()
                 ? SortAndRenderSplatsGlobal(cam, cmb)
                 : SortAndRenderSplatsPerObject(cam, cmb);
@@ -465,6 +527,8 @@ namespace GaussianSplatting.Runtime
 
             if (_hasRenderFence && useFence)
                 cmb.WaitOnAsyncGraphicsFence(_lastRenderFence);
+
+            ApplyAovState(cmb);
 
             _preparedItems.Clear();
             Material matComposite = _matComposite;
@@ -503,7 +567,8 @@ namespace GaussianSplatting.Runtime
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointSizeScale, _config.pointCloudSizeScale);
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointMinSize, _config.pointCloudMinDisplaySize);
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointMinWorldSize, _config.pointCloudMinWorldSize);
-                mpb.SetFloat(GaussianSplatRenderer.Props.PointProjectionScale, cam.projectionMatrix.m11);
+                mpb.SetFloat(GaussianSplatRenderer.Props.PointProjectionScale,
+                    PointProjectionScale(cam.projectionMatrix.m11));
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointMaxSize, _config.pointCloudMaxDisplaySize);
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointOpacityBoost, _config.pointCloudOpacityBoost);
                 mpb.SetInteger(GaussianSplatRenderer.Props.SHOrder, gs.shOrder);
@@ -875,7 +940,7 @@ namespace GaussianSplatting.Runtime
                         _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointMinSize, _config.pointCloudMinDisplaySize);
                         _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointMinWorldSize, _config.pointCloudMinWorldSize);
                         _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointProjectionScale,
-                            MatrixOverride?.Proj.m11 ?? cam.projectionMatrix.m11);
+                            PointProjectionScale(MatrixOverride?.Proj.m11 ?? cam.projectionMatrix.m11));
                         _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointMaxSize, _config.pointCloudMaxDisplaySize);
                         _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointOpacityBoost, _config.pointCloudOpacityBoost);
                     }
@@ -936,7 +1001,7 @@ namespace GaussianSplatting.Runtime
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointMinSize, _config.pointCloudMinDisplaySize);
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointMinWorldSize, _config.pointCloudMinWorldSize);
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointProjectionScale,
-                    MatrixOverride?.Proj.m11 ?? cam.projectionMatrix.m11);
+                    PointProjectionScale(MatrixOverride?.Proj.m11 ?? cam.projectionMatrix.m11));
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointMaxSize, _config.pointCloudMaxDisplaySize);
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointOpacityBoost, _config.pointCloudOpacityBoost);
                 mpb.SetInteger(GaussianSplatRenderer.Props.SHOrder, gs.shOrder);
