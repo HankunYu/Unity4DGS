@@ -60,7 +60,7 @@ namespace GaussianSplatting.Editor.Utils
                 {
                     plyRawData.Dispose();
                 }
-                ReorderSHs(splatCount, (float*)splats.GetUnsafePtr());
+                ReorderSHs(splatCount, (float*)splats.GetUnsafePtr(), SHCoeffsPerChannel(attributes));
                 LinearizeData(splats);
                 return;
             }
@@ -189,8 +189,19 @@ namespace GaussianSplatting.Editor.Utils
             }
         }
 
+        // f_rest_* holds the higher SH bands channel-major (all R, then all G,
+        // then all B), so the per-channel count depends on the file's SH
+        // degree: 0, 3, 8 or 15 coefficients.
+        static int SHCoeffsPerChannel(List<(string, PLYFileReader.ElementType)> attributes)
+        {
+            int restCount = attributes.Count(a => a.Item1.StartsWith("f_rest_") && a.Item2 == PLYFileReader.ElementType.Float);
+            return math.min(restCount / 3, 15);
+        }
+
+        // Converts the channel-major f_rest_* block into per-coefficient RGB
+        // triplets (sh1..shF). Bands the file does not have stay zero.
         [BurstCompile]
-        static unsafe void ReorderSHs(int splatCount, float* data)
+        static unsafe void ReorderSHs(int splatCount, float* data, int coeffsPerChannel)
         {
             int splatStride = UnsafeUtility.SizeOf<InputSplatData>() / 4;
             int shStartOffset = 9, shCount = 15;
@@ -200,9 +211,10 @@ namespace GaussianSplatting.Editor.Utils
             {
                 for (int j = 0; j < shCount; ++j)
                 {
-                    tmp[j * 3 + 0] = data[idx + j];
-                    tmp[j * 3 + 1] = data[idx + j + shCount];
-                    tmp[j * 3 + 2] = data[idx + j + shCount * 2];
+                    bool present = j < coeffsPerChannel;
+                    tmp[j * 3 + 0] = present ? data[idx + j] : 0;
+                    tmp[j * 3 + 1] = present ? data[idx + j + coeffsPerChannel] : 0;
+                    tmp[j * 3 + 2] = present ? data[idx + j + coeffsPerChannel * 2] : 0;
                 }
 
                 for (int j = 0; j < shCount * 3; ++j)

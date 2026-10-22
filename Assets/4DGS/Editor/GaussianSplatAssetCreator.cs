@@ -23,6 +23,7 @@ namespace GaussianSplatting.Editor
         const string kCamerasJson = "cameras.json";
         const string kPrefQuality = "nesnausk.GaussianSplatting.CreatorQuality";
         const string kPrefOutputFolder = "nesnausk.GaussianSplatting.CreatorOutputFolder";
+        const string kPrefPruneOpacity = "nesnausk.GaussianSplatting.CreatorPruneOpacity";
 
         enum DataQuality
         {
@@ -49,6 +50,10 @@ namespace GaussianSplatting.Editor
         [SerializeField] GaussianSplatAsset.VectorFormat m_FormatScale;
         [SerializeField] GaussianSplatAsset.ColorFormat m_FormatColor;
         [SerializeField] GaussianSplatAsset.SHFormat m_FormatSH;
+        // Splats below this opacity are dropped at import. Every splat costs
+        // sorting and view-data work each frame even when it never shows; the
+        // renderer culls below 5/255 at opacity scale 1. 0 keeps everything.
+        [SerializeField] float m_PruneOpacity;
 
         string m_ErrorMessage;
         string m_PrevFilePath;
@@ -74,6 +79,7 @@ namespace GaussianSplatting.Editor
         {
             m_Quality = (DataQuality)EditorPrefs.GetInt(kPrefQuality, (int)DataQuality.Medium);
             m_OutputFolder = EditorPrefs.GetString(kPrefOutputFolder, "Assets/GaussianAssets");
+            m_PruneOpacity = EditorPrefs.GetFloat(kPrefPruneOpacity, 0f);
         }
 
         void OnEnable()
@@ -128,6 +134,17 @@ namespace GaussianSplatting.Editor
             {
                 m_OutputFolder = newOutputFolder;
                 EditorPrefs.SetString(kPrefOutputFolder, m_OutputFolder);
+            }
+
+            float newPrune = EditorGUILayout.Slider(new GUIContent("Prune Opacity Below",
+                "Drop splats less opaque than this at import. They still cost sorting and per-frame " +
+                "view-data work. The renderer culls below ~0.02 at opacity scale 1, so values up to " +
+                "that change nothing on screen unless a renderer raises its opacity scale. 0 keeps all."),
+                m_PruneOpacity, 0f, 0.1f);
+            if (!Mathf.Approximately(newPrune, m_PruneOpacity))
+            {
+                m_PruneOpacity = newPrune;
+                EditorPrefs.SetFloat(kPrefPruneOpacity, m_PruneOpacity);
             }
 
             var newQuality = (DataQuality) EditorGUILayout.EnumPopup("Quality", m_Quality);
@@ -284,11 +301,17 @@ namespace GaussianSplatting.Editor
                     }
 
                     Debug.Log($"Batch import: found {inputFiles.Length} files in {m_InputFolder}");
+                    // Each import resets m_ErrorMessage; collect them so an
+                    // early failure is not hidden by later successes.
+                    var failures = new List<string>();
                     foreach (string file in inputFiles)
                     {
                         m_InputFile = file;
                         CreateAssetSingle();
+                        if (!string.IsNullOrEmpty(m_ErrorMessage))
+                            failures.Add(m_ErrorMessage);
                     }
+                    m_ErrorMessage = failures.Count > 0 ? string.Join("\n", failures) : null;
                     break;
             }
             
@@ -310,83 +333,131 @@ namespace GaussianSplatting.Editor
             }
             Directory.CreateDirectory(m_OutputFolder);
 
-            EditorUtility.DisplayProgressBar(kProgressTitle, "Reading data files", 0.0f);
-            GaussianSplatAsset.CameraInfo[] cameras = LoadJsonCamerasFile(m_InputFile, m_ImportCameras);
-            using NativeArray<InputSplatData> inputSplats = LoadInputSplatFile(m_InputFile);
-            if (inputSplats.Length == 0)
-            {
-                EditorUtility.ClearProgressBar();
-                return;
-            }
-
-            float3 boundsMin, boundsMax;
-            var boundsJob = new CalcBoundsJob
-            {
-                m_BoundsMin = &boundsMin,
-                m_BoundsMax = &boundsMax,
-                m_SplatData = inputSplats
-            };
-            boundsJob.Schedule().Complete();
-
-            EditorUtility.DisplayProgressBar(kProgressTitle, "Morton reordering", 0.05f);
-            ReorderMorton(inputSplats, boundsMin, boundsMax);
-
-            // cluster SHs
+            // Everything below allocates native memory and holds a modal
+            // progress bar: any failure must still release both, and report
+            // which file failed instead of leaving the editor stuck.
             NativeArray<int> splatSHIndices = default;
             NativeArray<GaussianSplatAsset.SHTableItemFloat16> clusteredSHs = default;
-            if (m_FormatSH >= GaussianSplatAsset.SHFormat.Cluster64k)
+            NativeArray<InputSplatData> inputSplats = default;
+            try
             {
-                EditorUtility.DisplayProgressBar(kProgressTitle, "Cluster SHs", 0.2f);
-                ClusterSHs(inputSplats, m_FormatSH, out clusteredSHs, out splatSHIndices);
+                EditorUtility.DisplayProgressBar(kProgressTitle, "Reading data files", 0.0f);
+                GaussianSplatAsset.CameraInfo[] cameras = LoadJsonCamerasFile(m_InputFile, m_ImportCameras);
+                inputSplats = LoadInputSplatFile(m_InputFile);
+                if (!inputSplats.IsCreated || inputSplats.Length == 0)
+                    return;
+                if (m_PruneOpacity > 0f)
+                    inputSplats = PruneTransparentSplats(inputSplats, m_PruneOpacity);
+                if (inputSplats.Length == 0)
+                {
+                    m_ErrorMessage = $"{m_InputFile}: every splat is below the prune opacity";
+                    return;
+                }
+                if (inputSplats.Length > GaussianSplatAsset.MaxSplats)
+                {
+                    m_ErrorMessage = $"{m_InputFile} has {inputSplats.Length} splats; at most {GaussianSplatAsset.MaxSplats} are supported";
+                    return;
+                }
+
+                float3 boundsMin, boundsMax;
+                var boundsJob = new CalcBoundsJob
+                {
+                    m_BoundsMin = &boundsMin,
+                    m_BoundsMax = &boundsMax,
+                    m_SplatData = inputSplats
+                };
+                boundsJob.Schedule().Complete();
+
+                EditorUtility.DisplayProgressBar(kProgressTitle, "Morton reordering", 0.05f);
+                ReorderMorton(inputSplats, boundsMin, boundsMax);
+
+                // cluster SHs
+                if (m_FormatSH >= GaussianSplatAsset.SHFormat.Cluster64k)
+                {
+                    EditorUtility.DisplayProgressBar(kProgressTitle, "Cluster SHs", 0.2f);
+                    ClusterSHs(inputSplats, m_FormatSH, out clusteredSHs, out splatSHIndices);
+                }
+
+                string baseName = Path.GetFileNameWithoutExtension(FilePickerControl.PathToDisplayString(m_InputFile));
+
+                EditorUtility.DisplayProgressBar(kProgressTitle, "Creating data objects", 0.7f);
+                GaussianSplatAsset asset = ScriptableObject.CreateInstance<GaussianSplatAsset>();
+                asset.Initialize(inputSplats.Length, m_FormatPos, m_FormatScale, m_FormatColor, m_FormatSH, boundsMin, boundsMax, cameras);
+                asset.name = baseName;
+
+                var dataHash = new Hash128((uint)asset.splatCount, (uint)asset.formatVersion, 0, 0);
+                string pathChunk = $"{m_OutputFolder}/{baseName}_chk.bytes";
+                string pathPos = $"{m_OutputFolder}/{baseName}_pos.bytes";
+                string pathOther = $"{m_OutputFolder}/{baseName}_oth.bytes";
+                string pathCol = $"{m_OutputFolder}/{baseName}_col.bytes";
+                string pathSh = $"{m_OutputFolder}/{baseName}_shs.bytes";
+
+                // if we are using full lossless (FP32) data, then do not use any chunking, and keep data as-is
+                bool useChunks = isUsingChunks;
+                if (useChunks)
+                    CreateChunkData(inputSplats, pathChunk, ref dataHash, m_FormatSH);
+                CreatePositionsData(inputSplats, pathPos, ref dataHash);
+                CreateOtherData(inputSplats, pathOther, ref dataHash, splatSHIndices);
+                CreateColorData(inputSplats, pathCol, ref dataHash);
+                CreateSHData(inputSplats, pathSh, ref dataHash, clusteredSHs);
+                asset.SetDataHash(dataHash);
+
+                // files are created, import them so we can get to the imported objects, ugh
+                EditorUtility.DisplayProgressBar(kProgressTitle, "Initial texture import", 0.85f);
+                AssetDatabase.Refresh(ImportAssetOptions.ForceUncompressedImport);
+
+                EditorUtility.DisplayProgressBar(kProgressTitle, "Setup data onto asset", 0.95f);
+                asset.SetAssetFiles(
+                    useChunks ? AssetDatabase.LoadAssetAtPath<TextAsset>(pathChunk) : null,
+                    AssetDatabase.LoadAssetAtPath<TextAsset>(pathPos),
+                    AssetDatabase.LoadAssetAtPath<TextAsset>(pathOther),
+                    AssetDatabase.LoadAssetAtPath<TextAsset>(pathCol),
+                    AssetDatabase.LoadAssetAtPath<TextAsset>(pathSh));
+
+                var assetPath = $"{m_OutputFolder}/{baseName}.asset";
+                var savedAsset = CreateOrReplaceAsset(asset, assetPath);
+
+                EditorUtility.DisplayProgressBar(kProgressTitle, "Saving assets", 0.99f);
+                AssetDatabase.SaveAssets();
+
+                Selection.activeObject = savedAsset;
             }
+            catch (Exception e)
+            {
+                m_ErrorMessage = $"Failed to import {m_InputFile}: {e.Message}";
+                Debug.LogException(e);
+            }
+            finally
+            {
+                if (inputSplats.IsCreated)
+                    inputSplats.Dispose();
+                if (splatSHIndices.IsCreated)
+                    splatSHIndices.Dispose();
+                if (clusteredSHs.IsCreated)
+                    clusteredSHs.Dispose();
+                EditorUtility.ClearProgressBar();
+            }
+        }
 
-            string baseName = Path.GetFileNameWithoutExtension(FilePickerControl.PathToDisplayString(m_InputFile));
+        // Returns the splats at or above minOpacity, disposing the input when
+        // it had to be replaced.
+        static NativeArray<InputSplatData> PruneTransparentSplats(NativeArray<InputSplatData> splats, float minOpacity)
+        {
+            int kept = 0;
+            for (int i = 0; i < splats.Length; ++i)
+                kept += splats[i].opacity >= minOpacity ? 1 : 0;
+            if (kept == splats.Length)
+                return splats;
 
-            EditorUtility.DisplayProgressBar(kProgressTitle, "Creating data objects", 0.7f);
-            GaussianSplatAsset asset = ScriptableObject.CreateInstance<GaussianSplatAsset>();
-            asset.Initialize(inputSplats.Length, m_FormatPos, m_FormatScale, m_FormatColor, m_FormatSH, boundsMin, boundsMax, cameras);
-            asset.name = baseName;
-
-            var dataHash = new Hash128((uint)asset.splatCount, (uint)asset.formatVersion, 0, 0);
-            string pathChunk = $"{m_OutputFolder}/{baseName}_chk.bytes";
-            string pathPos = $"{m_OutputFolder}/{baseName}_pos.bytes";
-            string pathOther = $"{m_OutputFolder}/{baseName}_oth.bytes";
-            string pathCol = $"{m_OutputFolder}/{baseName}_col.bytes";
-            string pathSh = $"{m_OutputFolder}/{baseName}_shs.bytes";
-
-            // if we are using full lossless (FP32) data, then do not use any chunking, and keep data as-is
-            bool useChunks = isUsingChunks;
-            if (useChunks)
-                CreateChunkData(inputSplats, pathChunk, ref dataHash, m_FormatSH);
-            CreatePositionsData(inputSplats, pathPos, ref dataHash);
-            CreateOtherData(inputSplats, pathOther, ref dataHash, splatSHIndices);
-            CreateColorData(inputSplats, pathCol, ref dataHash);
-            CreateSHData(inputSplats, pathSh, ref dataHash, clusteredSHs);
-            asset.SetDataHash(dataHash);
-
-            splatSHIndices.Dispose();
-            clusteredSHs.Dispose();
-
-            // files are created, import them so we can get to the imported objects, ugh
-            EditorUtility.DisplayProgressBar(kProgressTitle, "Initial texture import", 0.85f);
-            AssetDatabase.Refresh(ImportAssetOptions.ForceUncompressedImport);
-
-            EditorUtility.DisplayProgressBar(kProgressTitle, "Setup data onto asset", 0.95f);
-            asset.SetAssetFiles(
-                useChunks ? AssetDatabase.LoadAssetAtPath<TextAsset>(pathChunk) : null,
-                AssetDatabase.LoadAssetAtPath<TextAsset>(pathPos),
-                AssetDatabase.LoadAssetAtPath<TextAsset>(pathOther),
-                AssetDatabase.LoadAssetAtPath<TextAsset>(pathCol),
-                AssetDatabase.LoadAssetAtPath<TextAsset>(pathSh));
-
-            var assetPath = $"{m_OutputFolder}/{baseName}.asset";
-            var savedAsset = CreateOrReplaceAsset(asset, assetPath);
-
-            EditorUtility.DisplayProgressBar(kProgressTitle, "Saving assets", 0.99f);
-            AssetDatabase.SaveAssets();
-            EditorUtility.ClearProgressBar();
-
-            Selection.activeObject = savedAsset;
+            var result = new NativeArray<InputSplatData>(kept, Allocator.Persistent);
+            for (int i = 0, o = 0; i < splats.Length; ++i)
+            {
+                if (splats[i].opacity >= minOpacity)
+                    result[o++] = splats[i];
+            }
+            Debug.Log($"GS: pruned {splats.Length - kept:N0} of {splats.Length:N0} splats below opacity {minOpacity:0.###}");
+            splats.Dispose();
+            return result;
         }
 
         NativeArray<InputSplatData> LoadInputSplatFile(string filePath)
@@ -528,11 +599,29 @@ namespace GaussianSplatting.Editor
             shs = default;
             shIndices = default;
 
-            int shCount = GaussianSplatAsset.GetSHCount(format, splatData.Length);
-            if (shCount >= splatData.Length) // no need to cluster, just use raw data
-                return;
-
             const int kShDim = 15 * 3;
+            int shCount = GaussianSplatAsset.GetSHCount(format, splatData.Length);
+            if (shCount >= splatData.Length)
+            {
+                // Fewer splats than clusters: no need to cluster, but the asset
+                // is still a cluster format — the decoder reads a per-splat
+                // table index from the other data — so emit a table with one
+                // entry per splat and identity indices.
+                NativeArray<float> rawSH = new(splatData.Length * kShDim, Allocator.Persistent);
+                GatherSHs(splatData.Length, (InputSplatData*) splatData.GetUnsafeReadOnlyPtr(), (float*) rawSH.GetUnsafePtr());
+                shs = new NativeArray<GaussianSplatAsset.SHTableItemFloat16>(splatData.Length, Allocator.Persistent);
+                new ConvertSHClustersJob
+                {
+                    m_Input = rawSH.Reinterpret<float3>(4),
+                    m_Output = shs
+                }.Schedule(splatData.Length, 256).Complete();
+                rawSH.Dispose();
+                shIndices = new NativeArray<int>(splatData.Length, Allocator.Persistent);
+                for (int i = 0; i < shIndices.Length; ++i)
+                    shIndices[i] = i;
+                return;
+            }
+
             const int kBatchSize = 2048;
             float passesOverData = format switch
             {

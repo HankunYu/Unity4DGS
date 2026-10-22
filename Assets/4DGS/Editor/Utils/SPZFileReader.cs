@@ -85,42 +85,54 @@ namespace GaussianSplatting.Editor.Utils
             NativeArray<byte> packedCol = new(splatCount * 3, Allocator.Persistent);
             NativeArray<byte> packedSh = new(splatCount * 3 * shCoeffs, Allocator.Persistent);
 
-            // read file contents into temporaries
-            bool readOk = true;
-            readOk &= gz.Read(packedPos) == packedPos.Length;
-            readOk &= gz.Read(packedAlpha) == packedAlpha.Length;
-            readOk &= gz.Read(packedCol) == packedCol.Length;
-            readOk &= gz.Read(packedScale) == packedScale.Length;
-            readOk &= gz.Read(packedRot) == packedRot.Length;
-            readOk &= gz.Read(packedSh) == packedSh.Length;
-
-            // unpack into full splat data
-            splats = new NativeArray<InputSplatData>(splatCount, Allocator.Persistent);
-            UnpackDataJob job = new UnpackDataJob();
-            job.packedPos = packedPos;
-            job.packedScale = packedScale;
-            job.packedRot = packedRot;
-            job.packedAlpha = packedAlpha;
-            job.packedCol = packedCol;
-            job.packedSh = packedSh;
-            job.shCoeffs = shCoeffs;
-            job.fractScale = 1.0f / (1 << fractBits);
-            job.splats = splats;
-            job.Schedule(splatCount, 4096).Complete();
-
-            // cleanup
-            packedPos.Dispose();
-            packedScale.Dispose();
-            packedRot.Dispose();
-            packedAlpha.Dispose();
-            packedCol.Dispose();
-            packedSh.Dispose();
-
-            if (!readOk)
+            try
             {
-                splats.Dispose();
-                throw new IOException($"SPZ {filePath} read error, file smaller than it should be");
+                // read file contents into temporaries
+                bool readOk = ReadFully(gz, packedPos) && ReadFully(gz, packedAlpha) && ReadFully(gz, packedCol) &&
+                              ReadFully(gz, packedScale) && ReadFully(gz, packedRot) && ReadFully(gz, packedSh);
+                if (!readOk)
+                    throw new IOException($"SPZ {filePath} read error, file smaller than it should be");
+
+                // unpack into full splat data
+                splats = new NativeArray<InputSplatData>(splatCount, Allocator.Persistent);
+                UnpackDataJob job = new UnpackDataJob();
+                job.packedPos = packedPos;
+                job.packedScale = packedScale;
+                job.packedRot = packedRot;
+                job.packedAlpha = packedAlpha;
+                job.packedCol = packedCol;
+                job.packedSh = packedSh;
+                job.shCoeffs = shCoeffs;
+                job.fractScale = 1.0f / (1 << fractBits);
+                job.splats = splats;
+                job.Schedule(splatCount, 4096).Complete();
             }
+            finally
+            {
+                // A corrupt stream throws from inside the reads; the
+                // temporaries are released either way.
+                packedPos.Dispose();
+                packedScale.Dispose();
+                packedRot.Dispose();
+                packedAlpha.Dispose();
+                packedCol.Dispose();
+                packedSh.Dispose();
+            }
+        }
+
+        // Stream.Read may return fewer bytes than asked (GZipStream does,
+        // at block boundaries) without being at the end: keep reading.
+        static bool ReadFully(Stream stream, NativeArray<byte> dst)
+        {
+            int total = 0;
+            while (total < dst.Length)
+            {
+                int read = stream.Read(dst.GetSubArray(total, dst.Length - total));
+                if (read <= 0)
+                    return false;
+                total += read;
+            }
+            return true;
         }
 
         [BurstCompile]

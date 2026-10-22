@@ -171,32 +171,35 @@ namespace GaussianSplatting.Runtime
 
         public static long CalcPosDataSize(int splatCount, VectorFormat formatPos)
         {
-            return splatCount * GetVectorSize(formatPos);
+            return (long)splatCount * GetVectorSize(formatPos);
         }
         public static long CalcOtherDataSize(int splatCount, VectorFormat formatScale)
         {
-            return splatCount * GetOtherSizeNoSHIndex(formatScale);
+            return (long)splatCount * GetOtherSizeNoSHIndex(formatScale);
         }
         public static long CalcColorDataSize(int splatCount, ColorFormat formatColor)
         {
             var (width, height) = CalcTextureSize(splatCount);
-            return width * height * GetColorSize(formatColor);
+            return (long)width * height * GetColorSize(formatColor);
         }
         public static long CalcSHDataSize(int splatCount, SHFormat formatSh)
         {
-            int shCount = GetSHCount(formatSh, splatCount);
+            // long math: 11M+ splats at Float32 overflow an int. Cluster formats
+            // store only the table here; their per-splat index lives in the
+            // other data.
+            long shCount = GetSHCount(formatSh, splatCount);
             return formatSh switch
             {
                 SHFormat.Float32 => shCount * UnsafeUtility.SizeOf<SHTableItemFloat32>(),
                 SHFormat.Float16 => shCount * UnsafeUtility.SizeOf<SHTableItemFloat16>(),
                 SHFormat.Norm11 => shCount * UnsafeUtility.SizeOf<SHTableItemNorm11>(),
                 SHFormat.Norm6 => shCount * UnsafeUtility.SizeOf<SHTableItemNorm6>(),
-                _ => shCount * UnsafeUtility.SizeOf<SHTableItemFloat16>() + splatCount * 2
+                _ => shCount * UnsafeUtility.SizeOf<SHTableItemFloat16>()
             };
         }
         public static long CalcChunkDataSize(int splatCount)
         {
-            int chunkCount = (splatCount + ChunkSize - 1) / ChunkSize;
+            long chunkCount = (splatCount + ChunkSize - 1) / ChunkSize;
             return chunkCount * UnsafeUtility.SizeOf<ChunkInfo>();
         }
 
