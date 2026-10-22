@@ -14,27 +14,26 @@ namespace GaussianSplatting.Runtime
         private const uint Radix = 256;
         private const uint RadixBits = 8;
         private const uint KeysPerTile = 1024;    // THREADS * ITEMS in the shader
+        public const uint TilesPerBlock = 64;     // BLOCK_TILES in the shader
 
-        // Two scan levels cover TILE * TILE histogram entries.
-        public const uint MaxKeys = KeysPerTile * KeysPerTile / Radix * KeysPerTile;
+        // One thread group per tile, and a dispatch has at most 65535 groups.
+        public const uint MaxKeys = 65535 * KeysPerTile;
 
         private static readonly int PropCount = Shader.PropertyToID("_Count");
         private static readonly int PropShift = Shader.PropertyToID("_Shift");
         private static readonly int PropTileCount = Shader.PropertyToID("_TileCount");
-        private static readonly int PropScanCount = Shader.PropertyToID("_ScanCount");
-        private static readonly int PropSumCount = Shader.PropertyToID("_SumCount");
+        private static readonly int PropBlockCount = Shader.PropertyToID("_BlockCount");
         private static readonly int PropKeysIn = Shader.PropertyToID("_KeysIn");
         private static readonly int PropValuesIn = Shader.PropertyToID("_ValuesIn");
         private static readonly int PropKeysOut = Shader.PropertyToID("_KeysOut");
         private static readonly int PropValuesOut = Shader.PropertyToID("_ValuesOut");
         private static readonly int PropHistogram = Shader.PropertyToID("_Histogram");
-        private static readonly int PropScanSums = Shader.PropertyToID("_ScanSums");
+        private static readonly int PropBlockSums = Shader.PropertyToID("_BlockSums");
 
         private readonly ComputeShader _cs;
         private readonly int _kernelUpsweep = -1;
-        private readonly int _kernelScanTiles = -1;
-        private readonly int _kernelScanSums = -1;
-        private readonly int _kernelScanAdd = -1;
+        private readonly int _kernelScanBlocks = -1;
+        private readonly int _kernelScanDigits = -1;
         private readonly int _kernelDownsweep = -1;
         private readonly bool _valid;
 
@@ -48,9 +47,8 @@ namespace GaussianSplatting.Runtime
             try
             {
                 _kernelUpsweep = cs.FindKernel("CSUpsweep");
-                _kernelScanTiles = cs.FindKernel("CSScanTiles");
-                _kernelScanSums = cs.FindKernel("CSScanSums");
-                _kernelScanAdd = cs.FindKernel("CSScanAdd");
+                _kernelScanBlocks = cs.FindKernel("CSScanBlocks");
+                _kernelScanDigits = cs.FindKernel("CSScanDigits");
                 _kernelDownsweep = cs.FindKernel("CSDownsweep");
             }
             catch (ArgumentException)
@@ -58,13 +56,18 @@ namespace GaussianSplatting.Runtime
                 return;
             }
             _valid = cs.IsSupported(_kernelUpsweep) &&
-                     cs.IsSupported(_kernelScanTiles) &&
-                     cs.IsSupported(_kernelScanSums) &&
-                     cs.IsSupported(_kernelScanAdd) &&
+                     cs.IsSupported(_kernelScanBlocks) &&
+                     cs.IsSupported(_kernelScanDigits) &&
                      cs.IsSupported(_kernelDownsweep);
         }
 
         static uint DivRoundUp(uint x, uint y) => (x + y - 1) / y;
+
+        // Histogram entries a sort of `count` keys needs: one per digit per tile.
+        public static uint HistogramSize(uint count) => DivRoundUp(count, KeysPerTile) * Radix;
+
+        // Block-total entries a sort of `count` keys needs: one per digit per block.
+        public static uint BlockSumsSize(uint count) => DivRoundUp(DivRoundUp(count, KeysPerTile), TilesPerBlock) * Radix;
 
         public void Dispatch(CommandBuffer cmd, GpuSortArgs args)
         {
@@ -78,21 +81,18 @@ namespace GaussianSplatting.Runtime
             }
 
             uint tileCount = DivRoundUp(args.count, KeysPerTile);
-            uint scanCount = Radix * tileCount;
-            uint sumCount = DivRoundUp(scanCount, KeysPerTile);
+            uint blockCount = DivRoundUp(tileCount, TilesPerBlock);
 
             cmd.SetComputeIntParam(_cs, PropCount, (int)args.count);
             cmd.SetComputeIntParam(_cs, PropTileCount, (int)tileCount);
-            cmd.SetComputeIntParam(_cs, PropScanCount, (int)scanCount);
-            cmd.SetComputeIntParam(_cs, PropSumCount, (int)sumCount);
+            cmd.SetComputeIntParam(_cs, PropBlockCount, (int)blockCount);
 
             cmd.SetComputeBufferParam(_cs, _kernelUpsweep, PropHistogram, args.resources.histogram);
-            cmd.SetComputeBufferParam(_cs, _kernelScanTiles, PropHistogram, args.resources.histogram);
-            cmd.SetComputeBufferParam(_cs, _kernelScanTiles, PropScanSums, args.resources.scratch);
-            cmd.SetComputeBufferParam(_cs, _kernelScanSums, PropScanSums, args.resources.scratch);
-            cmd.SetComputeBufferParam(_cs, _kernelScanAdd, PropHistogram, args.resources.histogram);
-            cmd.SetComputeBufferParam(_cs, _kernelScanAdd, PropScanSums, args.resources.scratch);
+            cmd.SetComputeBufferParam(_cs, _kernelScanBlocks, PropHistogram, args.resources.histogram);
+            cmd.SetComputeBufferParam(_cs, _kernelScanBlocks, PropBlockSums, args.resources.scratch);
+            cmd.SetComputeBufferParam(_cs, _kernelScanDigits, PropBlockSums, args.resources.scratch);
             cmd.SetComputeBufferParam(_cs, _kernelDownsweep, PropHistogram, args.resources.histogram);
+            cmd.SetComputeBufferParam(_cs, _kernelDownsweep, PropBlockSums, args.resources.scratch);
 
             GraphicsBuffer srcKeys = args.inputKeys;
             GraphicsBuffer srcValues = args.inputValues;
@@ -106,9 +106,8 @@ namespace GaussianSplatting.Runtime
                 cmd.SetComputeBufferParam(_cs, _kernelUpsweep, PropKeysIn, srcKeys);
                 cmd.DispatchCompute(_cs, _kernelUpsweep, (int)tileCount, 1, 1);
 
-                cmd.DispatchCompute(_cs, _kernelScanTiles, (int)sumCount, 1, 1);
-                cmd.DispatchCompute(_cs, _kernelScanSums, 1, 1, 1);
-                cmd.DispatchCompute(_cs, _kernelScanAdd, (int)sumCount, 1, 1);
+                cmd.DispatchCompute(_cs, _kernelScanBlocks, (int)blockCount, 1, 1);
+                cmd.DispatchCompute(_cs, _kernelScanDigits, 1, 1, 1);
 
                 cmd.SetComputeBufferParam(_cs, _kernelDownsweep, PropKeysIn, srcKeys);
                 cmd.SetComputeBufferParam(_cs, _kernelDownsweep, PropValuesIn, srcValues);

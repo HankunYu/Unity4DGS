@@ -6,13 +6,8 @@ namespace GaussianSplatting.Runtime
     // IGpuSorter implementation so callers never care which one runs.
     public struct GpuSortResources
     {
-        // Histogram sized for the smaller tile of the two sorters (the
-        // portable one's 1024 keys), which needs the most entries.
-        private const uint MinKeysPerTile = 1024;
-        private const uint Radix = 256;
-        // Wave radix: 4 passes x 256 global bins. Portable: one total per
-        // scan group, at most one tile's worth.
-        private const int ScratchSize = 1024;
+        // Wave radix scratch: 4 passes x 256 global bins.
+        private const uint WaveScratchSize = 1024;
 
         public GraphicsBuffer altKeys;
         public GraphicsBuffer altValues;
@@ -21,14 +16,17 @@ namespace GaussianSplatting.Runtime
 
         public static GpuSortResources Load(uint count)
         {
-            uint histogramSize = (count + MinKeysPerTile - 1) / MinKeysPerTile * Radix;
+            // The portable sorter's 1024-key tiles need more histogram entries
+            // than the wave sorter's larger partitions.
+            uint histogramSize = GpuPortableSorting.HistogramSize(count);
+            uint scratchSize = System.Math.Max(WaveScratchSize, GpuPortableSorting.BlockSumsSize(count));
             var target = GraphicsBuffer.Target.Structured;
             return new GpuSortResources
             {
                 altKeys = new GraphicsBuffer(target, (int)count, 4) { name = "GpuSortAltKeys" },
                 altValues = new GraphicsBuffer(target, (int)count, 4) { name = "GpuSortAltValues" },
                 histogram = new GraphicsBuffer(target, (int)histogramSize, 4) { name = "GpuSortHistogram" },
-                scratch = new GraphicsBuffer(target, ScratchSize, 4) { name = "GpuSortScratch" },
+                scratch = new GraphicsBuffer(target, (int)scratchSize, 4) { name = "GpuSortScratch" },
             };
         }
 
