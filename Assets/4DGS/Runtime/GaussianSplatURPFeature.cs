@@ -109,6 +109,7 @@ namespace GaussianSplatting.Runtime
                 internal Vector2Int RenderSize;
                 internal bool IsStereo;
                 internal bool IsXRActive;
+                internal bool Direct;
                 internal bool UseMatrixOverride;
                 internal Matrix4x4 OverrideView;
                 internal Matrix4x4 OverrideProj;
@@ -150,9 +151,15 @@ namespace GaussianSplatting.Runtime
                 rtDesc.msaaSamples = 1;
                 rtDesc.graphicsFormat = GraphicsFormat.R16G16B16A16_SFloat;
                 rtDesc.enableRandomWrite = true;  // allow compute shader UAV writes (tile renderer)
-                TextureHandle textureHandle = UniversalRenderer.CreateRenderGraphTexture(renderGraph, rtDesc, GaussianSplatRTName, true);
                 bool applyStylize =
                     _owner.CanRunStylizeForCamera(cameraData.camera, StylizeTarget.GaussianOnly, out var stylizeSettings);
+                // Direct: splats go straight into the camera target, so the
+                // intermediate RT (and its composite) is never created.
+                bool direct = GaussianSplatRenderSystem.instance.CanRenderDirect(
+                    applyStylize, resourceData.isActiveTargetBackBuffer);
+                TextureHandle textureHandle = direct
+                    ? TextureHandle.nullHandle
+                    : UniversalRenderer.CreateRenderGraphTexture(renderGraph, rtDesc, GaussianSplatRTName, true);
                 TextureHandle stylizedHandle = textureHandle;
                 if (applyStylize)
                     stylizedHandle = UniversalRenderer.CreateRenderGraphTexture(renderGraph, rtDesc, GaussianStylizeRTName, true);
@@ -168,6 +175,7 @@ namespace GaussianSplatting.Runtime
                 passData.StylizeMaterial = _owner._stylizeMaterial;
                 passData.IsStereo = isStereo;
                 passData.IsXRActive = needsMultiplierReset;
+                passData.Direct = direct;
                 // Capture the matrices URP uses for this specific render: during
                 // cubemap capture they differ per face from the Camera object.
                 passData.UseMatrixOverride = _owner.useRenderContextMatrices && !isStereo;
@@ -179,7 +187,8 @@ namespace GaussianSplatting.Runtime
 
                 builder.UseTexture(resourceData.activeColorTexture, AccessFlags.ReadWrite);
                 builder.UseTexture(resourceData.activeDepthTexture);
-                builder.UseTexture(textureHandle, AccessFlags.ReadWrite);
+                if (!direct)
+                    builder.UseTexture(textureHandle, AccessFlags.ReadWrite);
                 if (applyStylize)
                     builder.UseTexture(stylizedHandle, AccessFlags.ReadWrite);
                 builder.AllowPassCulling(false);
@@ -194,7 +203,11 @@ namespace GaussianSplatting.Runtime
                     if (data.IsXRActive)
                         commandBuffer.SetInstanceMultiplier(1);
 
-                    if (data.IsStereo)
+                    if (data.Direct)
+                    {
+                        RenderDirect(data, commandBuffer, system);
+                    }
+                    else if (data.IsStereo)
                     {
                         // Prepare once (sort + compute view data for both eyes)
                         Material matComposite = system.PrepareSplats(data.CameraData.camera, commandBuffer);
@@ -318,6 +331,44 @@ namespace GaussianSplatting.Runtime
                     if (data.IsXRActive)
                         commandBuffer.SetInstanceMultiplier(2);
                 });
+            }
+
+            // Draws splats straight into the camera color target, depth-tested
+            // against the camera depth: no intermediate RT, no composite. Under
+            // XR each eye slice is bound in turn, so the splats rasterise with
+            // the eye texture's own foveation rate map instead of at full rate.
+            private static void RenderDirect(PassData data, CommandBuffer cmd, GaussianSplatRenderSystem system)
+            {
+                system.DirectToTarget = true;
+                if (data.IsStereo)
+                {
+                    // Prepare once (view data for both eyes, back-to-front sort)
+                    system.PrepareSplats(data.CameraData.camera, cmd);
+                    cmd.DisableScissorRect();
+                    var eyeViewport = new Rect(0, 0, data.RenderSize.x, data.RenderSize.y);
+                    for (int eye = 0; eye < 2; eye++)
+                    {
+                        cmd.SetRenderTarget(data.SourceTexture, data.SourceDepth, 0, CubemapFace.Unknown, eye);
+                        cmd.SetViewport(eyeViewport);
+                        system.RenderPreparedSplats(cmd, eye);
+                    }
+                }
+                else
+                {
+                    cmd.SetRenderTarget(data.SourceTexture, data.SourceDepth);
+                    if (data.UseMatrixOverride)
+                    {
+                        system.MatrixOverride = new GaussianSplatRenderSystem.RenderMatrixOverride
+                        {
+                            View = data.OverrideView,
+                            Proj = data.OverrideProj,
+                            ScreenSize = data.RenderSize,
+                        };
+                    }
+                    system.SortAndRenderSplats(data.CameraData.camera, cmd);
+                    system.MatrixOverride = null;
+                }
+                system.DirectToTarget = false;
             }
         }
 

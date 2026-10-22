@@ -441,7 +441,10 @@ half4 LoadSplatColTex(uint3 coord)
     return _SplatColor.Load(coord);
 }
 
-SplatData LoadSplatData(uint idx)
+// loadSH = false skips every SH read (up to 192 bytes per splat) and leaves
+// the higher bands zero: what an SH order 0 render needs, at a fraction of
+// the bandwidth.
+SplatData LoadSplatData(uint idx, bool loadSH)
 {
     SplatData s = (SplatData)0;
 
@@ -481,101 +484,105 @@ SplatData LoadSplatData(uint idx)
     s.scale     = LoadAndDecodeVector(_SplatOther, otherAddr + 4, scaleFmt);
     half4 col   = LoadSplatColTex(coord);
 
-    uint shIndex = idx;
-    if (shFormat > VECTOR_FMT_6)
-        shIndex = LoadUShort(_SplatOther, otherAddr + otherStride - 2);
+    if (loadSH)
+    {
+        uint shIndex = idx;
+        if (shFormat > VECTOR_FMT_6)
+            shIndex = LoadUShort(_SplatOther, otherAddr + otherStride - 2);
 
-    uint shOffset = shIndex * shStride;
-    uint4 shRaw0 = _SplatSH.Load4(shOffset);
-    uint4 shRaw1 = _SplatSH.Load4(shOffset + 16);
-    if (shFormat == VECTOR_FMT_32F)
-    {
-        uint4 shRaw2 = _SplatSH.Load4(shOffset + 32);
-        uint4 shRaw3 = _SplatSH.Load4(shOffset + 48);
-        uint4 shRaw4 = _SplatSH.Load4(shOffset + 64);
-        uint4 shRaw5 = _SplatSH.Load4(shOffset + 80);
-        uint4 shRaw6 = _SplatSH.Load4(shOffset + 96);
-        uint4 shRaw7 = _SplatSH.Load4(shOffset + 112);
-        uint4 shRaw8 = _SplatSH.Load4(shOffset + 128);
-        uint4 shRaw9 = _SplatSH.Load4(shOffset + 144);
-        uint4 shRawA = _SplatSH.Load4(shOffset + 160);
-        uint  shRawB = _SplatSH.Load(shOffset + 176);
-        s.sh.sh1.r  = asfloat(shRaw0.x); s.sh.sh1.g =  asfloat(shRaw0.y); s.sh.sh1.b =  asfloat(shRaw0.z);
-        s.sh.sh2.r  = asfloat(shRaw0.w); s.sh.sh2.g =  asfloat(shRaw1.x); s.sh.sh2.b =  asfloat(shRaw1.y);
-        s.sh.sh3.r  = asfloat(shRaw1.z); s.sh.sh3.g =  asfloat(shRaw1.w); s.sh.sh3.b =  asfloat(shRaw2.x);
-        s.sh.sh4.r  = asfloat(shRaw2.y); s.sh.sh4.g =  asfloat(shRaw2.z); s.sh.sh4.b =  asfloat(shRaw2.w);
-        s.sh.sh5.r  = asfloat(shRaw3.x); s.sh.sh5.g =  asfloat(shRaw3.y); s.sh.sh5.b =  asfloat(shRaw3.z);
-        s.sh.sh6.r  = asfloat(shRaw3.w); s.sh.sh6.g =  asfloat(shRaw4.x); s.sh.sh6.b =  asfloat(shRaw4.y);
-        s.sh.sh7.r  = asfloat(shRaw4.z); s.sh.sh7.g =  asfloat(shRaw4.w); s.sh.sh7.b =  asfloat(shRaw5.x);
-        s.sh.sh8.r  = asfloat(shRaw5.y); s.sh.sh8.g =  asfloat(shRaw5.z); s.sh.sh8.b =  asfloat(shRaw5.w);
-        s.sh.sh9.r  = asfloat(shRaw6.x); s.sh.sh9.g =  asfloat(shRaw6.y); s.sh.sh9.b =  asfloat(shRaw6.z);
-        s.sh.sh10.r = asfloat(shRaw6.w); s.sh.sh10.g = asfloat(shRaw7.x); s.sh.sh10.b = asfloat(shRaw7.y);
-        s.sh.sh11.r = asfloat(shRaw7.z); s.sh.sh11.g = asfloat(shRaw7.w); s.sh.sh11.b = asfloat(shRaw8.x);
-        s.sh.sh12.r = asfloat(shRaw8.y); s.sh.sh12.g = asfloat(shRaw8.z); s.sh.sh12.b = asfloat(shRaw8.w);
-        s.sh.sh13.r = asfloat(shRaw9.x); s.sh.sh13.g = asfloat(shRaw9.y); s.sh.sh13.b = asfloat(shRaw9.z);
-        s.sh.sh14.r = asfloat(shRaw9.w); s.sh.sh14.g = asfloat(shRawA.x); s.sh.sh14.b = asfloat(shRawA.y);
-        s.sh.sh15.r = asfloat(shRawA.z); s.sh.sh15.g = asfloat(shRawA.w); s.sh.sh15.b = asfloat(shRawB);
-    }
-    else if (shFormat == VECTOR_FMT_16 || shFormat > VECTOR_FMT_6)
-    {
-        uint4 shRaw2 = _SplatSH.Load4(shOffset + 32);
-        uint4 shRaw3 = _SplatSH.Load4(shOffset + 48);
-        uint4 shRaw4 = _SplatSH.Load4(shOffset + 64);
-        uint3 shRaw5 = _SplatSH.Load3(shOffset + 80);
-        s.sh.sh1.r  = f16tof32(shRaw0.x      ); s.sh.sh1.g =  f16tof32(shRaw0.x >> 16); s.sh.sh1.b =  f16tof32(shRaw0.y      );
-        s.sh.sh2.r  = f16tof32(shRaw0.y >> 16); s.sh.sh2.g =  f16tof32(shRaw0.z      ); s.sh.sh2.b =  f16tof32(shRaw0.z >> 16);
-        s.sh.sh3.r  = f16tof32(shRaw0.w      ); s.sh.sh3.g =  f16tof32(shRaw0.w >> 16); s.sh.sh3.b =  f16tof32(shRaw1.x      );
-        s.sh.sh4.r  = f16tof32(shRaw1.x >> 16); s.sh.sh4.g =  f16tof32(shRaw1.y      ); s.sh.sh4.b =  f16tof32(shRaw1.y >> 16);
-        s.sh.sh5.r  = f16tof32(shRaw1.z      ); s.sh.sh5.g =  f16tof32(shRaw1.z >> 16); s.sh.sh5.b =  f16tof32(shRaw1.w      );
-        s.sh.sh6.r  = f16tof32(shRaw1.w >> 16); s.sh.sh6.g =  f16tof32(shRaw2.x      ); s.sh.sh6.b =  f16tof32(shRaw2.x >> 16);
-        s.sh.sh7.r  = f16tof32(shRaw2.y      ); s.sh.sh7.g =  f16tof32(shRaw2.y >> 16); s.sh.sh7.b =  f16tof32(shRaw2.z      );
-        s.sh.sh8.r  = f16tof32(shRaw2.z >> 16); s.sh.sh8.g =  f16tof32(shRaw2.w      ); s.sh.sh8.b =  f16tof32(shRaw2.w >> 16);
-        s.sh.sh9.r  = f16tof32(shRaw3.x      ); s.sh.sh9.g =  f16tof32(shRaw3.x >> 16); s.sh.sh9.b =  f16tof32(shRaw3.y      );
-        s.sh.sh10.r = f16tof32(shRaw3.y >> 16); s.sh.sh10.g = f16tof32(shRaw3.z      ); s.sh.sh10.b = f16tof32(shRaw3.z >> 16);
-        s.sh.sh11.r = f16tof32(shRaw3.w      ); s.sh.sh11.g = f16tof32(shRaw3.w >> 16); s.sh.sh11.b = f16tof32(shRaw4.x      );
-        s.sh.sh12.r = f16tof32(shRaw4.x >> 16); s.sh.sh12.g = f16tof32(shRaw4.y      ); s.sh.sh12.b = f16tof32(shRaw4.y >> 16);
-        s.sh.sh13.r = f16tof32(shRaw4.z      ); s.sh.sh13.g = f16tof32(shRaw4.z >> 16); s.sh.sh13.b = f16tof32(shRaw4.w      );
-        s.sh.sh14.r = f16tof32(shRaw4.w >> 16); s.sh.sh14.g = f16tof32(shRaw5.x      ); s.sh.sh14.b = f16tof32(shRaw5.x >> 16);
-        s.sh.sh15.r = f16tof32(shRaw5.y      ); s.sh.sh15.g = f16tof32(shRaw5.y >> 16); s.sh.sh15.b = f16tof32(shRaw5.z      );
-    }
-    else if (shFormat == VECTOR_FMT_11)
-    {
-        uint4 shRaw2 = _SplatSH.Load4(shOffset + 32);
-        uint3 shRaw3 = _SplatSH.Load3(shOffset + 48);
-        s.sh.sh1 =  DecodePacked_11_10_11(shRaw0.x);
-        s.sh.sh2 =  DecodePacked_11_10_11(shRaw0.y);
-        s.sh.sh3 =  DecodePacked_11_10_11(shRaw0.z);
-        s.sh.sh4 =  DecodePacked_11_10_11(shRaw0.w);
-        s.sh.sh5 =  DecodePacked_11_10_11(shRaw1.x);
-        s.sh.sh6 =  DecodePacked_11_10_11(shRaw1.y);
-        s.sh.sh7 =  DecodePacked_11_10_11(shRaw1.z);
-        s.sh.sh8 =  DecodePacked_11_10_11(shRaw1.w);
-        s.sh.sh9 =  DecodePacked_11_10_11(shRaw2.x);
-        s.sh.sh10 = DecodePacked_11_10_11(shRaw2.y);
-        s.sh.sh11 = DecodePacked_11_10_11(shRaw2.z);
-        s.sh.sh12 = DecodePacked_11_10_11(shRaw2.w);
-        s.sh.sh13 = DecodePacked_11_10_11(shRaw3.x);
-        s.sh.sh14 = DecodePacked_11_10_11(shRaw3.y);
-        s.sh.sh15 = DecodePacked_11_10_11(shRaw3.z);
-    }
-    else if (shFormat == VECTOR_FMT_6)
-    {
-        s.sh.sh1 =  DecodePacked_5_6_5(shRaw0.x);
-        s.sh.sh2 =  DecodePacked_5_6_5(shRaw0.x >> 16);
-        s.sh.sh3 =  DecodePacked_5_6_5(shRaw0.y);
-        s.sh.sh4 =  DecodePacked_5_6_5(shRaw0.y >> 16);
-        s.sh.sh5 =  DecodePacked_5_6_5(shRaw0.z);
-        s.sh.sh6 =  DecodePacked_5_6_5(shRaw0.z >> 16);
-        s.sh.sh7 =  DecodePacked_5_6_5(shRaw0.w);
-        s.sh.sh8 =  DecodePacked_5_6_5(shRaw0.w >> 16);
-        s.sh.sh9 =  DecodePacked_5_6_5(shRaw1.x);
-        s.sh.sh10 = DecodePacked_5_6_5(shRaw1.x >> 16);
-        s.sh.sh11 = DecodePacked_5_6_5(shRaw1.y);
-        s.sh.sh12 = DecodePacked_5_6_5(shRaw1.y >> 16);
-        s.sh.sh13 = DecodePacked_5_6_5(shRaw1.z);
-        s.sh.sh14 = DecodePacked_5_6_5(shRaw1.z >> 16);
-        s.sh.sh15 = DecodePacked_5_6_5(shRaw1.w);
-    }
+        uint shOffset = shIndex * shStride;
+        uint4 shRaw0 = _SplatSH.Load4(shOffset);
+        uint4 shRaw1 = _SplatSH.Load4(shOffset + 16);
+        if (shFormat == VECTOR_FMT_32F)
+        {
+            uint4 shRaw2 = _SplatSH.Load4(shOffset + 32);
+            uint4 shRaw3 = _SplatSH.Load4(shOffset + 48);
+            uint4 shRaw4 = _SplatSH.Load4(shOffset + 64);
+            uint4 shRaw5 = _SplatSH.Load4(shOffset + 80);
+            uint4 shRaw6 = _SplatSH.Load4(shOffset + 96);
+            uint4 shRaw7 = _SplatSH.Load4(shOffset + 112);
+            uint4 shRaw8 = _SplatSH.Load4(shOffset + 128);
+            uint4 shRaw9 = _SplatSH.Load4(shOffset + 144);
+            uint4 shRawA = _SplatSH.Load4(shOffset + 160);
+            uint  shRawB = _SplatSH.Load(shOffset + 176);
+            s.sh.sh1.r  = asfloat(shRaw0.x); s.sh.sh1.g =  asfloat(shRaw0.y); s.sh.sh1.b =  asfloat(shRaw0.z);
+            s.sh.sh2.r  = asfloat(shRaw0.w); s.sh.sh2.g =  asfloat(shRaw1.x); s.sh.sh2.b =  asfloat(shRaw1.y);
+            s.sh.sh3.r  = asfloat(shRaw1.z); s.sh.sh3.g =  asfloat(shRaw1.w); s.sh.sh3.b =  asfloat(shRaw2.x);
+            s.sh.sh4.r  = asfloat(shRaw2.y); s.sh.sh4.g =  asfloat(shRaw2.z); s.sh.sh4.b =  asfloat(shRaw2.w);
+            s.sh.sh5.r  = asfloat(shRaw3.x); s.sh.sh5.g =  asfloat(shRaw3.y); s.sh.sh5.b =  asfloat(shRaw3.z);
+            s.sh.sh6.r  = asfloat(shRaw3.w); s.sh.sh6.g =  asfloat(shRaw4.x); s.sh.sh6.b =  asfloat(shRaw4.y);
+            s.sh.sh7.r  = asfloat(shRaw4.z); s.sh.sh7.g =  asfloat(shRaw4.w); s.sh.sh7.b =  asfloat(shRaw5.x);
+            s.sh.sh8.r  = asfloat(shRaw5.y); s.sh.sh8.g =  asfloat(shRaw5.z); s.sh.sh8.b =  asfloat(shRaw5.w);
+            s.sh.sh9.r  = asfloat(shRaw6.x); s.sh.sh9.g =  asfloat(shRaw6.y); s.sh.sh9.b =  asfloat(shRaw6.z);
+            s.sh.sh10.r = asfloat(shRaw6.w); s.sh.sh10.g = asfloat(shRaw7.x); s.sh.sh10.b = asfloat(shRaw7.y);
+            s.sh.sh11.r = asfloat(shRaw7.z); s.sh.sh11.g = asfloat(shRaw7.w); s.sh.sh11.b = asfloat(shRaw8.x);
+            s.sh.sh12.r = asfloat(shRaw8.y); s.sh.sh12.g = asfloat(shRaw8.z); s.sh.sh12.b = asfloat(shRaw8.w);
+            s.sh.sh13.r = asfloat(shRaw9.x); s.sh.sh13.g = asfloat(shRaw9.y); s.sh.sh13.b = asfloat(shRaw9.z);
+            s.sh.sh14.r = asfloat(shRaw9.w); s.sh.sh14.g = asfloat(shRawA.x); s.sh.sh14.b = asfloat(shRawA.y);
+            s.sh.sh15.r = asfloat(shRawA.z); s.sh.sh15.g = asfloat(shRawA.w); s.sh.sh15.b = asfloat(shRawB);
+        }
+        else if (shFormat == VECTOR_FMT_16 || shFormat > VECTOR_FMT_6)
+        {
+            uint4 shRaw2 = _SplatSH.Load4(shOffset + 32);
+            uint4 shRaw3 = _SplatSH.Load4(shOffset + 48);
+            uint4 shRaw4 = _SplatSH.Load4(shOffset + 64);
+            uint3 shRaw5 = _SplatSH.Load3(shOffset + 80);
+            s.sh.sh1.r  = f16tof32(shRaw0.x      ); s.sh.sh1.g =  f16tof32(shRaw0.x >> 16); s.sh.sh1.b =  f16tof32(shRaw0.y      );
+            s.sh.sh2.r  = f16tof32(shRaw0.y >> 16); s.sh.sh2.g =  f16tof32(shRaw0.z      ); s.sh.sh2.b =  f16tof32(shRaw0.z >> 16);
+            s.sh.sh3.r  = f16tof32(shRaw0.w      ); s.sh.sh3.g =  f16tof32(shRaw0.w >> 16); s.sh.sh3.b =  f16tof32(shRaw1.x      );
+            s.sh.sh4.r  = f16tof32(shRaw1.x >> 16); s.sh.sh4.g =  f16tof32(shRaw1.y      ); s.sh.sh4.b =  f16tof32(shRaw1.y >> 16);
+            s.sh.sh5.r  = f16tof32(shRaw1.z      ); s.sh.sh5.g =  f16tof32(shRaw1.z >> 16); s.sh.sh5.b =  f16tof32(shRaw1.w      );
+            s.sh.sh6.r  = f16tof32(shRaw1.w >> 16); s.sh.sh6.g =  f16tof32(shRaw2.x      ); s.sh.sh6.b =  f16tof32(shRaw2.x >> 16);
+            s.sh.sh7.r  = f16tof32(shRaw2.y      ); s.sh.sh7.g =  f16tof32(shRaw2.y >> 16); s.sh.sh7.b =  f16tof32(shRaw2.z      );
+            s.sh.sh8.r  = f16tof32(shRaw2.z >> 16); s.sh.sh8.g =  f16tof32(shRaw2.w      ); s.sh.sh8.b =  f16tof32(shRaw2.w >> 16);
+            s.sh.sh9.r  = f16tof32(shRaw3.x      ); s.sh.sh9.g =  f16tof32(shRaw3.x >> 16); s.sh.sh9.b =  f16tof32(shRaw3.y      );
+            s.sh.sh10.r = f16tof32(shRaw3.y >> 16); s.sh.sh10.g = f16tof32(shRaw3.z      ); s.sh.sh10.b = f16tof32(shRaw3.z >> 16);
+            s.sh.sh11.r = f16tof32(shRaw3.w      ); s.sh.sh11.g = f16tof32(shRaw3.w >> 16); s.sh.sh11.b = f16tof32(shRaw4.x      );
+            s.sh.sh12.r = f16tof32(shRaw4.x >> 16); s.sh.sh12.g = f16tof32(shRaw4.y      ); s.sh.sh12.b = f16tof32(shRaw4.y >> 16);
+            s.sh.sh13.r = f16tof32(shRaw4.z      ); s.sh.sh13.g = f16tof32(shRaw4.z >> 16); s.sh.sh13.b = f16tof32(shRaw4.w      );
+            s.sh.sh14.r = f16tof32(shRaw4.w >> 16); s.sh.sh14.g = f16tof32(shRaw5.x      ); s.sh.sh14.b = f16tof32(shRaw5.x >> 16);
+            s.sh.sh15.r = f16tof32(shRaw5.y      ); s.sh.sh15.g = f16tof32(shRaw5.y >> 16); s.sh.sh15.b = f16tof32(shRaw5.z      );
+        }
+        else if (shFormat == VECTOR_FMT_11)
+        {
+            uint4 shRaw2 = _SplatSH.Load4(shOffset + 32);
+            uint3 shRaw3 = _SplatSH.Load3(shOffset + 48);
+            s.sh.sh1 =  DecodePacked_11_10_11(shRaw0.x);
+            s.sh.sh2 =  DecodePacked_11_10_11(shRaw0.y);
+            s.sh.sh3 =  DecodePacked_11_10_11(shRaw0.z);
+            s.sh.sh4 =  DecodePacked_11_10_11(shRaw0.w);
+            s.sh.sh5 =  DecodePacked_11_10_11(shRaw1.x);
+            s.sh.sh6 =  DecodePacked_11_10_11(shRaw1.y);
+            s.sh.sh7 =  DecodePacked_11_10_11(shRaw1.z);
+            s.sh.sh8 =  DecodePacked_11_10_11(shRaw1.w);
+            s.sh.sh9 =  DecodePacked_11_10_11(shRaw2.x);
+            s.sh.sh10 = DecodePacked_11_10_11(shRaw2.y);
+            s.sh.sh11 = DecodePacked_11_10_11(shRaw2.z);
+            s.sh.sh12 = DecodePacked_11_10_11(shRaw2.w);
+            s.sh.sh13 = DecodePacked_11_10_11(shRaw3.x);
+            s.sh.sh14 = DecodePacked_11_10_11(shRaw3.y);
+            s.sh.sh15 = DecodePacked_11_10_11(shRaw3.z);
+        }
+        else if (shFormat == VECTOR_FMT_6)
+        {
+            s.sh.sh1 =  DecodePacked_5_6_5(shRaw0.x);
+            s.sh.sh2 =  DecodePacked_5_6_5(shRaw0.x >> 16);
+            s.sh.sh3 =  DecodePacked_5_6_5(shRaw0.y);
+            s.sh.sh4 =  DecodePacked_5_6_5(shRaw0.y >> 16);
+            s.sh.sh5 =  DecodePacked_5_6_5(shRaw0.z);
+            s.sh.sh6 =  DecodePacked_5_6_5(shRaw0.z >> 16);
+            s.sh.sh7 =  DecodePacked_5_6_5(shRaw0.w);
+            s.sh.sh8 =  DecodePacked_5_6_5(shRaw0.w >> 16);
+            s.sh.sh9 =  DecodePacked_5_6_5(shRaw1.x);
+            s.sh.sh10 = DecodePacked_5_6_5(shRaw1.x >> 16);
+            s.sh.sh11 = DecodePacked_5_6_5(shRaw1.y);
+            s.sh.sh12 = DecodePacked_5_6_5(shRaw1.y >> 16);
+            s.sh.sh13 = DecodePacked_5_6_5(shRaw1.z);
+            s.sh.sh14 = DecodePacked_5_6_5(shRaw1.z >> 16);
+            s.sh.sh15 = DecodePacked_5_6_5(shRaw1.w);
+        }
+
+    } // loadSH
 
     // if raw data is chunk-relative, convert to final values by interpolating between chunk min/max
     uint chunkIdx = idx / kChunkSize;
@@ -598,7 +605,7 @@ SplatData LoadSplatData(uint idx)
         col   = lerp(colMin, colMax, col);
         col.a = InvSquareCentered01(col.a);
 
-        if (shFormat > VECTOR_FMT_32F && shFormat <= VECTOR_FMT_6)
+        if (loadSH && shFormat > VECTOR_FMT_32F && shFormat <= VECTOR_FMT_6)
         {
             s.sh.sh1    = lerp(shMin, shMax, s.sh.sh1 );
             s.sh.sh2    = lerp(shMin, shMax, s.sh.sh2 );
@@ -621,6 +628,11 @@ SplatData LoadSplatData(uint idx)
     s.sh.col    = col.rgb;
 
     return s;
+}
+
+SplatData LoadSplatData(uint idx)
+{
+    return LoadSplatData(idx, true);
 }
 
 #endif // GAUSSIAN_SPLAT_SKIP_BUFFER_DECLARATIONS

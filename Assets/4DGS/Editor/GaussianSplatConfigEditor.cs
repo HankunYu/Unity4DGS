@@ -21,6 +21,13 @@ namespace GaussianSplatting.Editor
         SerializedProperty m_PropOdsEyeOffset;
         SerializedProperty m_PropOdsPoleMergeStart;
         SerializedProperty m_PropOdsPoleMergeEnd;
+        SerializedProperty m_PropCompositeMode;
+        SerializedProperty m_PropSplatQuadSigma;
+        SerializedProperty m_PropAdaptiveSplatExtent;
+        SerializedProperty m_PropMaxSplatPixelRadius;
+        SerializedProperty m_PropMaxSHOrder;
+        SerializedProperty m_PropSortMetric;
+        SerializedProperty m_PropSortMoveThreshold;
 
         private void OnEnable()
         {
@@ -38,6 +45,13 @@ namespace GaussianSplatting.Editor
             m_PropUseTileRenderer = serializedObject.FindProperty("useTileRenderer");
             m_PropPointCloudAov = serializedObject.FindProperty("pointCloudAov");
             m_PropPointCloudAovDepthScale = serializedObject.FindProperty("pointCloudAovDepthScale");
+            m_PropCompositeMode = serializedObject.FindProperty("compositeMode");
+            m_PropSplatQuadSigma = serializedObject.FindProperty("splatQuadSigma");
+            m_PropAdaptiveSplatExtent = serializedObject.FindProperty("adaptiveSplatExtent");
+            m_PropMaxSplatPixelRadius = serializedObject.FindProperty("maxSplatPixelRadius");
+            m_PropMaxSHOrder = serializedObject.FindProperty("maxSHOrder");
+            m_PropSortMetric = serializedObject.FindProperty("sortMetric");
+            m_PropSortMoveThreshold = serializedObject.FindProperty("sortMoveThreshold");
         }
 
         public override void OnInspectorGUI()
@@ -81,6 +95,38 @@ namespace GaussianSplatting.Editor
             EditorGUILayout.PropertyField(m_PropUseTileRenderer, new GUIContent("Tile-Based Renderer"));
 
             EditorGUILayout.Space();
+            GUILayout.Label("Performance", EditorStyles.boldLabel);
+            EditorGUILayout.PropertyField(m_PropCompositeMode);
+            if (m_PropCompositeMode.intValue == (int)GaussianSplatCompositeMode.Direct)
+            {
+                EditorGUILayout.HelpBox(
+                    "Direct draws splats straight into the camera target: no intermediate RT, no composite " +
+                    "pass, scene depth occludes splats, and XR foveation applies to them. Blending happens " +
+                    "in linear space, so soft edges look slightly different from Offscreen. The tile " +
+                    "renderer, Gaussian-only stylize, AOVs, ODS and the debug modes stay offscreen.",
+                    MessageType.Info);
+            }
+            EditorGUILayout.PropertyField(m_PropSplatQuadSigma, new GUIContent("Quad Extent (sigma)"));
+            EditorGUILayout.PropertyField(m_PropAdaptiveSplatExtent, new GUIContent("Opacity-Adaptive Quads"));
+            EditorGUILayout.PropertyField(m_PropMaxSplatPixelRadius, new GUIContent("Max Splat Radius (px)"));
+            EditorGUILayout.PropertyField(m_PropMaxSHOrder, new GUIContent("Max SH Order"));
+
+            EditorGUILayout.Space();
+            GUILayout.Label("Sorting", EditorStyles.boldLabel);
+            EditorGUILayout.PropertyField(m_PropSortMetric);
+            using (new EditorGUI.DisabledScope(m_PropSortMetric.intValue != (int)GaussianSplatSortMetric.Radial))
+                EditorGUILayout.PropertyField(m_PropSortMoveThreshold, new GUIContent("Re-sort Distance (m)"));
+
+            EditorGUILayout.Space();
+            if (GUILayout.Button(new GUIContent("Apply VR Preset",
+                    "Direct composite, sqrt(5) sigma quads, 512 px radius cap, SH order 1, radial sorting " +
+                    "re-sorted every 1 cm of head motion, tile renderer off. A starting point for " +
+                    "standalone headsets; tune from there.")))
+            {
+                ApplyVrPreset();
+            }
+
+            EditorGUILayout.Space();
             GUILayout.Label("Projection", EditorStyles.boldLabel);
             EditorGUILayout.PropertyField(m_PropProjectionMode);
             if (m_PropProjectionMode.intValue == (int)GaussianSplatProjectionMode.OmniDirectionalStereo)
@@ -117,6 +163,21 @@ namespace GaussianSplatting.Editor
             }
 
             serializedObject.ApplyModifiedProperties();
+        }
+
+        // Values follow Spark's VR guidance (sqrt(5) sigma, 512 px radius cap)
+        // plus this renderer's own bandwidth levers. Edits the serialized
+        // properties so the change is undoable and marks the scene dirty.
+        private void ApplyVrPreset()
+        {
+            m_PropCompositeMode.intValue = (int)GaussianSplatCompositeMode.Direct;
+            m_PropSplatQuadSigma.floatValue = Mathf.Sqrt(5f);
+            m_PropAdaptiveSplatExtent.boolValue = true;
+            m_PropMaxSplatPixelRadius.floatValue = 512f;
+            m_PropMaxSHOrder.intValue = 1;
+            m_PropSortMetric.intValue = (int)GaussianSplatSortMetric.Radial;
+            m_PropSortMoveThreshold.floatValue = 0.01f;
+            m_PropUseTileRenderer.boolValue = false;
         }
     }
 }

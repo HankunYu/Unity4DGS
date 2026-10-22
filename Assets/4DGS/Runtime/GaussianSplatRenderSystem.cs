@@ -30,7 +30,13 @@ namespace GaussianSplatting.Runtime
         static GaussianSplatRenderSystem()
         {
 #if UNITY_EDITOR
-            UnityEditor.AssemblyReloadEvents.beforeAssemblyReload += () => FlushDeferredDisposal(true);
+            UnityEditor.AssemblyReloadEvents.beforeAssemblyReload += () =>
+            {
+                // OnDisable runs after this event during the domain unload;
+                // anything deferred from then on would never be flushed.
+                s_tearingDown = true;
+                FlushDeferredDisposal(true);
+            };
             // Vulkan binding errors are native render-thread logs with no C#
             // stack — flag them here, dump the draw journal on the main thread.
             Application.logMessageReceivedThreaded += (msg, _, _) =>
@@ -39,8 +45,14 @@ namespace GaussianSplatting.Runtime
                     s_bindingErrorSeen = true;
             };
 #endif
-            Application.quitting += () => FlushDeferredDisposal(true);
+            Application.quitting += () =>
+            {
+                s_tearingDown = true;
+                FlushDeferredDisposal(true);
+            };
         }
+
+        static bool s_tearingDown;
 
         // ── Draw/dispose journal for correlating native binding errors ──
         static readonly Queue<string> s_journal = new();
@@ -69,6 +81,12 @@ namespace GaussianSplatting.Runtime
         {
             if (buf == null)
                 return;
+            if (s_tearingDown)
+            {
+                // No later frame will flush the queue; nothing renders anymore.
+                buf.Dispose();
+                return;
+            }
             Journal($"defer-dispose #{buf.GetHashCode():X8} count={buf.count} stride={buf.stride}");
             s_deferredDisposal.Add((buf, Time.frameCount));
         }
@@ -93,10 +111,8 @@ namespace GaussianSplatting.Runtime
         readonly Dictionary<int, GlobalOrderGroupCache> _globalGroups = new();
 
         CommandBuffer _commandBuffer;
-        GpuSorting _globalSorter;
-        ComputeShader _globalSorterShader;
-        GpuCountingSort _globalCountingSorter;
-        ComputeShader _globalCountingSortShader;
+        IGpuSorter _globalSorter;
+        GaussianSplatConfig _globalSorterConfig;
         int _globalFrameId;
 
         // ── Config ──────────────────────────────────────────────────────
@@ -131,6 +147,24 @@ namespace GaussianSplatting.Runtime
         private static readonly int PropDstBlend = Shader.PropertyToID("_DstBlend");
         private static readonly int PropBlendOp = Shader.PropertyToID("_BlendOp");
         private static readonly int PropAovDepthScale = Shader.PropertyToID("_AovDepthScale");
+        private static readonly int PropSplatQuadExtent = Shader.PropertyToID("_SplatQuadExtent");
+        private static readonly int PropSplatAdaptiveExtent = Shader.PropertyToID("_SplatAdaptiveExtent");
+        private static readonly int PropSplatMaxPixelRadius = Shader.PropertyToID("_SplatMaxPixelRadius");
+
+        // Per-render state shared by every splat draw: quad shaping, and the
+        // beauty/AOV switch of the point pass and the composite.
+        internal void ApplyOutputState(CommandBuffer cmb)
+        {
+            if (_config != null)
+            {
+                // The fragment falloff is exp(-dot(pos,pos)): one unit of quad
+                // extent is sqrt(2) standard deviations.
+                cmb.SetGlobalFloat(PropSplatQuadExtent, _config.splatQuadSigma / Mathf.Sqrt(2f));
+                cmb.SetGlobalInteger(PropSplatAdaptiveExtent, _config.adaptiveSplatExtent ? 1 : 0);
+                cmb.SetGlobalFloat(PropSplatMaxPixelRadius, _config.maxSplatPixelRadius);
+            }
+            ApplyAovState(cmb);
+        }
 
         // Switches the point pass and the composite between beauty and AOV.
         //
@@ -142,7 +176,7 @@ namespace GaussianSplatting.Runtime
         // Keywords go through the command buffer, not Material.EnableKeyword:
         // the latter is CPU-immediate and would be cleared again before the
         // render graph executes the deferred draw.
-        internal void ApplyAovState(CommandBuffer cmb)
+        private void ApplyAovState(CommandBuffer cmb)
         {
             bool aov = _config != null &&
                        _config.pointCloudAov != GaussianSplatAovMode.None &&
@@ -235,7 +269,14 @@ namespace GaussianSplatting.Runtime
             public int instanceCount;
             public MeshTopology topology;
             public GraphicsBuffer indirectArgs;   // non-null: indexed indirect draw
+            public int pass;
         }
+
+        // Splats and PointCloud draw the sorted view data: invisible splats sit
+        // past the indirect instance count, and the direct pass applies. The
+        // debug modes draw every splat (or chunk) through pass 0.
+        private bool UsesSortedViewData =>
+            _config.renderMode is GaussianSplatRenderMode.Splats or GaussianSplatRenderMode.PointCloud;
 
         private readonly List<StereoRenderItem> _preparedItems = new();
         public int PreparedItemCount => _preparedItems.Count;
@@ -267,6 +308,46 @@ namespace GaussianSplatting.Runtime
         }
 
         public RenderMatrixOverride? MatrixOverride { get; set; }
+
+        // ── Composite mode ────────────────────────────────────────────
+        // Set by the render feature for the render in flight: draw straight
+        // into the camera target (pass 1, back-to-front) instead of the
+        // intermediate splat RT (pass 0, front-to-back).
+        public bool DirectToTarget { get; set; }
+
+        // Shader pass for the Splats and PointCloud display materials.
+        internal int DisplayPass => DirectToTarget ? 1 : 0;
+
+        // Whether a render may take the direct path. Everything that needs the
+        // intermediate RT — a Gaussian-only stylize pass, AOVs, the debug
+        // modes, ODS (no meaningful depth) — or a backbuffer target (whose Y
+        // orientation the splat projection does not handle) stays offscreen.
+        public bool CanRenderDirect(bool stylizeSplatsOnly, bool targetIsBackBuffer)
+        {
+            var config = Config;
+            return config != null &&
+                   config.compositeMode == GaussianSplatCompositeMode.Direct &&
+                   config.renderMode is GaussianSplatRenderMode.Splats or GaussianSplatRenderMode.PointCloud &&
+                   config.pointCloudAov == GaussianSplatAovMode.None &&
+                   config.projectionMode == GaussianSplatProjectionMode.Perspective &&
+                   !stylizeSplatsOnly && !targetIsBackBuffer;
+        }
+
+        // Sort settings for the render in flight. Throttling needs keys that
+        // stay valid while the camera turns (radial metric) and content that
+        // does not move by itself; edit mode always sorts, since GPU-side
+        // edits are not all tracked.
+        private GaussianSplatSortState.Settings SortSettings(bool animatedContent)
+        {
+            bool radial = _config.UseRadialSort;
+            return new GaussianSplatSortState.Settings
+            {
+                Radial = radial,
+                BackToFront = DirectToTarget,
+                Throttled = Application.isPlaying && radial && _config.sortMoveThreshold > 0f &&
+                            !animatedContent && !MatrixOverride.HasValue,
+            };
+        }
 
         private static void DisposeBuffer(ref GraphicsBuffer buf)
         {
@@ -311,9 +392,7 @@ namespace GaussianSplatting.Runtime
         {
             public int splatCapacity;
             public int groupSignature;
-            public bool hasSortedKeys;
-            public int lastSortCameraId;    // instance ID of last camera that sorted the keys
-            public int lastSortFrame;       // Time.frameCount of that sort
+            public readonly GaussianSplatSortState sortState = new();
             public int lastUsedFrame;
             public GraphicsBuffer viewData;
             public GraphicsBuffer sortDistances;
@@ -321,7 +400,8 @@ namespace GaussianSplatting.Runtime
             public GraphicsBuffer visibleCounter;   // [0] = visible splats this sort
             public GraphicsBuffer indirectArgs;     // 5 uints for DrawProceduralIndirect
             public bool indirectArgsValid;          // args written for the current keys
-            public GpuSorting.Args sorterArgs;
+            public GpuSortArgs sorterArgs;
+            public int sorterCapacity;              // splats the sort scratch buffers fit
 
             // ── Tile-based rendering buffers ──────────────────────────────
             public const int MaxTilePairs = 16 * 1024 * 1024; // 16M (tile,splat) pairs
@@ -329,7 +409,7 @@ namespace GaussianSplatting.Runtime
             public GraphicsBuffer tileValues;       // splatId per pair
             public GraphicsBuffer tileRanges;       // uint2[numTiles]: (start,end) per tile
             public GraphicsBuffer tilePairCounter;  // 4-byte atomic counter
-            public GpuSorting.Args tileSorterArgs;
+            public GpuSortArgs tileSorterArgs;
             public int tileCountX, tileCountY;      // current tile grid dimensions
             public int tileRangesCapacity;          // allocated tile count (grow-only)
             public bool hasTileRanges;              // true after first tile sort+build
@@ -367,6 +447,7 @@ namespace GaussianSplatting.Runtime
                 DeferDispose(indirectArgs);  indirectArgs = null;
                 indirectArgsValid = false;
                 sorterArgs.resources.Dispose();
+                sorterCapacity = 0;
 
                 DeferDispose(tileKeys);      tileKeys = null;
                 DeferDispose(tileValues);    tileValues = null;
@@ -387,10 +468,7 @@ namespace GaussianSplatting.Runtime
                 kvp.Value.Dispose();
             _globalGroups.Clear();
             _globalSorter = null;
-            _globalSorterShader = null;
-            _globalCountingSorter?.Dispose();
-            _globalCountingSorter = null;
-            _globalCountingSortShader = null;
+            _globalSorterConfig = null;
             _tileRenderer = null;
             _hasRenderFence = false;
 
@@ -505,7 +583,7 @@ namespace GaussianSplatting.Runtime
             if (_hasRenderFence)
                 cmb.WaitOnAsyncGraphicsFence(_lastRenderFence);
 
-            ApplyAovState(cmb);
+            ApplyOutputState(cmb);
 
             Material result = CanUseGlobalSortPath()
                 ? SortAndRenderSplatsGlobal(cam, cmb)
@@ -528,7 +606,7 @@ namespace GaussianSplatting.Runtime
             if (_hasRenderFence && useFence)
                 cmb.WaitOnAsyncGraphicsFence(_lastRenderFence);
 
-            ApplyAovState(cmb);
+            ApplyOutputState(cmb);
 
             _preparedItems.Clear();
             Material matComposite = _matComposite;
@@ -586,10 +664,11 @@ namespace GaussianSplatting.Runtime
 
                 // Sort after view data so distance keys can read visibility
                 // (invisible splats sink to the tail; indirect draw skips them).
-                if (gs.NeedsSort(cam))
+                var sortSettings = SortSettings(gs.HasAnimatedContent);
+                if (gs.NeedsSort(cam, sortSettings))
                 {
-                    gs.SortPoints(cmb, cam, matrix);
-                    gs.MarkSorted(cam);
+                    gs.SortPoints(cmb, cam, matrix, sortSettings);
+                    gs.MarkSorted(cam, sortSettings);
                 }
 
                 int indexCount = 6;
@@ -604,8 +683,8 @@ namespace GaussianSplatting.Runtime
                 {
                     gs = gs, displayMat = displayMat, mpb = mpb,
                     indexCount = indexCount, instanceCount = instanceCount, topology = topology,
-                    indirectArgs = _config.renderMode == GaussianSplatRenderMode.Splats && gs.IndirectDrawReady
-                        ? gs.GpuIndirectArgs : null
+                    indirectArgs = UsesSortedViewData && gs.IndirectDrawReady ? gs.GpuIndirectArgs : null,
+                    pass = UsesSortedViewData ? DisplayPass : 0,
                 });
             }
 
@@ -628,10 +707,10 @@ namespace GaussianSplatting.Runtime
                 cmb.BeginSample(ProfDraw);
                 if (item.indirectArgs != null)
                     cmb.DrawProceduralIndirect(item.gs.GpuIndexBuffer, item.gs.transform.localToWorldMatrix,
-                        item.displayMat, 0, item.topology, item.indirectArgs, 0, item.mpb);
+                        item.displayMat, item.pass, item.topology, item.indirectArgs, 0, item.mpb);
                 else
                     cmb.DrawProcedural(item.gs.GpuIndexBuffer, item.gs.transform.localToWorldMatrix,
-                        item.displayMat, 0, item.topology, item.indexCount, item.instanceCount, item.mpb);
+                        item.displayMat, item.pass, item.topology, item.indexCount, item.instanceCount, item.mpb);
                 cmb.EndSample(ProfDraw);
             }
         }
@@ -655,39 +734,21 @@ namespace GaussianSplatting.Runtime
 
         private bool EnsureGlobalSorter()
         {
-            var cs = _config?.CsSplatSort;
-            if (cs == null) return false;
-            if (_globalSorter == null || _globalSorterShader != cs)
+            if (_config == null)
+                return false;
+            if (_globalSorterConfig != _config)
             {
-                _globalSorter = new GpuSorting(cs);
-                _globalSorterShader = cs;
+                _globalSorter = GpuSorters.Create(_config.CsSplatSort, _config.CsPortableSort);
+                _globalSorterConfig = _config;
             }
             return _globalSorter != null && _globalSorter.Valid;
-        }
-
-        private bool EnsureGlobalCountingSorter()
-        {
-            var cs = _config?.CsCountingSort;
-            if (cs == null) return false;
-            if (_globalCountingSorter == null || _globalCountingSortShader != cs)
-            {
-                _globalCountingSorter?.Dispose();
-                _globalCountingSorter = new GpuCountingSort(cs);
-                _globalCountingSortShader = cs;
-            }
-            return _globalCountingSorter != null && _globalCountingSorter.Valid;
         }
 
         private bool EnsureGlobalGroupCache(int renderOrder, int splatCount, out GlobalOrderGroupCache cache)
         {
             cache = null;
-            // Radix sort needs wave intrinsics; on platforms without them fall
-            // back to the coarser counting sort instead of dropping the path.
-            bool radixValid = EnsureGlobalSorter();
-            if ((!radixValid && !EnsureGlobalCountingSorter()) || splatCount <= 0)
+            if (!EnsureGlobalSorter() || splatCount <= 0)
                 return false;
-            if (!radixValid)
-                GpuCountingSort.LogFallbackOnce();
 
             if (!_globalGroups.TryGetValue(renderOrder, out cache))
             {
@@ -717,7 +778,7 @@ namespace GaussianSplatting.Runtime
                     name = $"GaussianGlobalSortIndices_{renderOrder}"
                 };
                 cache.splatCapacity = splatCount;
-                cache.hasSortedKeys = false;
+                cache.sortState.Invalidate();
             }
 
             if (cache.visibleCounter == null)
@@ -734,12 +795,14 @@ namespace GaussianSplatting.Runtime
                 cache.indirectArgsValid = false;
             }
 
-            // Ping-pong support buffers are only needed by the radix sorter.
-            if (radixValid &&
-                (cache.sorterArgs.resources.altBuffer == null || cache.sorterArgs.count < (uint)splatCount))
+            // Capacity is tracked separately: sorterArgs.count is rewritten
+            // with the live count every sort, so it cannot tell how big the
+            // allocation is (growing/shrinking groups would realloc each time).
+            if (cache.sorterArgs.resources.altKeys == null || cache.sorterCapacity < splatCount)
             {
                 cache.sorterArgs.resources.Dispose();
-                cache.sorterArgs.resources = GpuSorting.SupportResources.Load((uint)splatCount);
+                cache.sorterArgs.resources = GpuSortResources.Load((uint)splatCount);
+                cache.sorterCapacity = splatCount;
             }
 
             cache.sorterArgs.inputKeys = cache.sortDistances;
@@ -815,28 +878,30 @@ namespace GaussianSplatting.Runtime
                 }
 
                 int groupSignature = 17;
+                int contentKey = 17;
                 int minSortNth = int.MaxValue;
+                bool groupAnimated = false;
                 for (int i = groupStart; i < groupEnd; ++i)
                 {
                     var gs = _activeSplats[i].Item1;
                     groupSignature = groupSignature * 31 + gs.GetInstanceID();
                     groupSignature = groupSignature * 31 + gs.EffectiveSplatCount;
+                    // Keys are sorted in world space: any member's data or
+                    // transform changing makes them stale.
+                    contentKey = contentKey * 31 + gs.ContentVersion;
+                    contentKey = contentKey * 31 + gs.transform.localToWorldMatrix.GetHashCode();
                     minSortNth = Mathf.Min(minSortNth, Mathf.Max(1, gs.sortNthFrame));
+                    groupAnimated |= gs.HasAnimatedContent;
                 }
-                // Sorted keys are only valid for the camera that sorted them: a
-                // different camera must re-sort regardless of the throttle, and
-                // the throttle counts real frames, not per-camera renders.
+                if (groupCache.groupSignature != groupSignature)
+                    groupCache.sortState.Invalidate();
                 // A matrix override means the same camera renders multiple views
                 // this frame (cubemap faces), so every render must re-sort.
-                bool groupSortNeeded = !groupCache.hasSortedKeys
-                    || MatrixOverride.HasValue
-                    || groupCache.lastSortCameraId != cam.GetInstanceID()
-                    || Time.frameCount - groupCache.lastSortFrame >= minSortNth;
-                if (groupCache.groupSignature != groupSignature)
-                {
-                    groupCache.hasSortedKeys = false;
-                    groupSortNeeded = true;
-                }
+                var sortSettings = SortSettings(groupAnimated);
+                Vector3 camPos = cam.transform.position;
+                bool groupSortNeeded = MatrixOverride.HasValue ||
+                    groupCache.sortState.NeedsSort(cam.GetInstanceID(), sortSettings.Key, contentKey, camPos,
+                        minSortNth, sortSettings.Throttled, _config.sortMoveThreshold);
 
                 if (groupSortNeeded)
                     cmb.SetBufferData(groupCache.visibleCounter, s_zeroCounter);
@@ -866,7 +931,8 @@ namespace GaussianSplatting.Runtime
 
                     bool copySuccess = gs.CopyViewDataAndDistances(cmb, cam, gs.transform.localToWorldMatrix,
                         groupCache.viewData, groupCache.sortDistances, groupCache.sortKeys,
-                        groupCache.visibleCounter, 0, dstOffset, gs.EffectiveSplatCount, groupSortNeeded);
+                        groupCache.visibleCounter, 0, dstOffset, gs.EffectiveSplatCount, groupSortNeeded,
+                        sortSettings);
                     if (!copySuccess)
                     {
                         groupValid = false;
@@ -898,7 +964,7 @@ namespace GaussianSplatting.Runtime
                 // scale != 1 or dynamic resolution.
                 int tileW = _tileRenderer.TileRenderSize.x > 0 ? _tileRenderer.TileRenderSize.x : cam.pixelWidth;
                 int tileH = _tileRenderer.TileRenderSize.y > 0 ? _tileRenderer.TileRenderSize.y : cam.pixelHeight;
-                if (!pointCloudMode && _config.useTileRenderer && _tileRenderer.HasOutputTarget &&
+                if (!pointCloudMode && !DirectToTarget && _config.useTileRenderer && _tileRenderer.HasOutputTarget &&
                     _tileRenderer.EnsureResources(_config, groupCache, tileW, tileH))
                 {
                     _tileRenderer.Dispatch(cmb, cam, groupCache, dstOffset, groupSortNeeded, tileW, tileH);
@@ -908,19 +974,9 @@ namespace GaussianSplatting.Runtime
 
                 if (!usedTile && groupSortNeeded)
                 {
-                    if (_globalSorter != null && _globalSorter.Valid)
-                    {
-                        groupCache.sorterArgs.count = (uint)dstOffset;
-                        _globalSorter.Dispatch(cmb, groupCache.sorterArgs);
-                    }
-                    else if (_globalCountingSorter != null && _globalCountingSorter.Valid)
-                    {
-                        _globalCountingSorter.Dispatch(cmb, (uint)dstOffset,
-                            groupCache.sortDistances, groupCache.sortKeys);
-                    }
-                    groupCache.hasSortedKeys = true;
-                    groupCache.lastSortCameraId = cam.GetInstanceID();
-                    groupCache.lastSortFrame = Time.frameCount;
+                    groupCache.sorterArgs.count = (uint)dstOffset;
+                    _globalSorter.Dispatch(cmb, groupCache.sorterArgs);
+                    groupCache.sortState.MarkSorted(cam.GetInstanceID(), sortSettings.Key, contentKey, camPos);
                     groupCache.indirectArgsValid = DispatchWriteIndirectArgs(cmb, reference,
                         groupCache.visibleCounter, groupCache.indirectArgs);
                 }
@@ -946,10 +1002,10 @@ namespace GaussianSplatting.Runtime
                     }
                     if (groupCache.indirectArgsValid)
                         cmb.DrawProceduralIndirect(reference.GpuIndexBuffer, Matrix4x4.identity,
-                            groupDisplayMat, 0, MeshTopology.Triangles, groupCache.indirectArgs, 0, _globalMpb);
+                            groupDisplayMat, DisplayPass, MeshTopology.Triangles, groupCache.indirectArgs, 0, _globalMpb);
                     else
                         cmb.DrawProcedural(reference.GpuIndexBuffer, Matrix4x4.identity,
-                            groupDisplayMat, 0, MeshTopology.Triangles, 6, dstOffset, _globalMpb);
+                            groupDisplayMat, DisplayPass, MeshTopology.Triangles, 6, dstOffset, _globalMpb);
                 }
                 cmb.EndSample(ProfDraw);
 
@@ -1020,10 +1076,11 @@ namespace GaussianSplatting.Runtime
                 // (invisible splats sink to the tail; indirect draw skips them).
                 // A matrix override means the same camera renders multiple views
                 // this frame (cubemap faces), so every render must re-sort.
-                if (MatrixOverride.HasValue || gs.NeedsSort(cam))
+                var sortSettings = SortSettings(gs.HasAnimatedContent);
+                if (MatrixOverride.HasValue || gs.NeedsSort(cam, sortSettings))
                 {
-                    gs.SortPoints(cmb, cam, matrix);
-                    gs.MarkSorted(cam);
+                    gs.SortPoints(cmb, cam, matrix, sortSettings);
+                    gs.MarkSorted(cam, sortSettings);
                 }
 
                 // draw
@@ -1036,11 +1093,12 @@ namespace GaussianSplatting.Runtime
                     instanceCount = gs.GpuChunksValid ? gs.GpuChunksBuffer.count : 0;
 
                 cmb.BeginSample(ProfDraw);
-                if (_config.renderMode == GaussianSplatRenderMode.Splats && gs.IndirectDrawReady)
-                    cmb.DrawProceduralIndirect(gs.GpuIndexBuffer, matrix, displayMat, 0, topology,
+                int pass = UsesSortedViewData ? DisplayPass : 0;
+                if (UsesSortedViewData && gs.IndirectDrawReady)
+                    cmb.DrawProceduralIndirect(gs.GpuIndexBuffer, matrix, displayMat, pass, topology,
                         gs.GpuIndirectArgs, 0, mpb);
                 else
-                    cmb.DrawProcedural(gs.GpuIndexBuffer, matrix, displayMat, 0, topology, indexCount, instanceCount, mpb);
+                    cmb.DrawProcedural(gs.GpuIndexBuffer, matrix, displayMat, pass, topology, indexCount, instanceCount, mpb);
                 cmb.EndSample(ProfDraw);
             }
             return matComposite;

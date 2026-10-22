@@ -38,6 +38,39 @@ namespace GaussianSplatting.Runtime
         [Range(0.001f, 10.0f)] public float pointCloudAovDepthScale = 1.0f;
         public bool useTileRenderer = true;
 
+        [Header("Performance")]
+        public GaussianSplatCompositeMode compositeMode = GaussianSplatCompositeMode.Offscreen;
+        // Quad half-size in standard deviations. 2.55 matches the original
+        // renderer; ~2.24 (sqrt 5) cuts quad area by about a quarter and is
+        // perceptually very close — the usual choice for VR.
+        [Range(1.5f, 3.5f)] public float splatQuadSigma = 2.55f;
+        // Shrink every quad to where its own opacity fades out. Only removes
+        // fragments the shader discards anyway, so the image is unchanged.
+        public bool adaptiveSplatExtent = true;
+        // Largest on-screen splat radius in pixels. A splat right in front of
+        // the eye can cover the whole screen many times over; larger ones are
+        // scaled down. 4096 leaves the original behaviour; ~512 for VR.
+        [Range(32f, 4096f)] public float maxSplatPixelRadius = 4096f;
+        // Upper bound on every renderer's SH order. 0 skips all SH reads in the
+        // per-frame view-data pass (up to 192 bytes per splat): flat, view-
+        // independent color for a large bandwidth saving on mobile GPUs.
+        [Range(0, 3)] public int maxSHOrder = 3;
+
+        [Header("Sorting")]
+        // Radial keeps the order valid while the camera only rotates, which is
+        // what lets VR sort less often than it renders.
+        public GaussianSplatSortMetric sortMetric = GaussianSplatSortMetric.Radial;
+        // With radial sorting, static splats are only re-sorted once the camera
+        // has moved this far (meters, in the splat object's space) since the
+        // last sort. 0 sorts every frame. Animated or morphing splats always
+        // sort every frame (subject to their sortNthFrame).
+        [Min(0f)] public float sortMoveThreshold = 0.01f;
+
+        // ODS has no single view axis, so it always sorts radially.
+        public bool UseRadialSort =>
+            sortMetric == GaussianSplatSortMetric.Radial ||
+            projectionMode == GaussianSplatProjectionMode.OmniDirectionalStereo;
+
         [Header("Omni-Directional Stereo (360 capture)")]
         // Projects the full sphere into one 2:1 equirect image instead of a
         // single frustum. Meant for Stereo360Capture, not for the viewport:
@@ -69,7 +102,7 @@ namespace GaussianSplatting.Runtime
         private Shader _shaderPointCloud;
         private ComputeShader _csSplatUtilities;
         private ComputeShader _csSplatSort;
-        private ComputeShader _csCountingSort;
+        private ComputeShader _csPortableSort;
         private ComputeShader _csTileRender;
 
         public Shader ShaderSplats => _shaderSplats;
@@ -79,7 +112,7 @@ namespace GaussianSplatting.Runtime
         public Shader ShaderPointCloud => _shaderPointCloud;
         public ComputeShader CsSplatUtilities => _csSplatUtilities;
         public ComputeShader CsSplatSort => _csSplatSort;
-        public ComputeShader CsCountingSort => _csCountingSort;
+        public ComputeShader CsPortableSort => _csPortableSort;
         public ComputeShader CsTileRender => _csTileRender;
 
         public bool ResourcesValid =>
@@ -114,7 +147,7 @@ namespace GaussianSplatting.Runtime
                 : Shader.Find("Gaussian Splatting/Render Point Cloud");
             _csSplatUtilities = Resources.Load<ComputeShader>("SplatUtilities");
             _csSplatSort = Resources.Load<ComputeShader>("SplatSort");
-            _csCountingSort = Resources.Load<ComputeShader>("SplatCountingSort");
+            _csPortableSort = Resources.Load<ComputeShader>("SplatPortableSort");
             _csTileRender = Resources.Load<ComputeShader>("GaussianTileRender");
 
             // Diagnostic: report resource loading results

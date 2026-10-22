@@ -19,7 +19,19 @@ namespace GaussianSplatting.Runtime
         private GraphicsBuffer _gpuEditOtherMouseDown;
 
         // Public state
-        public bool Modified { get; internal set; }
+        // Every edit that changes splat data sets this, so it is also where a
+        // throttled sort learns that its keys are stale.
+        public bool Modified
+        {
+            get => _modified;
+            internal set
+            {
+                _modified = value;
+                if (value)
+                    _renderer.MarkContentChanged();
+            }
+        }
+        private bool _modified;
         public uint SelectedSplats { get; private set; }
         public uint DeletedSplats { get; private set; }
         public uint CutSplats { get; private set; }

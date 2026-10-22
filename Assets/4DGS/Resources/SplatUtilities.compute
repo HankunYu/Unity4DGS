@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 
 // Apple GPU Family 1-2 (visionOS simulator, older iOS devices) support max 512 threads
-// per threadgroup. Use 256 on Metal to be safe; other platforms keep 1024.
-#if defined(SHADER_API_METAL)
+// per threadgroup. Use 256 on Metal to be safe. Mobile GPUs (Adreno/Mali) also get
+// 256: the view-data kernels exceed the register budget at 1024 threads (fxc
+// X4714), which costs occupancy. Desktop keeps 1024.
+#if defined(SHADER_API_METAL) || defined(SHADER_API_MOBILE)
 #define GROUP_SIZE 256
 #else
 #define GROUP_SIZE 1024
@@ -83,12 +85,69 @@ float _MorphWeight;   // morph blend weight (0 = source, 1 = target)
 // Unpacked on purpose — see _MorphSHOutput in GaussianMorph.compute.
 StructuredBuffer<float4> _MorphSHData;
 
+// Animation data (set by GaussianAnimator, 3 float4s per splat)
+// [0]: posOffset.xyz (object space), opacityMul
+// [1]: scaleMul, colorBlend, 0, 0
+// [2]: colorTint.rgb, 1
+// Sized for the source splat count: morph targets with extra splats have
+// no animation entry, so every read is guarded by HasAnimData.
+StructuredBuffer<float4> _AnimOutputData;
+uint _AnimDataValid; // 0 = no animation, 1 = animation active
+
+bool HasAnimData(uint idx)
+{
+    return _AnimDataValid != 0 && idx < _SrcSplatCount;
+}
+
+// Sort metric: 0 = view-space depth, 1 = radial distance from the camera.
+// Radial order does not change when the camera only rotates, so a throttled
+// or stale sort stays valid under head rotation (and ODS needs it anyway:
+// view-space z is meaningless over a full sphere).
+uint _SortRadial;
+
+// Object-space position the sort keys are computed from: morphed if a morph
+// is active, plus the animation offset, so sorting matches what is drawn.
+float3 LoadSortPos(uint idx)
+{
+    float3 pos;
+    if (_MorphDataValid != 0)
+        pos = _MorphedData[idx * 4].xyz;
+    else
+        pos = LoadSplatPos(idx);
+    if (HasAnimData(idx))
+        pos += _AnimOutputData[idx * 3].xyz;
+    return pos;
+}
+
+// Takes the position in sort-view space (_MatrixMV with z flipped forward).
+float SortDepth(float3 viewPos)
+{
+    return (_SortRadial != 0) ? length(viewPos) : viewPos.z;
+}
+
 // radix sort etc. friendly, see http://stereopsis.com/radix.html
 uint FloatToSortableUint(float f)
 {
     uint fu = asuint(f);
     uint mask = -((int)(fu >> 31)) | 0x80000000;
     return fu ^ mask;
+}
+
+// The sort is ascending. Offscreen under-blending wants front-to-back, the
+// direct over-blend back-to-front, which inverts the key.
+uint _SortBackToFront;
+// Throttled sorts keep every splat: their keys outlive the view they were
+// sorted for, and a splat culled now may be on screen after a head turn.
+uint _SortAllVisible;
+
+// Sort key for a visible splat. Clamped below the 0xFFFFFFFF sentinel that
+// parks invisible splats at the tail, so a garbage depth can never join them.
+uint DepthToSortKey(float depth)
+{
+    uint key = FloatToSortableUint(depth);
+    if (_SortBackToFront != 0)
+        key = ~key;
+    return min(key, 0xFFFFFFFEu);
 }
 
 // A splat the view-data pass culled (frustum, opacity, compensated alpha)
@@ -119,34 +178,23 @@ void CSCalcDistances (uint3 id : SV_DispatchThreadID)
 
     uint origIdx = _SplatSortKeys[idx];
 
-    bool visible;
-    if (_IsStereo != 0)
-        visible = IsSplatViewVisible(_SplatViewData[origIdx * 2]) ||
-                  IsSplatViewVisible(_SplatViewData[origIdx * 2 + 1]);
-    else
-        visible = IsSplatViewVisible(_SplatViewData[origIdx]);
+    bool visible = _SortAllVisible != 0;
+    if (!visible)
+    {
+        if (_IsStereo != 0)
+            visible = IsSplatViewVisible(_SplatViewData[origIdx * 2]) ||
+                      IsSplatViewVisible(_SplatViewData[origIdx * 2 + 1]);
+        else
+            visible = IsSplatViewVisible(_SplatViewData[origIdx]);
+    }
     if (!visible)
     {
         _SplatSortDistances[idx] = 0xFFFFFFFF;
         return;
     }
 
-    // Use morphed position when morph is active, otherwise decode from source
-    float3 pos;
-    if (_MorphDataValid != 0)
-        pos = _MorphedData[origIdx * 4].xyz;
-    else
-        pos = LoadSplatPos(origIdx);
-    pos = mul(_MatrixMV, float4(pos.xyz, 1)).xyz;
-
-    // ODS covers the whole sphere, so view-space z is not a depth: everything
-    // behind the rig would sort negative and land in front. Use the radial
-    // distance from the rig instead — the eye offset is at most IPD/2, far
-    // below the spacing that matters for back-to-front ordering.
-    float sortDepth = (_OdsEnabled != 0) ? length(pos) : pos.z;
-
-    // Clamp below the sentinel so a garbage depth can never join the tail.
-    _SplatSortDistances[idx] = min(FloatToSortableUint(sortDepth), 0xFFFFFFFEu);
+    float3 pos = mul(_MatrixMV, float4(LoadSortPos(origIdx), 1)).xyz;
+    _SplatSortDistances[idx] = DepthToSortKey(SortDepth(pos));
     InterlockedAdd(_VisibleCounter[0], 1);
 }
 
@@ -162,13 +210,6 @@ uint _SHOrder;
 uint _SHOnly;
 
 uint _SplatCutoutsCount;
-
-// Animation data (set by GaussianAnimator, 3 float4s per splat)
-// [0]: posOffset.xyz, opacityMul
-// [1]: scaleMul, colorBlend, 0, 0
-// [2]: colorTint.rgb, 1
-StructuredBuffer<float4> _AnimOutputData;
-uint _AnimDataValid; // 0 = no animation, 1 = animation active
 
 #define SPLAT_CUTOUT_TYPE_SPHERE 0
 #define SPLAT_CUTOUT_TYPE_BOX 1
@@ -273,6 +314,7 @@ struct SplatSharedData
     float3 cov3d0;
     float3 cov3d1;
     half4 color;   // SH-evaluated color + opacity
+    float maxScale; // largest world-space axis scale, for the frustum margin
     bool skip;     // deleted, cut, or zero opacity
 };
 
@@ -295,6 +337,8 @@ SplatSharedData CalcSharedSplatData(
     float splatScale2 = splatScale * splatScale;
     ssd.cov3d0 *= splatScale2;
     ssd.cov3d1 *= splatScale2;
+    ssd.maxScale = max(max(abs(splat.scale.x), abs(splat.scale.y)), abs(splat.scale.z))
+                 * splatScale * animScaleMul;
 
     float3 worldViewDir = _VecWorldSpaceCameraPos.xyz - centerWorldPos;
     float3 objViewDir = normalize(mul((float3x3)_MatrixWorldToObject, worldViewDir));
@@ -321,8 +365,7 @@ SplatViewData CalcPerEyeViewData(
     // Conservative frustum cull
     if (clipPos.w > 0)
     {
-        float maxScale = max(max(abs(splat.scale.x), abs(splat.scale.y)), abs(splat.scale.z)) * splatScale;
-        float clipMargin = maxScale * abs(pMatrix._m00);
+        float clipMargin = ssd.maxScale * abs(pMatrix._m00);
         float w = clipPos.w;
         if ((clipPos.x < -(w+clipMargin)) || (clipPos.x > (w+clipMargin)) ||
             (clipPos.y < -(w+clipMargin)) || (clipPos.y > (w+clipMargin)))
@@ -519,6 +562,42 @@ SplatViewData CalculateEyeViewData(
 // Chunk frustum culling: 4 chunks per group (GROUP_SIZE=1024 / kChunkSize=256)
 groupshared uint _chunkVisible[4];
 
+// True when all 8 corners of the object-space AABB lie outside one clip plane.
+bool ChunkOutsideFrustum(float4x4 mvp, float3 bmin, float3 bmax)
+{
+    // Clip-space near limit: z in [0,w] for reversed-Z / D3D-style
+    // projections, [-w,w] for OpenGL.
+    #if UNITY_REVERSED_Z
+    #define NEAR_LIMIT(p) 0
+    #else
+    #define NEAR_LIMIT(p) (-(p).w)
+    #endif
+    bool outL = true, outR = true, outB = true, outT = true, outN = true, outF = true;
+    [unroll]
+    for (uint c = 0; c < 8; c++)
+    {
+        float3 corner = float3((c & 1) ? bmax.x : bmin.x,
+                               (c & 2) ? bmax.y : bmin.y,
+                               (c & 4) ? bmax.z : bmin.z);
+        float4 p = mul(mvp, float4(corner, 1));
+        if (p.x >= -p.w) outL = false;
+        if (p.x <=  p.w) outR = false;
+        if (p.y >= -p.w) outB = false;
+        if (p.y <=  p.w) outT = false;
+        if (p.z >= NEAR_LIMIT(p)) outN = false;
+        if (p.z <=  p.w) outF = false;
+    }
+    #undef NEAR_LIMIT
+    return outL || outR || outB || outT || outN || outF;
+}
+
+void ChunkBounds(uint chunkIdx, out float3 bmin, out float3 bmax)
+{
+    SplatChunkInfo chunk = _SplatChunks[chunkIdx];
+    bmin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
+    bmax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
+}
+
 [numthreads(GROUP_SIZE,1,1)]
 void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
 {
@@ -541,35 +620,9 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
             uint globalChunkIdx = idx / kChunkSize;
             if (globalChunkIdx < _SplatChunkCount)
             {
-                SplatChunkInfo chunk = _SplatChunks[globalChunkIdx];
-                float3 bmin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
-                float3 bmax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
-                float4x4 mvp = mul(_MatrixVP, _MatrixObjectToWorld);
-
-                // Transform 8 AABB corners to clip space
-                float4 c0 = mul(mvp, float4(bmin.x, bmin.y, bmin.z, 1));
-                float4 c1 = mul(mvp, float4(bmax.x, bmin.y, bmin.z, 1));
-                float4 c2 = mul(mvp, float4(bmin.x, bmax.y, bmin.z, 1));
-                float4 c3 = mul(mvp, float4(bmax.x, bmax.y, bmin.z, 1));
-                float4 c4 = mul(mvp, float4(bmin.x, bmin.y, bmax.z, 1));
-                float4 c5 = mul(mvp, float4(bmax.x, bmin.y, bmax.z, 1));
-                float4 c6 = mul(mvp, float4(bmin.x, bmax.y, bmax.z, 1));
-                float4 c7 = mul(mvp, float4(bmax.x, bmax.y, bmax.z, 1));
-
-                // If all 8 corners outside same clip plane -> chunk is off-screen
-                bool outL=true, outR=true, outB=true, outT=true, outN=true, outF=true;
-                #define FRUSTUM_TEST(p) \
-                    if((p).x >= -(p).w) outL=false; \
-                    if((p).x <=  (p).w) outR=false; \
-                    if((p).y >= -(p).w) outB=false; \
-                    if((p).y <=  (p).w) outT=false; \
-                    if((p).z >=     0 ) outN=false; \
-                    if((p).z <=  (p).w) outF=false;
-                FRUSTUM_TEST(c0) FRUSTUM_TEST(c1) FRUSTUM_TEST(c2) FRUSTUM_TEST(c3)
-                FRUSTUM_TEST(c4) FRUSTUM_TEST(c5) FRUSTUM_TEST(c6) FRUSTUM_TEST(c7)
-                #undef FRUSTUM_TEST
-
-                if (outL || outR || outB || outT || outN || outF)
+                float3 bmin, bmax;
+                ChunkBounds(globalChunkIdx, bmin, bmax);
+                if (ChunkOutsideFrustum(mul(_MatrixVP, _MatrixObjectToWorld), bmin, bmax))
                     _chunkVisible[chunkSlot] = 0;
             }
         }
@@ -621,10 +674,10 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
             splat.sh.sh14 = (half3)_MorphSHData[shBase + 13].xyz;
             splat.sh.sh15 = (half3)_MorphSHData[shBase + 14].xyz;
         }
-        else if (idx < _SrcSplatCount)
+        else if (idx < _SrcSplatCount && _SHOrder > 0)
         {
             // Fallback: load source SH and fade by (1 - weight)
-            SplatData srcSplat = LoadSplatData(idx);
+            SplatData srcSplat = LoadSplatData(idx, true);
             half shFade = (half)(1.0 - _MorphWeight);
             splat.sh.sh1  = srcSplat.sh.sh1  * shFade; splat.sh.sh2  = srcSplat.sh.sh2  * shFade;
             splat.sh.sh3  = srcSplat.sh.sh3  * shFade; splat.sh.sh4  = srcSplat.sh.sh4  * shFade;
@@ -645,7 +698,7 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
     }
     else
     {
-        splat = LoadSplatData(idx);
+        splat = LoadSplatData(idx, _SHOrder > 0);
     }
 
     // Apply animation position offset if available
@@ -653,7 +706,7 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
     float animScaleMul = 1.0;
     float3 animColorTint = float3(1, 1, 1);
     float animColorBlend = 0;
-    if (_AnimDataValid != 0)
+    if (HasAnimData(idx))
     {
         uint animBase = idx * 3;
         float4 animPosOp = _AnimOutputData[animBase + 0]; // posOffset.xyz, opacityMul
@@ -735,7 +788,8 @@ void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_Group
     uint chunkSlot = localIdx / kChunkSize;
     uint laneInChunk = localIdx % kChunkSize;
 
-    // Chunk frustum culling using eye 0's VP (conservative: covers both eyes)
+    // Chunk frustum culling: a chunk is skipped only when it is outside BOTH
+    // eye frusta — the right eye sees past the left eye's right edge.
     // Chunk culling tests AABB corners against the _MatrixVP frustum, which
     // does not exist under ODS — and nothing is off-screen there anyway.
     bool canCull = (_SplatChunkCount > 0) && (_MorphDataValid == 0) && (_AnimDataValid == 0) && (_OdsEnabled == 0);
@@ -747,33 +801,10 @@ void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_Group
             uint globalChunkIdx = idx / kChunkSize;
             if (globalChunkIdx < _SplatChunkCount)
             {
-                SplatChunkInfo chunk = _SplatChunks[globalChunkIdx];
-                float3 bmin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
-                float3 bmax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
-                float4x4 mvp = mul(_MatrixVP_Eye[0], _MatrixObjectToWorld);
-
-                float4 c0 = mul(mvp, float4(bmin.x, bmin.y, bmin.z, 1));
-                float4 c1 = mul(mvp, float4(bmax.x, bmin.y, bmin.z, 1));
-                float4 c2 = mul(mvp, float4(bmin.x, bmax.y, bmin.z, 1));
-                float4 c3 = mul(mvp, float4(bmax.x, bmax.y, bmin.z, 1));
-                float4 c4 = mul(mvp, float4(bmin.x, bmin.y, bmax.z, 1));
-                float4 c5 = mul(mvp, float4(bmax.x, bmin.y, bmax.z, 1));
-                float4 c6 = mul(mvp, float4(bmin.x, bmax.y, bmax.z, 1));
-                float4 c7 = mul(mvp, float4(bmax.x, bmax.y, bmax.z, 1));
-
-                bool outL=true, outR=true, outB=true, outT=true, outN=true, outF=true;
-                #define FRUSTUM_TEST(p) \
-                    if((p).x >= -(p).w) outL=false; \
-                    if((p).x <=  (p).w) outR=false; \
-                    if((p).y >= -(p).w) outB=false; \
-                    if((p).y <=  (p).w) outT=false; \
-                    if((p).z >=     0 ) outN=false; \
-                    if((p).z <=  (p).w) outF=false;
-                FRUSTUM_TEST(c0) FRUSTUM_TEST(c1) FRUSTUM_TEST(c2) FRUSTUM_TEST(c3)
-                FRUSTUM_TEST(c4) FRUSTUM_TEST(c5) FRUSTUM_TEST(c6) FRUSTUM_TEST(c7)
-                #undef FRUSTUM_TEST
-
-                if (outL || outR || outB || outT || outN || outF)
+                float3 bmin, bmax;
+                ChunkBounds(globalChunkIdx, bmin, bmax);
+                if (ChunkOutsideFrustum(mul(_MatrixVP_Eye[0], _MatrixObjectToWorld), bmin, bmax) &&
+                    ChunkOutsideFrustum(mul(_MatrixVP_Eye[1], _MatrixObjectToWorld), bmin, bmax))
                     _chunkVisible[chunkSlot] = 0;
             }
         }
@@ -820,9 +851,9 @@ void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_Group
             splat.sh.sh14 = (half3)_MorphSHData[shBase + 13].xyz;
             splat.sh.sh15 = (half3)_MorphSHData[shBase + 14].xyz;
         }
-        else if (idx < _SrcSplatCount)
+        else if (idx < _SrcSplatCount && _SHOrder > 0)
         {
-            SplatData srcSplat = LoadSplatData(idx);
+            SplatData srcSplat = LoadSplatData(idx, true);
             half shFade = (half)(1.0 - _MorphWeight);
             splat.sh.sh1  = srcSplat.sh.sh1  * shFade; splat.sh.sh2  = srcSplat.sh.sh2  * shFade;
             splat.sh.sh3  = srcSplat.sh.sh3  * shFade; splat.sh.sh4  = srcSplat.sh.sh4  * shFade;
@@ -841,7 +872,7 @@ void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_Group
     }
     else
     {
-        splat = LoadSplatData(idx);
+        splat = LoadSplatData(idx, _SHOrder > 0);
     }
 
     float3 centerWorldPos = mul(_MatrixObjectToWorld, float4(splat.pos, 1)).xyz;
@@ -851,7 +882,7 @@ void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_Group
     float animScaleMul = 1.0;
     float3 animColorTint = float3(1, 1, 1);
     float animColorBlend = 0;
-    if (_AnimDataValid != 0)
+    if (HasAnimData(idx))
     {
         uint animBase = idx * 3;
         float4 animPosOp = _AnimOutputData[animBase + 0];
@@ -930,21 +961,14 @@ void CSCopyViewDataAndDistances(uint3 id : SV_DispatchThreadID)
     _CopyDstViewData[dstIdx] = view;
 
     // Global path is mono-only (stereo devices use the per-object path).
-    if (!IsSplatViewVisible(view))
+    if (_SortAllVisible == 0 && !IsSplatViewVisible(view))
     {
         _CopyDstSortDistances[dstIdx] = 0xFFFFFFFF;
     }
     else
     {
-        // Use morphed position when morph is active, otherwise decode from source
-        float3 pos;
-        if (_MorphDataValid != 0)
-            pos = _MorphedData[srcIdx * 4].xyz;
-        else
-            pos = LoadSplatPos(srcIdx);
-        pos = mul(_MatrixMV, float4(pos.xyz, 1)).xyz;
-        // Clamp below the sentinel so a garbage depth can never join the tail.
-        _CopyDstSortDistances[dstIdx] = min(FloatToSortableUint(pos.z), 0xFFFFFFFEu);
+        float3 pos = mul(_MatrixMV, float4(LoadSortPos(srcIdx), 1)).xyz;
+        _CopyDstSortDistances[dstIdx] = DepthToSortKey(SortDepth(pos));
         if (_CopyWriteKeys != 0)
             InterlockedAdd(_VisibleCounter[0], 1);
     }

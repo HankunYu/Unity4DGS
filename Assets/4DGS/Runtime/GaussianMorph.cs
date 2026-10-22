@@ -58,7 +58,7 @@ namespace GaussianSplatting.Runtime
         private bool _correspondenceBuildFailed;
         private GaussianSplatAsset _correspondenceSrcAsset;
         private int _correspondenceSrcCount;
-        private GpuSorting _mortonSorter;
+        private IGpuSorter _mortonSorter;
 
         // Cached state for change detection
         private GaussianSplatAsset _cachedTarget;
@@ -283,19 +283,9 @@ namespace GaussianSplatting.Runtime
                 return;
             }
 
-            // Create sorter from renderer's radix sort compute shader
-            if (_mortonSorter == null)
-            {
-                var sortCs = _renderer.csSplatSort;
-                if (sortCs == null)
-                {
-                    _correspondenceBuildFailed = true;
-                    Debug.LogWarning("GaussianMorph: splat sort compute shader unavailable, nearest-match correspondence disabled.");
-                    return;
-                }
-                _mortonSorter = new GpuSorting(sortCs);
-            }
-            if (!_mortonSorter.Valid)
+            // Morton codes need a full 32-bit sort; either GPU sorter provides it.
+            _mortonSorter ??= GpuSorters.Create(_renderer.csSplatSort, _renderer.csPortableSort);
+            if (_mortonSorter == null || !_mortonSorter.Valid)
             {
                 _correspondenceBuildFailed = true;
                 Debug.LogWarning("GaussianMorph: GPU sorter invalid, nearest-match correspondence disabled.");
@@ -330,8 +320,8 @@ namespace GaussianSplatting.Runtime
                 { name = "MorphTgtMortonIndices" };
 
             // Allocate sort support resources
-            var srcSortRes = GpuSorting.SupportResources.Load((uint)srcCount);
-            var tgtSortRes = GpuSorting.SupportResources.Load((uint)tgtCount);
+            var srcSortRes = GpuSortResources.Load((uint)srcCount);
+            var tgtSortRes = GpuSortResources.Load((uint)tgtCount);
 
             var cmd = new CommandBuffer { name = "MorphBuildCorrespondence" };
 
@@ -379,7 +369,7 @@ namespace GaussianSplatting.Runtime
             cmd.DispatchCompute(cs, mk, (tgtCount + GroupSize - 1) / GroupSize, 1, 1);
 
             // --- Sort source by Morton code ---
-            var srcSortArgs = new GpuSorting.Args
+            var srcSortArgs = new GpuSortArgs
             {
                 count = (uint)srcCount,
                 inputKeys = srcMortonCodes,
@@ -389,7 +379,7 @@ namespace GaussianSplatting.Runtime
             _mortonSorter.Dispatch(cmd, srcSortArgs);
 
             // --- Sort target by Morton code (indices as payload) ---
-            var tgtSortArgs = new GpuSorting.Args
+            var tgtSortArgs = new GpuSortArgs
             {
                 count = (uint)tgtCount,
                 inputKeys = tgtMortonCodes,

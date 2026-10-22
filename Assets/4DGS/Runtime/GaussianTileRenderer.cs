@@ -93,9 +93,10 @@ namespace GaussianSplatting.Runtime
             }
             if (_tileCs == null) return false;
 
-            // Tile keys pack tileId|depth and need a full 32-bit radix sort —
-            // the counting-sort fallback can't substitute. Bail out before
-            // allocating tile buffers so the DrawProcedural path takes over.
+            // Tile keys pack tileId|depth and need a full 32-bit sort of up to
+            // MaxTilePairs keys — beyond what the portable sorter handles, so
+            // only the wave-op radix sort qualifies. Bail out before allocating
+            // tile buffers so the DrawProcedural path takes over.
             if (_tileSorter == null && config.CsSplatSort != null)
                 _tileSorter = new GpuSorting(config.CsSplatSort);
             if (_tileSorter == null || !_tileSorter.Valid)
@@ -141,12 +142,12 @@ namespace GaussianSplatting.Runtime
             // Capacity check must use the buffer size, NOT tileSorterArgs.count —
             // Dispatch overwrites count with the per-frame sort budget, which
             // would otherwise trigger a full dispose/realloc every frame.
-            if (cache.tileSorterArgs.resources.altBuffer == null ||
-                cache.tileSorterArgs.resources.altBuffer.count < GaussianSplatRenderSystem.GlobalOrderGroupCache.MaxTilePairs)
+            if (cache.tileSorterArgs.resources.altKeys == null ||
+                cache.tileSorterArgs.resources.altKeys.count < GaussianSplatRenderSystem.GlobalOrderGroupCache.MaxTilePairs)
             {
                 cache.tileSorterArgs.resources.Dispose();
                 cache.tileSorterArgs.resources =
-                    GpuSorting.SupportResources.Load((uint)GaussianSplatRenderSystem.GlobalOrderGroupCache.MaxTilePairs);
+                    GpuSortResources.Load((uint)GaussianSplatRenderSystem.GlobalOrderGroupCache.MaxTilePairs);
             }
 
             return true;

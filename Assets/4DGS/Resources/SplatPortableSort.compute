@@ -1,0 +1,238 @@
+// SPDX-License-Identifier: MIT
+// Portable stable LSD radix sort of (uint key, uint payload) pairs.
+//
+// Same contract as the DeviceRadixSort in SplatSort.compute — ascending,
+// 8-bit digits from a start bit, an even pass count so the result lands back
+// in the input buffers — but built only from groupshared memory and barriers:
+// no wave intrinsics, no DXC. It is the sorter for GPUs where the wave-op
+// kernels are unsupported (visionOS Metal), replacing a counting sort whose
+// unordered scatter made equal-depth splats swap places every frame.
+//
+// Each pass:
+//   CSUpsweep    per-tile digit histogram, stored digit-major
+//   CSScanTiles  \
+//   CSScanSums    > device-wide exclusive scan of the histogram
+//   CSScanAdd    /  (two levels: up to TILE * TILE entries)
+//   CSDownsweep  stable in-tile sort by the digit (8 one-bit splits), then
+//                scatter to the scanned global offsets
+//
+// Stability comes from the splits: each preserves the relative order of
+// equal bits, so equal digits keep their input order inside a tile, and tiles
+// are laid out in order by the digit-major scan.
+
+#pragma kernel CSUpsweep
+#pragma kernel CSScanTiles
+#pragma kernel CSScanSums
+#pragma kernel CSScanAdd
+#pragma kernel CSDownsweep
+
+#define THREADS 256
+#define ITEMS 4
+#define TILE (THREADS * ITEMS)
+#define RADIX 256          // must equal THREADS: one histogram bin per thread
+#define RADIX_BITS 8
+
+uint _Count;               // keys to sort
+uint _Shift;               // first key bit of this pass's digit
+uint _TileCount;           // ceil(_Count / TILE)
+uint _ScanCount;           // RADIX * _TileCount histogram entries
+uint _SumCount;            // ceil(_ScanCount / TILE) scan groups
+
+StructuredBuffer<uint> _KeysIn;
+StructuredBuffer<uint> _ValuesIn;
+RWStructuredBuffer<uint> _KeysOut;
+RWStructuredBuffer<uint> _ValuesOut;
+RWStructuredBuffer<uint> _Histogram;   // [digit * _TileCount + tile], scanned in place
+RWStructuredBuffer<uint> _ScanSums;    // per scan-group totals, then their exclusive scan
+
+groupshared uint gs_scan[THREADS];
+groupshared uint gs_hist[RADIX];
+groupshared uint gs_keys[TILE];
+groupshared uint gs_values[TILE];
+
+// Exclusive scan of one value per thread across the group (Hillis-Steele).
+// Every thread of the group must call it.
+uint GroupExclusiveScan(uint value, uint thread, out uint total)
+{
+    gs_scan[thread] = value;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll]
+    for (uint offset = 1; offset < THREADS; offset <<= 1)
+    {
+        uint add = thread >= offset ? gs_scan[thread - offset] : 0;
+        GroupMemoryBarrierWithGroupSync();
+        gs_scan[thread] += add;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    uint inclusive = gs_scan[thread];
+    total = gs_scan[THREADS - 1];
+    GroupMemoryBarrierWithGroupSync();
+    return inclusive - value;
+}
+
+uint Digit(uint key)
+{
+    return (key >> _Shift) & (RADIX - 1);
+}
+
+[numthreads(THREADS, 1, 1)]
+void CSUpsweep(uint thread : SV_GroupThreadID, uint tile : SV_GroupID)
+{
+    gs_hist[thread] = 0;
+    GroupMemoryBarrierWithGroupSync();
+
+    uint base = tile * TILE;
+    [unroll]
+    for (uint i = 0; i < ITEMS; i++)
+    {
+        uint idx = base + i * THREADS + thread;
+        if (idx < _Count)
+            InterlockedAdd(gs_hist[Digit(_KeysIn[idx])], 1);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    _Histogram[thread * _TileCount + tile] = gs_hist[thread];
+}
+
+// The two scan levels below share this shape: ITEMS consecutive entries per
+// thread, exclusive scan written back in place. Kept as two explicit kernels
+// rather than one helper taking the buffer — resource-typed function
+// parameters are exactly what the Metal/GL shader translation gets wrong.
+#define SCAN_TILE(DATA, COUNT, GROUP, TOTAL)                    \
+    {                                                            \
+        uint base = (GROUP) * TILE + thread * ITEMS;             \
+        uint values[ITEMS];                                      \
+        uint sum = 0;                                            \
+        [unroll]                                                 \
+        for (uint i = 0; i < ITEMS; i++)                         \
+        {                                                        \
+            values[i] = base + i < (COUNT) ? DATA[base + i] : 0; \
+            sum += values[i];                                    \
+        }                                                        \
+        uint running = GroupExclusiveScan(sum, thread, TOTAL);   \
+        [unroll]                                                 \
+        for (uint j = 0; j < ITEMS; j++)                         \
+        {                                                        \
+            if (base + j < (COUNT))                              \
+                DATA[base + j] = running;                        \
+            running += values[j];                                \
+        }                                                        \
+    }
+
+[numthreads(THREADS, 1, 1)]
+void CSScanTiles(uint thread : SV_GroupThreadID, uint group : SV_GroupID)
+{
+    uint total;
+    SCAN_TILE(_Histogram, _ScanCount, group, total)
+    if (thread == 0)
+        _ScanSums[group] = total;
+}
+
+// Single group: _SumCount <= TILE.
+[numthreads(THREADS, 1, 1)]
+void CSScanSums(uint thread : SV_GroupThreadID)
+{
+    uint total;
+    SCAN_TILE(_ScanSums, _SumCount, 0, total)
+}
+
+[numthreads(THREADS, 1, 1)]
+void CSScanAdd(uint thread : SV_GroupThreadID, uint group : SV_GroupID)
+{
+    uint add = _ScanSums[group];
+    uint base = group * TILE + thread * ITEMS;
+    [unroll]
+    for (uint i = 0; i < ITEMS; i++)
+    {
+        if (base + i < _ScanCount)
+            _Histogram[base + i] += add;
+    }
+}
+
+[numthreads(THREADS, 1, 1)]
+void CSDownsweep(uint thread : SV_GroupThreadID, uint tile : SV_GroupID)
+{
+    uint base = tile * TILE;
+    uint validCount = min(TILE, _Count - base);
+
+    // Blocked layout: thread t owns tile positions t*ITEMS .. t*ITEMS+ITEMS-1.
+    // Padding keys are all-ones, so they rank after every real key of the
+    // tile (the splits are stable and padding comes last in input order).
+    uint keys[ITEMS];
+    uint values[ITEMS];
+    [unroll]
+    for (uint i = 0; i < ITEMS; i++)
+    {
+        uint pos = thread * ITEMS + i;
+        bool valid = pos < validCount;
+        keys[i] = valid ? _KeysIn[base + pos] : 0xFFFFFFFFu;
+        values[i] = valid ? _ValuesIn[base + pos] : 0;
+    }
+
+    // Stable in-tile sort by the digit: one split per bit, low bit first.
+    [loop]
+    for (uint bit = 0; bit < RADIX_BITS; bit++)
+    {
+        uint shift = _Shift + bit;
+        uint zeros = 0;
+        [unroll]
+        for (uint z = 0; z < ITEMS; z++)
+            zeros += ((keys[z] >> shift) & 1) == 0 ? 1 : 0;
+
+        uint totalZeros;
+        uint zerosBefore = GroupExclusiveScan(zeros, thread, totalZeros);
+
+        [unroll]
+        for (uint j = 0; j < ITEMS; j++)
+        {
+            uint pos = thread * ITEMS + j;
+            bool one = ((keys[j] >> shift) & 1) != 0;
+            // Zeros keep their order at the front, ones keep theirs after
+            // all zeros: ones before pos = pos - zeros before pos.
+            uint dst = one ? totalZeros + (pos - zerosBefore) : zerosBefore;
+            if (!one)
+                zerosBefore++;
+            gs_keys[dst] = keys[j];
+            gs_values[dst] = values[j];
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        [unroll]
+        for (uint k = 0; k < ITEMS; k++)
+        {
+            uint pos = thread * ITEMS + k;
+            keys[k] = gs_keys[pos];
+            values[k] = gs_values[pos];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    // Where each digit starts inside the sorted tile (real keys only).
+    gs_hist[thread] = 0;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll]
+    for (uint h = 0; h < ITEMS; h++)
+    {
+        if (thread * ITEMS + h < validCount)
+            InterlockedAdd(gs_hist[Digit(keys[h])], 1);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    uint unusedTotal;
+    uint digitStart = GroupExclusiveScan(gs_hist[thread], thread, unusedTotal);
+    // gs_hist is reused to publish each digit's start to all threads.
+    gs_hist[thread] = digitStart;
+    GroupMemoryBarrierWithGroupSync();
+
+    [unroll]
+    for (uint s = 0; s < ITEMS; s++)
+    {
+        uint pos = thread * ITEMS + s;
+        if (pos < validCount)
+        {
+            uint digit = Digit(keys[s]);
+            uint dst = _Histogram[digit * _TileCount + tile] + (pos - gs_hist[digit]);
+            _KeysOut[dst] = keys[s];
+            _ValuesOut[dst] = values[s];
+        }
+    }
+}

@@ -8,7 +8,7 @@ namespace GaussianSplatting.Runtime
     // Copyright Thomas Smith 2024, MIT license
     // https://github.com/b0nes164/GPUSorting
 
-    public class GpuSorting
+    public class GpuSorting : IGpuSorter
     {
         //The size of a threadblock partition in the sort
         const uint DEVICE_RADIX_SORT_PARTITION_SIZE = 3840;
@@ -28,59 +28,6 @@ namespace GaussianSplatting.Runtime
         private LocalKeyword _ascendKeyword;
         private LocalKeyword _sortPairKeyword;
         private LocalKeyword _vulkanKeyword;
-
-        public struct Args
-        {
-            public uint             count;
-            public GraphicsBuffer   inputKeys;
-            public GraphicsBuffer   inputValues;
-            public SupportResources resources;
-            // First key bit to sort from, must be a multiple of 16 so the even
-            // pass count leaves results in the input buffers. 0 = full 32-bit
-            // sort. 16 = top 16 bits only (2x faster) — valid ONLY for keys
-            // whose low 16 bits are insignificant (e.g. distance buckets);
-            // packed keys like tile|depth or Morton codes need a full sort.
-            public uint             sortStartBit;
-            internal int workGroupCount;
-        }
-
-        public struct SupportResources
-        {
-            public GraphicsBuffer altBuffer;
-            public GraphicsBuffer altPayloadBuffer;
-            public GraphicsBuffer passHistBuffer;
-            public GraphicsBuffer globalHistBuffer;
-
-            public static SupportResources Load(uint count)
-            {
-                //This is threadBlocks * DEVICE_RADIX_SORT_RADIX
-                uint scratchBufferSize = DivRoundUp(count, DEVICE_RADIX_SORT_PARTITION_SIZE) * DEVICE_RADIX_SORT_RADIX; 
-                uint reducedScratchBufferSize = DEVICE_RADIX_SORT_RADIX * DEVICE_RADIX_SORT_PASSES;
-
-                var target = GraphicsBuffer.Target.Structured;
-                var resources = new SupportResources
-                {
-                    altBuffer = new GraphicsBuffer(target, (int)count, 4) { name = "DeviceRadixAlt" },
-                    altPayloadBuffer = new GraphicsBuffer(target, (int)count, 4) { name = "DeviceRadixAltPayload" },
-                    passHistBuffer = new GraphicsBuffer(target, (int)scratchBufferSize, 4) { name = "DeviceRadixPassHistogram" },
-                    globalHistBuffer = new GraphicsBuffer(target, (int)reducedScratchBufferSize, 4) { name = "DeviceRadixGlobalHistogram" },
-                };
-                return resources;
-            }
-
-            public void Dispose()
-            {
-                altBuffer?.Dispose();
-                altPayloadBuffer?.Dispose();
-                passHistBuffer?.Dispose();
-                globalHistBuffer?.Dispose();
-
-                altBuffer = null;
-                altPayloadBuffer = null;
-                passHistBuffer = null;
-                globalHistBuffer = null;
-            }
-        }
 
         private readonly ComputeShader _cs;
         private readonly int _kernelInit = -1;
@@ -145,15 +92,15 @@ namespace GaussianSplatting.Runtime
             public uint padding0;                       // Padding - unused
         }
 
-        public void Dispatch(CommandBuffer cmd, Args args)
+        public void Dispatch(CommandBuffer cmd, GpuSortArgs args)
         {
             if (!Valid)
                 return;
 
             GraphicsBuffer srcKeyBuffer = args.inputKeys;
             GraphicsBuffer srcPayloadBuffer = args.inputValues;
-            GraphicsBuffer dstKeyBuffer = args.resources.altBuffer;
-            GraphicsBuffer dstPayloadBuffer = args.resources.altPayloadBuffer;
+            GraphicsBuffer dstKeyBuffer = args.resources.altKeys;
+            GraphicsBuffer dstPayloadBuffer = args.resources.altValues;
 
             SortConstants constants = default;
             constants.numKeys = args.count;
@@ -165,22 +112,22 @@ namespace GaussianSplatting.Runtime
 
             //Set statically located buffers
             //Upsweep
-            cmd.SetComputeBufferParam(_cs, _kernelUpsweep, "b_passHist", args.resources.passHistBuffer);
-            cmd.SetComputeBufferParam(_cs, _kernelUpsweep, "b_globalHist", args.resources.globalHistBuffer);
+            cmd.SetComputeBufferParam(_cs, _kernelUpsweep, "b_passHist", args.resources.histogram);
+            cmd.SetComputeBufferParam(_cs, _kernelUpsweep, "b_globalHist", args.resources.scratch);
 
             //Scan
-            cmd.SetComputeBufferParam(_cs, _kernelScan, "b_passHist", args.resources.passHistBuffer);
+            cmd.SetComputeBufferParam(_cs, _kernelScan, "b_passHist", args.resources.histogram);
 
             //Downsweep
-            cmd.SetComputeBufferParam(_cs, _kernelDownsweep, "b_passHist", args.resources.passHistBuffer);
-            cmd.SetComputeBufferParam(_cs, _kernelDownsweep, "b_globalHist", args.resources.globalHistBuffer);
+            cmd.SetComputeBufferParam(_cs, _kernelDownsweep, "b_passHist", args.resources.histogram);
+            cmd.SetComputeBufferParam(_cs, _kernelDownsweep, "b_globalHist", args.resources.scratch);
 
             //Clear the global histogram
-            cmd.SetComputeBufferParam(_cs, _kernelInit, "b_globalHist", args.resources.globalHistBuffer);
+            cmd.SetComputeBufferParam(_cs, _kernelInit, "b_globalHist", args.resources.scratch);
             cmd.DispatchCompute(_cs, _kernelInit, 1, 1, 1);
 
             // Execute the sort algorithm in 8-bit increments starting at
-            // args.sortStartBit (see Args for the contract).
+            // args.sortStartBit (see GpuSortArgs for the contract).
             Assert.IsTrue(args.sortStartBit % 16 == 0 && args.sortStartBit < 32);
             for (constants.radixShift = args.sortStartBit; constants.radixShift < 32; constants.radixShift += DEVICE_RADIX_SORT_BITS)
             {
