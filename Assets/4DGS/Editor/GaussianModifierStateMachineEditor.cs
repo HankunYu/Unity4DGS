@@ -65,7 +65,9 @@ namespace GaussianSplatting.Editor
                 {
                     _statesProp.DeleteArrayElementAtIndex(i);
                     serializedObject.ApplyModifiedProperties();
-                    break;
+                    // Abandon this GUI pass: the open Horizontal/Vertical
+                    // groups are unwound by Unity instead of mismatching.
+                    GUIUtility.ExitGUI();
                 }
                 EditorGUILayout.EndHorizontal();
 

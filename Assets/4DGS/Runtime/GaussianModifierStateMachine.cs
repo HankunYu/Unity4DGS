@@ -181,12 +181,6 @@ namespace GaussianSplatting.Runtime
             // Snapshot current params as "from"
             _transitionFromSnapshot = SnapshotCurrentParams(target);
 
-            // Fire exit event on current state. When interrupting an in-flight
-            // transition, the current state's onExit already fired when that
-            // transition began — don't fire it a second time.
-            if (!wasTransitioning)
-                _currentState?.onExit?.Invoke();
-
             // Enable modifiers that the target state needs
             foreach (ModifierParam param in target.modifierParams)
             {
@@ -200,6 +194,15 @@ namespace GaussianSplatting.Runtime
             _transitionElapsed = 0f;
             _isTransitioning = true;
             _pendingAutoTransition = null;
+
+            // Fire exit event on current state last, once this transition is
+            // fully set up: a listener that calls SetState starts a new
+            // transition that then supersedes this one, instead of being
+            // overwritten by the rest of this method. When interrupting an
+            // in-flight transition, the current state's onExit already fired
+            // when that transition began — don't fire it a second time.
+            if (!wasTransitioning)
+                _currentState?.onExit?.Invoke();
         }
 
         private void UpdateTransition()
