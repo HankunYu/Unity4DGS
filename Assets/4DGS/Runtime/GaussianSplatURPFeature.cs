@@ -191,6 +191,17 @@ namespace GaussianSplatting.Runtime
                     builder.UseTexture(textureHandle, AccessFlags.ReadWrite);
                 if (applyStylize)
                     builder.UseTexture(stylizedHandle, AccessFlags.ReadWrite);
+                // Direct draws into the camera target, so it foveates under the
+                // same conditions as URP's own passes there (DrawObjectsPass).
+                // Their internal canFoveateIntermediatePasses flag is rebuilt
+                // from its public inputs, taking the untethered branch: a scaled
+                // XR viewport turns foveation off for intermediate targets.
+                if (direct && cameraData.xr.enabled)
+                {
+                    bool passSupportsFoveation = resourceData.isActiveTargetBackBuffer ||
+                                                 XRSystem.GetRenderViewportScale() == 1f;
+                    builder.EnableFoveatedRasterization(cameraData.xr.supportsFoveatedRendering && passSupportsFoveation);
+                }
                 builder.AllowPassCulling(false);
                 builder.SetRenderFunc(static (PassData data, UnsafeGraphContext context) =>
                 {
@@ -335,8 +346,9 @@ namespace GaussianSplatting.Runtime
 
             // Draws splats straight into the camera color target, depth-tested
             // against the camera depth: no intermediate RT, no composite. Under
-            // XR each eye slice is bound in turn, so the splats rasterise with
-            // the eye texture's own foveation rate map instead of at full rate.
+            // XR each eye slice is bound in turn; with the pass's foveated
+            // rasterization enabled, the splats rasterise under the eye
+            // texture's own foveation rate map instead of at full rate.
             private static void RenderDirect(PassData data, CommandBuffer cmd, GaussianSplatRenderSystem system)
             {
                 system.DirectToTarget = true;
