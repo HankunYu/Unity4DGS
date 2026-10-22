@@ -15,7 +15,7 @@ namespace GaussianSplatting.Editor.Import
     {
         // Bump whenever the builder's output for the same input changes, so
         // existing imports are redone.
-        public const int Version = 1;
+        public const int Version = 2;
 
         [SerializeField] private GaussianSplatImportSettings settings = new();
 

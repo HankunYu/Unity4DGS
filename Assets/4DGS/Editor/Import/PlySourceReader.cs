@@ -44,14 +44,21 @@ namespace GaussianSplatting.Editor.Import
                 plyRawData.Dispose();
             }
             int coeffsPerChannel = SHCoeffsPerChannel(attributes);
-            ReorderSHs(splatCount, (float*)splats.GetUnsafePtr(), coeffsPerChannel);
-            LinearizeData(splats);
+            Linearize(splats, coeffsPerChannel);
             header = new SplatSourceHeader
             {
                 splatCount = splatCount,
                 shDegree = SHDegreeForCoeffs(coeffsPerChannel),
             };
             return splats;
+        }
+
+        // Converts records in PLY vertex layout and value space (as stored in
+        // the file, or as written by the GPU export) to linear space in place.
+        public static unsafe void Linearize(NativeArray<InputSplatData> plyRecords, int shCoeffsPerChannel)
+        {
+            ReorderSHs(plyRecords.Length, (float*)plyRecords.GetUnsafePtr(), shCoeffsPerChannel);
+            LinearizeData(plyRecords);
         }
 
         static string CheckAttributes(List<(string, PlyFileParser.ElementType)> attributes)

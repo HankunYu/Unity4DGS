@@ -75,6 +75,31 @@ namespace GaussianSplatting.Runtime
             return new float4(three, index / 3.0f);
         }
 
+        // Inverse of PackSmallest3Rotation; matches SplatDecodeRotation in HLSL.
+        public static float4 UnpackSmallest3Rotation(float4 packed)
+        {
+            int index = (int)math.round(packed.w * 3.0f);
+            float3 three = packed.xyz * math.SQRT2 - (1.0f / math.SQRT2);
+            float4 q = new float4(three, math.sqrt(1.0f - math.saturate(math.dot(three, three))));
+            if (index == 0) q = q.wxyz;
+            if (index == 1) q = q.xwyz;
+            if (index == 2) q = q.xywz;
+            return q;
+        }
+
+        // Inverse of SH0ToColor
+        public static float3 ColorToSH0(float3 color)
+        {
+            const float ShC0 = 0.2820948f;
+            return (color - 0.5f) / ShC0;
+        }
+
+        // Inverse of Sigmoid
+        public static float InvSigmoid(float v)
+        {
+            return math.log(v / (1.0f - v));
+        }
+
 
         // Based on https://fgiesen.wordpress.com/2009/12/13/decoding-morton-codes/
         // Insert two 0 bits after each of the 21 low bits of x
