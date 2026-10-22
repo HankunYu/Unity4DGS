@@ -7,9 +7,9 @@ using System.Linq;
 using System.Text;
 using Unity.Collections;
 
-namespace GaussianSplatting.Editor.Utils
+namespace GaussianSplatting.Editor.Import
 {
-    public static class PLYFileReader
+    public static class PlyFileParser
     {
         public static void ReadFileHeader(string filePath, out int vertexCount, out int vertexStride, out List<(string, ElementType)> attrs)
         {

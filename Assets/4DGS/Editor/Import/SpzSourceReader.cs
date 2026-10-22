@@ -9,13 +9,13 @@ using Unity.Jobs;
 using Unity.Mathematics;
 using UnityEngine;
 
-namespace GaussianSplatting.Editor.Utils
+namespace GaussianSplatting.Editor.Import
 {
     // reads Niantic/Scaniverse .SPZ files:
     // https://github.com/nianticlabs/spz
     // https://scaniverse.com/spz
     [BurstCompile]
-    public static class SPZFileReader
+    public class SpzSourceReader : ISplatSourceReader
     {
         struct SpzHeader {
             public uint magic; // 0x5053474e "NGSP"
@@ -23,14 +23,15 @@ namespace GaussianSplatting.Editor.Utils
             public uint numPoints;
             public uint sh_fracbits_flags_reserved;
         };
-        public static void ReadFileHeader(string filePath, out int vertexCount)
+
+        public SplatSourceHeader ReadHeader(string filePath)
         {
-            vertexCount = 0;
             if (!File.Exists(filePath))
-                return;
+                return default;
             using var fs = File.OpenRead(filePath);
             using var gz = new GZipStream(fs, CompressionMode.Decompress);
-            ReadHeaderImpl(filePath, gz, out vertexCount, out _, out _, out _);
+            ReadHeaderImpl(filePath, gz, out int vertexCount, out int shLevel, out _, out _);
+            return new SplatSourceHeader { splatCount = vertexCount, shDegree = shLevel };
         }
 
         static void ReadHeaderImpl(string filePath, Stream fs, out int vertexCount, out int shLevel, out int fractBits, out int flags)
@@ -63,7 +64,7 @@ namespace GaussianSplatting.Editor.Utils
             };
         }
 
-        public static void ReadFile(string filePath, out NativeArray<InputSplatData> splats)
+        public NativeArray<InputSplatData> Read(string filePath, out SplatSourceHeader header)
         {
             using var fs = File.OpenRead(filePath);
             using var gz = new GZipStream(fs, CompressionMode.Decompress);
@@ -85,6 +86,7 @@ namespace GaussianSplatting.Editor.Utils
             NativeArray<byte> packedCol = new(splatCount * 3, Allocator.Persistent);
             NativeArray<byte> packedSh = new(splatCount * 3 * shCoeffs, Allocator.Persistent);
 
+            NativeArray<InputSplatData> splats;
             try
             {
                 // read file contents into temporaries
@@ -118,6 +120,8 @@ namespace GaussianSplatting.Editor.Utils
                 packedCol.Dispose();
                 packedSh.Dispose();
             }
+            header = new SplatSourceHeader { splatCount = splatCount, shDegree = shLevel };
+            return splats;
         }
 
         // Stream.Read may return fewer bytes than asked (GZipStream does,
