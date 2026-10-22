@@ -478,7 +478,8 @@ namespace GaussianSplatting.Runtime
             var texFormat = GaussianSplatAsset.ColorFormatToGraphics(asset.colorFormat);
             var src = asset.colorData.GetData<byte>();
 
-            if (_gpuColorData is Texture2D current && current.isReadable && current.width == texWidth &&
+            // `is` skips Unity's destroyed-object check, hence the explicit != null.
+            if (_gpuColorData is Texture2D current && current != null && current.isReadable && current.width == texWidth &&
                 current.height >= texHeight && current.graphicsFormat == texFormat)
             {
                 NativeArray<byte>.Copy(src, current.GetPixelData<byte>(0), src.Length);
@@ -688,6 +689,7 @@ namespace GaussianSplatting.Runtime
         private void DisposeResourcesForAsset()
         {
             DestroyImmediate(_gpuColorData);
+            _gpuColorData = null;
 
             DisposeBuffer(ref _gpuPosData);
             DisposeBuffer(ref _gpuOtherData);
@@ -889,13 +891,7 @@ namespace GaussianSplatting.Runtime
                 return false;
             SetAssetDataOnCS(cmb, kernelIndex);
 
-            Matrix4x4 worldToCamMatrix =
-                GaussianSplatRenderSystem.instance.MatrixOverride?.View ?? cam.worldToCameraMatrix;
-            worldToCamMatrix.m20 *= -1;
-            worldToCamMatrix.m21 *= -1;
-            worldToCamMatrix.m22 *= -1;
-
-            cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixMV, worldToCamMatrix * matrix);
+            cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixMV, SortViewMatrix(cam) * matrix);
             SetSortSettingsOnCS(cmb, settings);
             cmb.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.CopyDstViewData, dstViewData);
             cmb.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.CopyDstSortDistances, dstSortDistances);
@@ -911,6 +907,17 @@ namespace GaussianSplatting.Runtime
             return true;
         }
 
+        // World to sort-view space: camera space with z pointing forward. The
+        // whole z row flips, translation included; flipping only the rotation
+        // shifts z by a camera-dependent constant, which view-depth order
+        // ignores but radial distance does not.
+        private static Matrix4x4 SortViewMatrix(Camera cam)
+        {
+            Matrix4x4 view = GaussianSplatRenderSystem.instance.MatrixOverride?.View ?? cam.worldToCameraMatrix;
+            view.SetRow(2, -view.GetRow(2));
+            return view;
+        }
+
         private void SetSortSettingsOnCS(CommandBuffer cmd, in GaussianSplatSortState.Settings settings)
         {
             cmd.SetComputeIntParam(csSplatUtilities, Props.SortRadial, settings.Radial ? 1 : 0);
@@ -924,12 +931,6 @@ namespace GaussianSplatting.Runtime
                 return;
             if (!TryFindSupportedKernel(KernelIndices.CalcDistances, out int kernelIndex))
                 return;
-
-            Matrix4x4 worldToCamMatrix =
-                GaussianSplatRenderSystem.instance.MatrixOverride?.View ?? cam.worldToCameraMatrix;
-            worldToCamMatrix.m20 *= -1;
-            worldToCamMatrix.m21 *= -1;
-            worldToCamMatrix.m22 *= -1;
 
             cmd.BeginSample(ProfSort);
 
@@ -954,7 +955,7 @@ namespace GaussianSplatting.Runtime
             cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.SplatPos, _gpuPosData);
             cmd.SetComputeIntParam(csSplatUtilities, Props.SplatFormat, (int)splatAsset.posFormat);
             cmd.SetComputeIntParam(csSplatUtilities, Props.IsStereo, IsStereoCapture(cam) ? 1 : 0);
-            cmd.SetComputeMatrixParam(csSplatUtilities, Props.MatrixMV, worldToCamMatrix * matrix);
+            cmd.SetComputeMatrixParam(csSplatUtilities, Props.MatrixMV, SortViewMatrix(cam) * matrix);
             cmd.SetComputeIntParam(csSplatUtilities, Props.SplatCount, EffectiveSplatCount);
             cmd.SetComputeIntParam(csSplatUtilities, Props.SrcSplatCount, _splatCount);
             cmd.SetComputeIntParam(csSplatUtilities, Props.SplatChunkCount, _gpuChunksValid ? _gpuChunks.count : 0);
