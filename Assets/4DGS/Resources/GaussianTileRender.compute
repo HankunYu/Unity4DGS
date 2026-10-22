@@ -327,6 +327,13 @@ void CSRenderTiles(uint3 groupId : SV_GroupID, uint3 threadId : SV_GroupThreadID
         if (gs_TileDone != 0) break;
     }
 
+    // One dispatch per renderOrder group into the same (cleared) target,
+    // front group first: composite this group under what is already there,
+    // the same under-blend the raster path gets from OneMinusDstAlpha.
     if (validPixel)
-        _OutputTexture[uint2(pixelX, pixelY)] = float4(accum.rgb, accum.a);
+    {
+        uint2 px = uint2(pixelX, pixelY);
+        float4 dst = _OutputTexture[px];
+        _OutputTexture[px] = dst + (1.0 - dst.a) * accum;
+    }
 }
