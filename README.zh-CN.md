@@ -59,20 +59,20 @@ git clone https://github.com/HankunYu/Unity4DGS.git
 
 1. 将 `GaussianSplat URP Feature` 添加到你的 URP Renderer 资产。
 2. 在场景中放置一个 `GaussianSplatConfig` 组件(保存全局渲染设置与 shader 引用)。
-3. 通过 `Tools > Gaussian Splats > Create GaussianSplatAsset` 从 `.ply` / `.spz` 文件创建泼溅资产。
+3. 把 `.ply` / `.spz` 文件放进项目，它会原地导入为泼溅资产；质量、剪枝等选项在其导入设置（Inspector）里调整，源文件保持不变，可继续给其他工具使用。
 4. 为一个 GameObject 添加 `GaussianSplatRenderer` 组件并指定资产。
 5. 对于 4D 序列,使用 `GaussianPlayer` 并将其指向一个存放逐帧资产的文件夹。
 
 ## 示例资产
 
-`DemoScene` 引用了一个用 [World Labs](https://www.worldlabs.ai/) **Marble** 生成的高斯泼溅资产("ceramic" 场景)。该资产**未包含在本仓库中** —— 全新 clone 后 `DemoScene` 会出现 missing reference。请自备 `.ply` / `.spz` 并创建资产(见[快速开始](#快速开始))来填充场景。
+`DemoScene` 引用了一个用 [World Labs](https://www.worldlabs.ai/) **Marble** 生成的高斯泼溅资产("ceramic" 场景)。该资产**未包含在本仓库中** —— 全新 clone 后 `DemoScene` 会出现 missing reference。请自备 `.ply` / `.spz` 并导入(见[快速开始](#快速开始))来填充场景。
 
 ## 项目结构
 
 ```
 Assets/4DGS/
 ├── Runtime/          # 渲染器、排序、动画系统、modifier、状态机
-├── Editor/           # 资产创建器、导入器(PLY/SPZ)、编辑工具
+├── Editor/           # PLY/SPZ 导入器、编辑工具
 ├── Shaders/          # 泼溅 / 点云 shader、排序与 morph compute
 ├── Resources/        # Compute shader(动画、tile 渲染、工具)
 └── Settings/         # URP 管线资产

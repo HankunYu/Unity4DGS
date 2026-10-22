@@ -12,25 +12,7 @@ namespace GaussianSplatting.Editor.Import
     {
         public const string FileName = "cameras.json";
 
-        // Searches the source file's folder and its parents for cameras.json;
-        // returns null when there is none.
-        public static GaussianSplatAsset.CameraInfo[] FindAndRead(string sourcePath)
-        {
-            string curPath = sourcePath;
-            string camerasPath;
-            while (true)
-            {
-                var dir = Path.GetDirectoryName(curPath);
-                if (!Directory.Exists(dir))
-                    return null;
-                camerasPath = $"{dir}/{FileName}";
-                if (File.Exists(camerasPath))
-                    break;
-                curPath = dir;
-            }
-            return Read(camerasPath);
-        }
-
+        // Returns null when the file lists no cameras.
         public static GaussianSplatAsset.CameraInfo[] Read(string camerasPath)
         {
             string json = File.ReadAllText(camerasPath);

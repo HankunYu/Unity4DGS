@@ -59,20 +59,20 @@ git clone https://github.com/HankunYu/Unity4DGS.git
 
 1. Add the `GaussianSplat URP Feature` to your URP Renderer asset.
 2. Put a `GaussianSplatConfig` component in the scene (holds global rendering settings and shader references).
-3. Create a splat asset from a `.ply` / `.spz` file via `Tools > Gaussian Splats > Create GaussianSplatAsset`.
+3. Drop a `.ply` / `.spz` file into the project. It imports in place as a splat asset; quality, pruning and other options are in its import settings (Inspector), and the source file stays usable by other tools.
 4. Add a `GaussianSplatRenderer` component to a GameObject and assign the asset.
 5. For 4D sequences, use `GaussianPlayer` and point it at a folder of per-frame assets.
 
 ## Sample Assets
 
-`DemoScene` references a Gaussian splat asset (a "ceramic" scene) generated with [World Labs](https://www.worldlabs.ai/) **Marble**. That asset is **not included in this repository** — a fresh clone will show a missing reference in `DemoScene`. Bring your own `.ply` / `.spz` and create an asset (see [Getting Started](#getting-started)) to populate the scene.
+`DemoScene` references a Gaussian splat asset (a "ceramic" scene) generated with [World Labs](https://www.worldlabs.ai/) **Marble**. That asset is **not included in this repository** — a fresh clone will show a missing reference in `DemoScene`. Bring your own `.ply` / `.spz` and import it (see [Getting Started](#getting-started)) to populate the scene.
 
 ## Project Layout
 
 ```
 Assets/4DGS/
 ├── Runtime/          # Renderer, sorting, animation system, modifiers, state machine
-├── Editor/           # Asset creator, importers (PLY/SPZ), editing tools
+├── Editor/           # PLY/SPZ importer, editing tools
 ├── Shaders/          # Splat / point cloud shaders, sorting & morph compute
 ├── Resources/        # Compute shaders (animation, tile rendering, utilities)
 └── Settings/         # URP pipeline assets
