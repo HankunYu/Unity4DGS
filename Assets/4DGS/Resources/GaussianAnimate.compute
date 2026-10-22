@@ -79,6 +79,7 @@ RWStructuredBuffer<float> _AnimActivation;
 float _AnimDeltaTime;
 
 float4x4 _AnimMatrixObjectToWorld;
+float4x4 _AnimMatrixWorldToObject;
 
 // ── Noise functions ──
 
@@ -288,6 +289,10 @@ void ApplyWave(float3 worldPos, float weight, AnimModifierData mod,
     float frequency = mod.params1.x;
     float timePhase = mod.params1.z; // accumulated on CPU (integral of speed dt)
     int waveType = (int)mod.params1.w;
+    // A zero axis (typed into the inspector) has no perpendicular: bail out
+    // instead of writing NaN positions.
+    if (dot(axis, axis) < 1e-8)
+        return;
 
     float phase = 0;
     float3 displaceDir = float3(0, 1, 0);
@@ -323,6 +328,9 @@ void ApplyWarp(float3 localPos, float weight, AnimModifierData mod,
     float strength = mod.params0.w;
     float3 center = mod.params1.xyz;
     int warpType = (int)mod.params1.w;
+    // Every type but Spherize needs an axis; a zero one would write NaN.
+    if (warpType != 2 && dot(axis, axis) < 1e-8)
+        return;
 
     float3 p = localPos - center;
 
@@ -345,11 +353,18 @@ void ApplyWarp(float3 localPos, float weight, AnimModifierData mod,
     }
     else if (warpType == 1) // Bend
     {
+        // Bend the axis into an arc of curvature k = strength: a point at
+        // height h lands at sin(kh)/k along the axis and (1-cos(kh))/k off it,
+        // which goes to the identity as k -> 0 instead of flattening.
         float h = dot(p, axis);
-        float angle = h * strength;
-        float3 bendDir = normalize(p - axis * h + 0.001);
-        float3 delta = bendDir * (1.0 - cos(angle)) * abs(h) + axis * (sin(angle) * abs(h) - h);
-        posOffset += delta * weight;
+        float k = strength;
+        if (abs(k) > 1e-4)
+        {
+            float angle = h * k;
+            float3 bendDir = normalize(p - axis * h + 0.001);
+            float3 delta = bendDir * ((1.0 - cos(angle)) / k) + axis * (sin(angle) / k - h);
+            posOffset += delta * weight;
+        }
     }
     else if (warpType == 2) // Spherize
     {
@@ -698,8 +713,11 @@ void ApplyAudioRipple(float3 worldPos, float weight, AnimModifierData mod,
         float f = saturate(sampleF - i0);
         int e0 = mod.extraOffset + 6 + (i0 % AUDIO_HISTORY_LEN) * 2;
         int e1 = mod.extraOffset + 6 + (i1 % AUDIO_HISTORY_LEN) * 2;
-        lowAmp = lerp(_AnimExtraData[e0], _AnimExtraData[e1], f);
-        highAmp = lerp(_AnimExtraData[e0 + 1], _AnimExtraData[e1 + 1], f);
+        // The history only reaches so far out; fade the last stretch instead
+        // of cutting the rings off in a visible step at that radius.
+        float reachFade = saturate((AUDIO_HISTORY_LEN - 2 - delaySamples) / 16.0);
+        lowAmp = lerp(_AnimExtraData[e0], _AnimExtraData[e1], f) * reachFade;
+        highAmp = lerp(_AnimExtraData[e0 + 1], _AnimExtraData[e1 + 1], f) * reachFade;
     }
 
     float atten = exp(-dist * falloff);
@@ -760,7 +778,10 @@ void CSAnimateSplats(uint3 id : SV_DispatchThreadID)
     float3 localPos = LoadAnimSplatPos(idx);
     float3 worldPos = mul(_AnimMatrixObjectToWorld, float4(localPos, 1)).xyz;
 
-    // Accumulated animation results
+    // Accumulated animation results. Modifiers work in world space or in
+    // their volume's local space; both are brought to world space here and
+    // to the renderer's object space on output, which is where the render
+    // kernels add the offset.
     float3 posOffset = float3(0, 0, 0);
     float opacityMul = 1.0;
     float scaleMul = 1.0;
@@ -810,7 +831,9 @@ void CSAnimateSplats(uint3 id : SV_DispatchThreadID)
         {
             // warp works in volume local space
             float3 volLocal = mul(vol.worldToLocal, float4(worldPos, 1)).xyz;
-            ApplyWarp(volLocal, weight, mod, posOffset, vol.worldToLocal);
+            float3 localOffset = 0;
+            ApplyWarp(volLocal, weight, mod, localOffset, vol.worldToLocal);
+            posOffset += mul((float3x3)vol.localToWorld, localOffset);
         }
         else if (mType == 3) // Property
         {
@@ -830,11 +853,15 @@ void CSAnimateSplats(uint3 id : SV_DispatchThreadID)
         }
         else if (mType == 7) // Swirl
         {
-            ApplySwirl(worldPos, weight, vol, mod, posOffset);
+            float3 localOffset = 0;
+            ApplySwirl(worldPos, weight, vol, mod, localOffset);
+            posOffset += mul((float3x3)vol.localToWorld, localOffset);
         }
         else if (mType == 8) // Converge
         {
-            ApplyConverge(worldPos, weight, vol, mod, posOffset);
+            float3 localOffset = 0;
+            ApplyConverge(worldPos, weight, vol, mod, localOffset);
+            posOffset += mul((float3x3)vol.localToWorld, localOffset);
         }
         else if (mType == 9) // AudioRipple
         {
@@ -855,7 +882,7 @@ void CSAnimateSplats(uint3 id : SV_DispatchThreadID)
 
     // Write output: 3 float4s per splat
     uint baseIdx = idx * 3;
-    _AnimOutput[baseIdx + 0] = float4(posOffset, opacityMul);
+    _AnimOutput[baseIdx + 0] = float4(mul((float3x3)_AnimMatrixWorldToObject, posOffset), opacityMul);
     _AnimOutput[baseIdx + 1] = float4(scaleMul, colorBlend, 0, 0);
     _AnimOutput[baseIdx + 2] = float4(colorTint, 1);
 }

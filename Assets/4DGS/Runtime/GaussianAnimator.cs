@@ -45,6 +45,7 @@ namespace GaussianSplatting.Runtime
         private static readonly int PropAnimSplatChunks = Shader.PropertyToID("_AnimSplatChunks");
         private static readonly int PropAnimOutput = Shader.PropertyToID("_AnimOutput");
         private static readonly int PropAnimMatrixO2W = Shader.PropertyToID("_AnimMatrixObjectToWorld");
+        private static readonly int PropAnimMatrixW2O = Shader.PropertyToID("_AnimMatrixWorldToObject");
         private static readonly int PropAnimActivation = Shader.PropertyToID("_AnimActivation");
         private static readonly int PropAnimDeltaTime = Shader.PropertyToID("_AnimDeltaTime");
         private static readonly int PropAnimExtraData = Shader.PropertyToID("_AnimExtraData");
@@ -312,6 +313,7 @@ namespace GaussianSplatting.Runtime
             cs.SetBuffer(kernel, PropAnimSplatChunks, _renderer.GpuChunksBuffer);
 
             cs.SetMatrix(PropAnimMatrixO2W, transform.localToWorldMatrix);
+            cs.SetMatrix(PropAnimMatrixW2O, transform.worldToLocalMatrix);
 
             cs.SetBuffer(kernel, PropAnimActivation, _activationBuffer);
             cs.SetFloat(PropAnimDeltaTime, Time.deltaTime);
