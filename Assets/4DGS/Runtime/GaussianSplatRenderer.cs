@@ -58,6 +58,8 @@ namespace GaussianSplatting.Runtime
 
         // Set by GaussianAnimator: per-splat animation output (3 float4s per splat)
         private GraphicsBuffer _animOutputBuffer;
+        // Set by GaussianAnimator: animated chunk bounds (min, max float4 per chunk)
+        private GraphicsBuffer _animChunkBounds;
         // Set by GaussianMorph: pre-blended splat data (4 float4s per splat)
         private GraphicsBuffer _morphedDataBuffer;
         private GraphicsBuffer _morphSHBuffer;
@@ -166,6 +168,7 @@ namespace GaussianSplatting.Runtime
             public static readonly int CopyWriteKeys = Shader.PropertyToID("_CopyWriteKeys");
             public static readonly int AnimOutputData = Shader.PropertyToID("_AnimOutputData");
             public static readonly int AnimDataValid = Shader.PropertyToID("_AnimDataValid");
+            public static readonly int AnimChunkBounds = Shader.PropertyToID("_AnimChunkBounds");
             public static readonly int MorphedData = Shader.PropertyToID("_MorphedData");
             public static readonly int MorphDataValid = Shader.PropertyToID("_MorphDataValid");
             public static readonly int MorphWeight = Shader.PropertyToID("_MorphWeight");
@@ -263,14 +266,16 @@ namespace GaussianSplatting.Runtime
             }
         }
 
-        internal void SetAnimationOutput(GraphicsBuffer animBuffer)
+        internal void SetAnimationOutput(GraphicsBuffer animBuffer, GraphicsBuffer chunkBounds)
         {
             _animOutputBuffer = animBuffer;
+            _animChunkBounds = chunkBounds;
         }
 
         internal void ClearAnimationOutput()
         {
             _animOutputBuffer = null;
+            _animChunkBounds = null;
         }
 
         internal void SetCutoutData(int count, GraphicsBuffer buffer)
@@ -651,6 +656,7 @@ namespace GaussianSplatting.Runtime
             bool hasAnim = _animOutputBuffer != null;
             cmb.SetComputeIntParam(cs, Props.AnimDataValid, hasAnim ? 1 : 0);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.AnimOutputData, hasAnim ? _animOutputBuffer : _gpuView);
+            cmb.SetComputeBufferParam(cs, kernelIndex, Props.AnimChunkBounds, hasAnim ? _animChunkBounds : _gpuView);
 
             // Morph data binding
             bool hasMorph = _morphedDataBuffer != null && _morphDataValid != 0;

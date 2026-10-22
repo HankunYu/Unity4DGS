@@ -17,6 +17,7 @@ namespace GaussianSplatting.Runtime
         private ComputeShader _animateShader;
         private GaussianSplatRenderer _renderer;
         private GraphicsBuffer _animOutputBuffer;
+        private GraphicsBuffer _chunkBoundsBuffer;
         private GraphicsBuffer _activationBuffer;
 
         // Auto-collected from children each frame
@@ -44,6 +45,7 @@ namespace GaussianSplatting.Runtime
         private static readonly int PropAnimSplatPos = Shader.PropertyToID("_AnimSplatPos");
         private static readonly int PropAnimSplatChunks = Shader.PropertyToID("_AnimSplatChunks");
         private static readonly int PropAnimOutput = Shader.PropertyToID("_AnimOutput");
+        private static readonly int PropAnimChunkBounds = Shader.PropertyToID("_AnimChunkBounds");
         private static readonly int PropAnimMatrixO2W = Shader.PropertyToID("_AnimMatrixObjectToWorld");
         private static readonly int PropAnimMatrixW2O = Shader.PropertyToID("_AnimMatrixWorldToObject");
         private static readonly int PropAnimActivation = Shader.PropertyToID("_AnimActivation");
@@ -75,6 +77,8 @@ namespace GaussianSplatting.Runtime
         {
             _animOutputBuffer?.Dispose();
             _animOutputBuffer = null;
+            _chunkBoundsBuffer?.Dispose();
+            _chunkBoundsBuffer = null;
             _activationBuffer?.Dispose();
             _activationBuffer = null;
             _volumeBuffer?.Dispose();
@@ -153,8 +157,8 @@ namespace GaussianSplatting.Runtime
             // Dispatch compute
             DispatchAnimation(splatCount, volumeCount, modifierCount);
 
-            // Set the output buffer on the renderer so CalcViewData can read it
-            _renderer.SetAnimationOutput(_animOutputBuffer);
+            // Set the output buffers on the renderer so CalcViewData can read them
+            _renderer.SetAnimationOutput(_animOutputBuffer, _chunkBoundsBuffer);
         }
 
         private void EnsureBuffers(int splatCount, int volumeCount, int modifierCount, int extraFloatCount)
@@ -196,6 +200,17 @@ namespace GaussianSplatting.Runtime
                 _activationBuffer.SetData(_zeroActivation, 0, 0, splatCount);
             }
             _activeSplatCount = splatCount;
+
+            // Animated chunk bounds: min and max per chunk
+            int chunkBoundsCount = Mathf.Max(ChunkCount(), 1) * 2;
+            if (_chunkBoundsBuffer == null || _chunkBoundsBuffer.count < chunkBoundsCount)
+            {
+                _chunkBoundsBuffer?.Dispose();
+                _chunkBoundsBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, chunkBoundsCount, 16)
+                {
+                    name = "GaussianAnimChunkBounds"
+                };
+            }
 
             // Volume buffer
             if (_volumeBuffer == null || _volumeBuffer.count < volumeCount)
@@ -304,9 +319,8 @@ namespace GaussianSplatting.Runtime
             uint format = (uint)asset.posFormat | ((uint)asset.scaleFormat << 8) | ((uint)asset.shFormat << 16);
             cs.SetInt(PropAnimSplatFormat, (int)format);
 
-            bool hasChunks = _renderer.GpuChunksValid;
-            int chunkCount = hasChunks ? _renderer.GpuChunksBuffer.count : 0;
-            cs.SetInt(PropAnimChunkCount, chunkCount);
+            cs.SetInt(PropAnimChunkCount, ChunkCount());
+            cs.SetBuffer(kernel, PropAnimChunkBounds, _chunkBoundsBuffer);
 
             // Set original pos buffer and chunk data
             cs.SetBuffer(kernel, PropAnimSplatPos, _renderer.GpuPosData);
@@ -320,6 +334,11 @@ namespace GaussianSplatting.Runtime
 
             cs.GetKernelThreadGroupSizes(kernel, out uint gsX, out _, out _);
             cs.Dispatch(kernel, (splatCount + (int)gsX - 1) / (int)gsX, 1, 1);
+        }
+
+        private int ChunkCount()
+        {
+            return _renderer.GpuChunksValid ? _renderer.GpuChunksBuffer.count : 0;
         }
 
         // Must match AnimModifierData in compute shader

@@ -3,6 +3,8 @@
 // Reads original splat data, applies volume-based modifier effects,
 // and writes animated results to temporary buffers.
 
+// One thread group per position chunk: the kernel reduces each group's
+// animated positions into that chunk's bounds.
 #define GROUP_SIZE 256
 
 #pragma kernel CSAnimateSplats
@@ -73,6 +75,10 @@ StructuredBuffer<AnimSplatChunkInfo> _AnimSplatChunks;
 // Output: animated position offsets + property multipliers per splat
 // Layout: float4(posOffset.xyz, opacityMul), float4(scaleMul, colorBlend, 0, 0), float4(colorTint)
 RWStructuredBuffer<float4> _AnimOutput; // 3 float4s per splat
+
+// Output: object-space bounds of each chunk's animated positions, 2 float4s
+// per chunk (min, max), for frustum culling in the view-data kernels
+RWStructuredBuffer<float4> _AnimChunkBounds;
 
 // Per-splat activation for trail persistence (persists across frames)
 RWStructuredBuffer<float> _AnimActivation;
@@ -767,13 +773,26 @@ void ApplyProperty(float weight, AnimModifierData mod,
 
 // ── Main kernel ──
 
-[numthreads(GROUP_SIZE, 1, 1)]
-void CSAnimateSplats(uint3 id : SV_DispatchThreadID)
+// Order-preserving float <-> uint mapping, so groupshared atomics can take
+// float min/max.
+uint FloatToOrderedUint(float f)
 {
-    uint idx = id.x;
-    if (idx >= _AnimSplatCount)
-        return;
+    uint u = asuint(f);
+    return (u & 0x80000000u) != 0 ? ~u : u | 0x80000000u;
+}
 
+float OrderedUintToFloat(uint u)
+{
+    return asfloat((u & 0x80000000u) != 0 ? u & 0x7FFFFFFFu : ~u);
+}
+
+groupshared uint gs_boundsMin[3];
+groupshared uint gs_boundsMax[3];
+
+// Animates one splat, writes its outputs and returns its animated
+// object-space position.
+float3 AnimateSplat(uint idx)
+{
     // Load original position
     float3 localPos = LoadAnimSplatPos(idx);
     float3 worldPos = mul(_AnimMatrixObjectToWorld, float4(localPos, 1)).xyz;
@@ -881,8 +900,45 @@ void CSAnimateSplats(uint3 id : SV_DispatchThreadID)
     }
 
     // Write output: 3 float4s per splat
+    float3 objectOffset = mul((float3x3)_AnimMatrixWorldToObject, posOffset);
     uint baseIdx = idx * 3;
-    _AnimOutput[baseIdx + 0] = float4(mul((float3x3)_AnimMatrixWorldToObject, posOffset), opacityMul);
+    _AnimOutput[baseIdx + 0] = float4(objectOffset, opacityMul);
     _AnimOutput[baseIdx + 1] = float4(scaleMul, colorBlend, 0, 0);
     _AnimOutput[baseIdx + 2] = float4(colorTint, 1);
+    return localPos + objectOffset;
+}
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void CSAnimateSplats(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
+{
+    if (gtid.x < 3)
+    {
+        gs_boundsMin[gtid.x] = 0xFFFFFFFFu;
+        gs_boundsMax[gtid.x] = 0;
+    }
+    // Every thread reaches both barriers: no early return.
+    GroupMemoryBarrierWithGroupSync();
+
+    uint idx = id.x;
+    if (idx < _AnimSplatCount)
+    {
+        float3 pos = AnimateSplat(idx);
+        [unroll]
+        for (uint c = 0; c < 3; c++)
+        {
+            uint ordered = FloatToOrderedUint(pos[c]);
+            InterlockedMin(gs_boundsMin[c], ordered);
+            InterlockedMax(gs_boundsMax[c], ordered);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // Every chunk has at least one splat, so its bounds are never empty.
+    if (gtid.x == 0 && gid.x < _AnimChunkCount)
+    {
+        _AnimChunkBounds[gid.x * 2] = float4(OrderedUintToFloat(gs_boundsMin[0]),
+            OrderedUintToFloat(gs_boundsMin[1]), OrderedUintToFloat(gs_boundsMin[2]), 0);
+        _AnimChunkBounds[gid.x * 2 + 1] = float4(OrderedUintToFloat(gs_boundsMax[0]),
+            OrderedUintToFloat(gs_boundsMax[1]), OrderedUintToFloat(gs_boundsMax[2]), 0);
+    }
 }

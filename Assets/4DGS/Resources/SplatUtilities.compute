@@ -93,6 +93,10 @@ StructuredBuffer<float4> _MorphSHData;
 // no animation entry, so every read is guarded by HasAnimData.
 StructuredBuffer<float4> _AnimOutputData;
 uint _AnimDataValid; // 0 = no animation, 1 = animation active
+// Per-chunk bounds of the animated positions (object space, 2 float4s per
+// chunk: min, max), reduced by the animation kernel each frame so chunks stay
+// cullable while animated.
+StructuredBuffer<float4> _AnimChunkBounds;
 
 bool HasAnimData(uint idx)
 {
@@ -593,6 +597,12 @@ bool ChunkOutsideFrustum(float4x4 mvp, float3 bmin, float3 bmax)
 
 void ChunkBounds(uint chunkIdx, out float3 bmin, out float3 bmax)
 {
+    if (_AnimDataValid != 0)
+    {
+        bmin = _AnimChunkBounds[chunkIdx * 2].xyz;
+        bmax = _AnimChunkBounds[chunkIdx * 2 + 1].xyz;
+        return;
+    }
     SplatChunkInfo chunk = _SplatChunks[chunkIdx];
     bmin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
     bmax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
@@ -607,10 +617,11 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
     uint laneInChunk = localIdx % kChunkSize;
 
     // Phase 1: chunk frustum culling (first thread per 256-splat chunk)
-    // Skip when morph or animation is active (positions may differ from chunk AABB)
+    // Skip when morph is active (morphed positions leave the chunk AABB);
+    // animated chunks are tested against their animated bounds instead.
     // Chunk culling tests AABB corners against the _MatrixVP frustum, which
     // does not exist under ODS — and nothing is off-screen there anyway.
-    bool canCull = (_SplatChunkCount > 0) && (_MorphDataValid == 0) && (_AnimDataValid == 0) && (_OdsEnabled == 0);
+    bool canCull = (_SplatChunkCount > 0) && (_MorphDataValid == 0) && (_OdsEnabled == 0);
 
     if (laneInChunk == 0)
     {
@@ -792,7 +803,7 @@ void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_Group
     // eye frusta — the right eye sees past the left eye's right edge.
     // Chunk culling tests AABB corners against the _MatrixVP frustum, which
     // does not exist under ODS — and nothing is off-screen there anyway.
-    bool canCull = (_SplatChunkCount > 0) && (_MorphDataValid == 0) && (_AnimDataValid == 0) && (_OdsEnabled == 0);
+    bool canCull = (_SplatChunkCount > 0) && (_MorphDataValid == 0) && (_OdsEnabled == 0);
     if (laneInChunk == 0)
     {
         _chunkVisible[chunkSlot] = 1;
