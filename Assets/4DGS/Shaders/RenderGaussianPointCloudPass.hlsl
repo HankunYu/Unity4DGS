@@ -60,6 +60,11 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
 		o.col.g = f16tof32(view.color.x);
 		o.col.b = f16tof32(view.color.y >> 16);
 		o.col.a = f16tof32(view.color.y);
+		#if defined(SPLAT_OUTPUT_LINEAR) && !defined(UNITY_COLORSPACE_GAMMA)
+		// The color is constant across the point, so converting it once per
+		// vertex matches converting the un-premultiplied color per fragment.
+		o.col.rgb = GammaToLinearSpace(o.col.rgb);
+		#endif
 
 		uint idx = vtxID;
 		float2 quadPos = float2(idx&1, (idx>>1)&1) * 2.0 - 1.0;
@@ -92,7 +97,8 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
     return o;
 }
 
-// Premultiplied point color in gamma space (or the raw AOV value).
+// Premultiplied point color in gamma space, or in linear space when the
+// pass defines SPLAT_OUTPUT_LINEAR (or the raw AOV value).
 half4 PointColor (v2f i)
 {
 	// Round point mask with analytic edge coverage. A binary discard leaves

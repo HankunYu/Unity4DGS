@@ -60,6 +60,11 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
 		o.col.g = f16tof32(view.color.x);
 		o.col.b = f16tof32(view.color.y >> 16);
 		o.col.a = f16tof32(view.color.y);
+		#if defined(SPLAT_OUTPUT_LINEAR) && !defined(UNITY_COLORSPACE_GAMMA)
+		// The color is constant across the quad, so converting it once per
+		// vertex matches converting the un-premultiplied color per fragment.
+		o.col.rgb = GammaToLinearSpace(o.col.rgb);
+		#endif
 
 		float extent = _SplatQuadExtent;
 		// alpha * exp(-r^2) drops below the discard threshold at
@@ -95,7 +100,8 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
     return o;
 }
 
-// Premultiplied splat color, in the gamma space the scene was trained in.
+// Premultiplied splat color: in the gamma space the scene was trained in, or
+// in linear space when the pass defines SPLAT_OUTPUT_LINEAR.
 half4 SplatColor (v2f i)
 {
 	// Manual depth test for mesh occlusion under VRR.
