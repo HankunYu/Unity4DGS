@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using GaussianSplatting.Runtime;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -6,9 +7,10 @@ using UnityEngine;
 
 namespace GaussianSplatting.Editor
 {
-    // Dragging splat assets (imported .ply/.spz files) into the Scene view or
-    // the Hierarchy creates a GameObject with a GaussianSplatRenderer for
-    // each, plus the scene's GaussianSplatConfig when there is none yet.
+    // Dragging splat assets (imported .ply/.spz files) or sequences into the
+    // Scene view or the Hierarchy creates a GameObject with a
+    // GaussianSplatRenderer for each (and a GaussianPlayer for a sequence),
+    // plus the scene's GaussianSplatConfig when there is none yet.
     [InitializeOnLoad]
     internal static class GaussianSplatDragAndDrop
     {
@@ -28,7 +30,7 @@ namespace GaussianSplatting.Editor
         static DragAndDropVisualMode OnSceneDrop(Object dropUpon, Vector3 worldPosition, Vector2 viewportPosition,
             Transform parentForDraggedObjects, bool perform)
         {
-            List<GaussianSplatAsset> assets = DraggedAssets();
+            List<Object> assets = DraggedAssets();
             if (assets.Count == 0)
                 return DragAndDropVisualMode.None;
             if (perform)
@@ -39,7 +41,7 @@ namespace GaussianSplatting.Editor
         static DragAndDropVisualMode OnHierarchyDrop(EntityId dropTargetEntityId, HierarchyDropFlags dropMode,
             Transform parentForDraggedObjects, bool perform)
         {
-            List<GaussianSplatAsset> assets = DraggedAssets();
+            List<Object> assets = DraggedAssets();
             if (assets.Count == 0)
                 return DragAndDropVisualMode.None;
             if (perform)
@@ -63,19 +65,20 @@ namespace GaussianSplatting.Editor
             return DragAndDropVisualMode.Copy;
         }
 
-        static List<GaussianSplatAsset> DraggedAssets()
+        // The dragged splat assets and sequences
+        static List<Object> DraggedAssets()
         {
-            var assets = new List<GaussianSplatAsset>();
+            var assets = new List<Object>();
             foreach (Object obj in DragAndDrop.objectReferences)
             {
-                if (obj is GaussianSplatAsset asset)
-                    assets.Add(asset);
+                if (obj is GaussianSplatAsset or GaussianSplatSequence)
+                    assets.Add(obj);
             }
             return assets;
         }
 
         // worldPosition null keeps the local origin of the parent
-        static void Create(List<GaussianSplatAsset> assets, Transform parent, int siblingIndex, Vector3? worldPosition)
+        static void Create(List<Object> assets, Transform parent, int siblingIndex, Vector3? worldPosition)
         {
             Undo.IncrementCurrentGroup();
             int undoGroup = Undo.GetCurrentGroup();
@@ -89,7 +92,7 @@ namespace GaussianSplatting.Editor
             }
 
             var created = new List<Object>();
-            foreach (GaussianSplatAsset asset in assets)
+            foreach (Object asset in assets)
             {
                 // Inactive until the asset is assigned, so OnEnable loads it once
                 var go = new GameObject(asset.name);
@@ -102,9 +105,14 @@ namespace GaussianSplatting.Editor
                     go.transform.position = worldPosition.Value;
                 go.transform.localScale = SourceToUnityScale;
 
+                var sequence = asset as GaussianSplatSequence;
+                // a sequence shows its first frame until it plays
+                GaussianSplatAsset shown = sequence != null ? sequence.frames?.FirstOrDefault() : (GaussianSplatAsset)asset;
                 var renderer = go.AddComponent<GaussianSplatRenderer>();
-                renderer.splatAsset = asset;
-                renderer.nextAsset = asset;
+                renderer.splatAsset = shown;
+                renderer.nextAsset = shown;
+                if (sequence != null)
+                    go.AddComponent<GaussianPlayer>().sequence = sequence;
                 go.SetActive(true);
 
                 GameObjectUtility.EnsureUniqueNameForSibling(go);

@@ -61,7 +61,7 @@ git clone https://github.com/HankunYu/Unity4DGS.git
 2. Put a `GaussianSplatConfig` component in the scene (holds global rendering settings and shader references). Step 4 adds one if the scene has none.
 3. Drop a `.ply` / `.spz` file into the project. It imports in place as a splat asset; quality, pruning, splat budget, SH degree and other options are in its import settings (Inspector), and the source file stays usable by other tools.
 4. Drag the file into the Scene view or Hierarchy: this creates a GameObject with a `GaussianSplatRenderer` for it, flipped on Y because training tools write splats y-down. You can also add the component yourself and assign the asset.
-5. For 4D sequences, use `GaussianPlayer` and point it at a folder of per-frame assets.
+5. For 4D sequences, put the per-frame files in a folder, right-click it and pick `Create > Gaussian Splats > Sequence from Folder` (frames sort by natural file name order), then drag the sequence into the scene: that adds a `GaussianPlayer` that plays it.
 
 ## Sample Assets
 
