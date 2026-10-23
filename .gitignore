@@ -61,9 +61,13 @@ AGENTS.md
 /Assets/Editor.meta
 /Docs/console_log.txt
 
-# Local splat test data (not distributed with the repo)
+# Local splat test data and other project content (not distributed with the repo)
 /Assets/Resources/
 /Assets/Resources.meta
+/Assets/GaussianAssets/
+/Assets/GaussianAssets.meta
+/Assets/Audio/
+/Assets/Audio.meta
 
 # Internal design notes
 /Assets/docs/
