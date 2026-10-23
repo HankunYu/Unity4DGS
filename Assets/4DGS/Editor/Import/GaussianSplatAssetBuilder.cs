@@ -36,11 +36,14 @@ namespace GaussianSplatting.Editor.Import
             int shDegree = settings.SHDegreeFor(sourceSHDegree);
             int shCoeffs = GaussianSplatAsset.GetSHCoeffCount(shDegree);
             GaussianSplatFormats formats = settings.Formats.ForSHDegree(shDegree);
+            int budget = settings.SplatBudgetFor(splats.Length);
 
             if (settings.pruneOpacity > 0f)
                 splats = PruneTransparentSplats(splats, settings.pruneOpacity);
             if (splats.Length == 0)
                 throw new InvalidOperationException("every splat is below the prune opacity");
+            if (splats.Length > budget)
+                splats = KeepMostImportant(splats, budget);
             if (splats.Length > GaussianSplatAsset.MaxSplats)
                 throw new InvalidOperationException($"{splats.Length} splats; at most {GaussianSplatAsset.MaxSplats} are supported");
 
@@ -124,6 +127,54 @@ namespace GaussianSplatting.Editor.Import
                     result[o++] = splats[i];
             }
             Debug.Log($"GS: pruned {splats.Length - kept:N0} of {splats.Length:N0} splats below opacity {minOpacity:0.###}");
+            splats.Dispose();
+            return result;
+        }
+
+        // Importance of a splat: opacity times its size raised to an area,
+        // roughly how much it can cover on screen
+        [BurstCompile]
+        struct CalcImportanceJob : IJobParallelFor
+        {
+            [ReadOnly] public NativeArray<InputSplatData> m_Splats;
+            public NativeArray<(float, int)> m_Importance;
+
+            public void Execute(int index)
+            {
+                InputSplatData s = m_Splats[index];
+                float volume = s.scale.x * s.scale.y * s.scale.z;
+                m_Importance[index] = (s.opacity * math.pow(volume, 2.0f / 3.0f), index);
+            }
+        }
+
+        struct MoreImportantFirst : IComparer<(float, int)>
+        {
+            public int Compare((float, int) a, (float, int) b)
+            {
+                int c = b.Item1.CompareTo(a.Item1);
+                return c != 0 ? c : a.Item2.CompareTo(b.Item2);
+            }
+        }
+
+        // Returns the count most important splats in their original order,
+        // disposing the input.
+        static NativeArray<InputSplatData> KeepMostImportant(NativeArray<InputSplatData> splats, int count)
+        {
+            var importance = new NativeArray<(float, int)>(splats.Length, Allocator.TempJob);
+            new CalcImportanceJob { m_Splats = splats, m_Importance = importance }.Schedule(splats.Length, 8192).Complete();
+            importance.Sort(new MoreImportantFirst());
+
+            var kept = new NativeArray<int>(count, Allocator.TempJob);
+            for (int i = 0; i < count; ++i)
+                kept[i] = importance[i].Item2;
+            kept.Sort();
+            var result = new NativeArray<InputSplatData>(count, Allocator.Persistent);
+            for (int i = 0; i < count; ++i)
+                result[i] = splats[kept[i]];
+            kept.Dispose();
+            importance.Dispose();
+
+            Debug.Log($"GS: kept the {count:N0} most important of {splats.Length:N0} splats");
             splats.Dispose();
             return result;
         }
