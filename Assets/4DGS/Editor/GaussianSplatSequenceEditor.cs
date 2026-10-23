@@ -12,13 +12,24 @@ namespace GaussianSplatting.Editor
     {
         const string CreateMenu = "Assets/Create/Gaussian Splats/Sequence from Folder";
 
+        static readonly GUIContent s_FolderLabel = new("Source Folder",
+            "Folder the frames come from: every splat asset directly in it, in natural file name order. " +
+            "Setting it fills the frames; Refresh picks up files added later.");
+
         SerializedProperty _frames;
         SerializedProperty _frameRate;
+        SerializedProperty _sourceFolderGuid;
+        // The folder this asset is in, and how many frames it holds
+        string _ownFolder;
+        int _ownFolderFrames;
 
         private void OnEnable()
         {
+            _ownFolder = Path.GetDirectoryName(AssetDatabase.GetAssetPath(target))?.Replace('\\', '/');
+            _ownFolderFrames = string.IsNullOrEmpty(_ownFolder) ? 0 : CollectFrames(_ownFolder).Length;
             _frames = serializedObject.FindProperty(nameof(GaussianSplatSequence.frames));
             _frameRate = serializedObject.FindProperty(nameof(GaussianSplatSequence.frameRate));
+            _sourceFolderGuid = serializedObject.FindProperty(nameof(GaussianSplatSequence.sourceFolderGuid));
         }
 
         public override void OnInspectorGUI()
@@ -38,14 +49,7 @@ namespace GaussianSplatting.Editor
             }
 
             EditorGUILayout.Space();
-            string folder = AssetDatabase.GUIDToAssetPath(sequence.sourceFolderGuid);
-            using (new EditorGUI.DisabledScope(true))
-                EditorGUILayout.ObjectField("Source Folder", AssetDatabase.LoadAssetAtPath<DefaultAsset>(folder), typeof(DefaultAsset), false);
-            using (new EditorGUI.DisabledScope(!AssetDatabase.IsValidFolder(folder)))
-            {
-                if (GUILayout.Button("Refresh Frames from Folder"))
-                    Refresh(sequence, folder);
-            }
+            DrawSourceFolder(sequence);
 
             EditorGUILayout.Space();
             EditorGUILayout.PropertyField(_frames, true);
@@ -65,12 +69,53 @@ namespace GaussianSplatting.Editor
                 .ToArray();
         }
 
-        static void Refresh(GaussianSplatSequence sequence, string folder)
+        void DrawSourceFolder(GaussianSplatSequence sequence)
         {
-            Undo.RecordObject(sequence, "Refresh Sequence Frames");
-            sequence.frames = CollectFrames(folder);
-            EditorUtility.SetDirty(sequence);
-            AssetDatabase.SaveAssetIfDirty(sequence);
+            string folder = AssetDatabase.GUIDToAssetPath(_sourceFolderGuid.stringValue);
+            var current = AssetDatabase.IsValidFolder(folder) ? AssetDatabase.LoadAssetAtPath<DefaultAsset>(folder) : null;
+            EditorGUI.BeginChangeCheck();
+            var picked = EditorGUILayout.ObjectField(s_FolderLabel, current, typeof(DefaultAsset), false) as DefaultAsset;
+            if (EditorGUI.EndChangeCheck())
+            {
+                string path = AssetDatabase.GetAssetPath(picked);
+                if (picked == null)
+                    _sourceFolderGuid.stringValue = string.Empty;
+                else if (AssetDatabase.IsValidFolder(path))
+                    UseFolder(path);
+                else
+                    Debug.LogWarning($"{path} is not a folder");
+            }
+
+            if (current != null)
+            {
+                if (GUILayout.Button("Refresh Frames from Folder"))
+                    UseFolder(folder);
+                return;
+            }
+
+            // A sequence made with the plain Create menu often sits among its frames
+            if (sequence.FrameCount == 0)
+            {
+                if (_ownFolderFrames > 0)
+                {
+                    if (GUILayout.Button($"Use the {_ownFolderFrames} Frames in {_ownFolder}"))
+                        UseFolder(_ownFolder);
+                }
+                else
+                {
+                    EditorGUILayout.HelpBox("No frames. Drag the folder holding them into Source Folder.", MessageType.Info);
+                }
+            }
+        }
+
+        // Points the sequence at folder and takes the frames from it
+        void UseFolder(string folder)
+        {
+            _sourceFolderGuid.stringValue = AssetDatabase.AssetPathToGUID(folder);
+            GaussianSplatAsset[] frames = CollectFrames(folder);
+            _frames.arraySize = frames.Length;
+            for (int i = 0; i < frames.Length; i++)
+                _frames.GetArrayElementAtIndex(i).objectReferenceValue = frames[i];
         }
 
         [MenuItem(CreateMenu, false, 1)]
