@@ -15,7 +15,7 @@ namespace GaussianSplatting.Editor.Import
     {
         // Bump whenever the builder's output for the same input changes, so
         // existing imports are redone.
-        public const int Version = 2;
+        public const int Version = 3;
 
         [SerializeField] private GaussianSplatImportSettings settings = new();
 
@@ -43,8 +43,8 @@ namespace GaussianSplatting.Editor.Import
             GaussianSplatBuildResult built = null;
             try
             {
-                splats = SplatSourceReaders.ForFile(sourcePath).Read(sourcePath, out _);
-                built = GaussianSplatAssetBuilder.Build(ref splats, settings, cameras);
+                splats = SplatSourceReaders.ForFile(sourcePath).Read(sourcePath, out SplatSourceHeader header);
+                built = GaussianSplatAssetBuilder.Build(ref splats, header.shDegree, settings, cameras);
 
                 GaussianSplatAsset asset = built.asset;
                 asset.name = name;

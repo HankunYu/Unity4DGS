@@ -9,7 +9,7 @@ namespace GaussianSplatting.Runtime
 {
     public class GaussianSplatAsset : ScriptableObject
     {
-        public const int CurrentVersion = 2023_10_20;
+        public const int CurrentVersion = 2026_10_23;
         public const int ChunkSize = 256;
         public const int TextureWidth = 2048; // allows up to 32M splats on desktop GPU (2k width x 16k height)
         public const int MaxSplats = 8_600_000; // mostly due to 2GB GPU buffer size limit when exporting a splat (2GB / 248B is just over 8.6M)
@@ -24,6 +24,10 @@ namespace GaussianSplatting.Runtime
         public Vector3 boundsMax;
         [FormerlySerializedAs("m_DataHash"), FormerlySerializedAs("_dataHash")]
         public Hash128 dataHash;
+        // SH bands stored beyond the base color, 0-3. The SH data holds
+        // GetSHCoeffCount(shDegree) coefficients per entry; with 0 there is
+        // no SH data at all.
+        public int shDegree;
 
         // Match VECTOR_FMT_* in HLSL
         public enum VectorFormat
@@ -78,27 +82,38 @@ namespace GaussianSplatting.Runtime
             Cluster4k,
         }
 
-        public struct SHTableItemFloat32
+        public const int MaxSHDegree = 3;
+
+        // SH coefficients per color channel for a degree, excluding the base
+        // color: 0, 3, 8, 15
+        public static int GetSHCoeffCount(int degree)
         {
-            public float3 sh1, sh2, sh3, sh4, sh5, sh6, sh7, sh8, sh9, shA, shB, shC, shD, shE, shF;
-            public float3 shPadding; // pad to multiple of 16 bytes
-        }
-        public struct SHTableItemFloat16
-        {
-            public half3 sh1, sh2, sh3, sh4, sh5, sh6, sh7, sh8, sh9, shA, shB, shC, shD, shE, shF;
-            public half3 shPadding; // pad to multiple of 16 bytes
-        }
-        public struct SHTableItemNorm11
-        {
-            public uint sh1, sh2, sh3, sh4, sh5, sh6, sh7, sh8, sh9, shA, shB, shC, shD, shE, shF;
-        }
-        public struct SHTableItemNorm6
-        {
-            public ushort sh1, sh2, sh3, sh4, sh5, sh6, sh7, sh8, sh9, shA, shB, shC, shD, shE, shF;
-            public ushort shPadding; // pad to multiple of 4 bytes
+            return (degree + 1) * (degree + 1) - 1;
         }
 
-        public void Initialize(int splats, VectorFormat formatPos, VectorFormat formatScale, ColorFormat formatColor, SHFormat formatSh, Vector3 bMin, Vector3 bMax, CameraInfo[] cameraInfos)
+        // Bytes per SH entry (one per splat, or per table item for cluster
+        // formats): the coefficients packed back to back, padded to 4 bytes.
+        // Must match SplatSHStride in HLSL.
+        public static int GetSHStride(SHFormat fmt, int degree)
+        {
+            int coeffs = GetSHCoeffCount(degree);
+            return fmt switch
+            {
+                SHFormat.Float32 => coeffs * 12,
+                SHFormat.Norm11 => coeffs * 4,
+                SHFormat.Norm6 => (coeffs * 2 + 3) & ~3,
+                // Float16, and the Float16 tables of the cluster formats
+                _ => (coeffs * 6 + 3) & ~3,
+            };
+        }
+
+        // Packed formats as the shaders read them (_SplatFormat): bits 0-7
+        // position, 8-15 scale, 16-23 SH format, 24-25 SH degree
+        public uint FormatFlags => (uint)posFormat | ((uint)scaleFormat << 8) | ((uint)shFormat << 16) | ((uint)shDegree << 24);
+
+        public long SHDataSize => shData != null ? shData.dataSize : 0;
+
+        public void Initialize(int splats, VectorFormat formatPos, VectorFormat formatScale, ColorFormat formatColor, SHFormat formatSh, int degreeSh, Vector3 bMin, Vector3 bMax, CameraInfo[] cameraInfos)
         {
             splatCount = splats;
             formatVersion = CurrentVersion;
@@ -106,6 +121,7 @@ namespace GaussianSplatting.Runtime
             scaleFormat = formatScale;
             colorFormat = formatColor;
             shFormat = formatSh;
+            shDegree = degreeSh;
             cameras = cameraInfos;
             boundsMin = bMin;
             boundsMax = bMax;
@@ -128,6 +144,12 @@ namespace GaussianSplatting.Runtime
         public static int GetOtherSizeNoSHIndex(VectorFormat scaleFormat)
         {
             return 4 + GetVectorSize(scaleFormat);
+        }
+
+        public static int GetOtherSize(VectorFormat scaleFormat, SHFormat shFormat)
+        {
+            // cluster formats append a 16 bit table index
+            return GetOtherSizeNoSHIndex(scaleFormat) + (shFormat >= SHFormat.Cluster64k ? 2 : 0);
         }
 
         public static int GetSHCount(SHFormat fmt, int splatCount)
@@ -173,29 +195,21 @@ namespace GaussianSplatting.Runtime
         {
             return (long)splatCount * GetVectorSize(formatPos);
         }
-        public static long CalcOtherDataSize(int splatCount, VectorFormat formatScale)
+        public static long CalcOtherDataSize(int splatCount, VectorFormat formatScale, SHFormat formatSh)
         {
-            return (long)splatCount * GetOtherSizeNoSHIndex(formatScale);
+            return (long)splatCount * GetOtherSize(formatScale, formatSh);
         }
         public static long CalcColorDataSize(int splatCount, ColorFormat formatColor)
         {
             var (width, height) = CalcTextureSize(splatCount);
             return (long)width * height * GetColorSize(formatColor);
         }
-        public static long CalcSHDataSize(int splatCount, SHFormat formatSh)
+        public static long CalcSHDataSize(int splatCount, SHFormat formatSh, int degreeSh)
         {
             // long math: 11M+ splats at Float32 overflow an int. Cluster formats
             // store only the table here; their per-splat index lives in the
             // other data.
-            long shCount = GetSHCount(formatSh, splatCount);
-            return formatSh switch
-            {
-                SHFormat.Float32 => shCount * UnsafeUtility.SizeOf<SHTableItemFloat32>(),
-                SHFormat.Float16 => shCount * UnsafeUtility.SizeOf<SHTableItemFloat16>(),
-                SHFormat.Norm11 => shCount * UnsafeUtility.SizeOf<SHTableItemNorm11>(),
-                SHFormat.Norm6 => shCount * UnsafeUtility.SizeOf<SHTableItemNorm6>(),
-                _ => shCount * UnsafeUtility.SizeOf<SHTableItemFloat16>()
-            };
+            return (long)GetSHCount(formatSh, splatCount) * GetSHStride(formatSh, degreeSh);
         }
         public static long CalcChunkDataSize(int splatCount)
         {
@@ -218,6 +232,7 @@ namespace GaussianSplatting.Runtime
         public TextAsset colorData;
         [FormerlySerializedAs("m_OtherData"), FormerlySerializedAs("_otherData")]
         public TextAsset otherData;
+        // Null when shDegree is 0
         [FormerlySerializedAs("m_SHData"), FormerlySerializedAs("_shData")]
         public TextAsset shData;
         // Chunk data is optional (if data formats are fully lossless then there's no chunking)

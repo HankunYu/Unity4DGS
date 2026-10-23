@@ -75,13 +75,17 @@ namespace GaussianSplatting.Editor
             return gs != null && gs.HasValidAsset;
         }
 
-        internal static unsafe void ExportPlyFile(GaussianSplatRenderer gs, bool bakeTransform)
+        internal static void ExportPlyFile(GaussianSplatRenderer gs, bool bakeTransform)
         {
             var path = EditorUtility.SaveFilePanel(
                 "Export Gaussian Splat PLY file", "", $"{gs.asset.name}-edit.ply", "ply");
             if (string.IsNullOrWhiteSpace(path))
                 return;
+            WritePlyFile(gs, path, bakeTransform);
+        }
 
+        internal static unsafe void WritePlyFile(GaussianSplatRenderer gs, string path, bool bakeTransform)
+        {
             int kSplatSize = UnsafeUtility.SizeOf<Import.InputSplatData>();
             using var gpuData = new GraphicsBuffer(GraphicsBuffer.Target.Structured, gs.splatCount, kSplatSize);
 
@@ -107,10 +111,25 @@ namespace GaussianSplatting.Editor
                     ++aliveCount;
             }
 
+            // The export kernel fills all 15 SH coefficients per channel
+            // (channel-major, as PLY stores them); write the ones the asset has.
+            const int SHFloatOffset = 9;
+            const int SHPerChannel = 15;
+            int coeffs = GaussianSplatAsset.GetSHCoeffCount(gs.asset.shDegree);
+
+            // LF line endings, as PLY readers expect
+            var header = new StringBuilder();
+            header.Append($"ply\nformat binary_little_endian 1.0\nelement vertex {aliveCount}\n");
+            foreach (var name in new[] { "x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2" })
+                header.Append($"property float {name}\n");
+            for (int i = 0; i < coeffs * 3; ++i)
+                header.Append($"property float f_rest_{i}\n");
+            foreach (var name in new[] { "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3" })
+                header.Append($"property float {name}\n");
+            header.Append("end_header\n");
+
             using FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write);
-            // note: this is a long string! but we don't use multiline literal because we want guaranteed LF line ending
-            var header = $"ply\nformat binary_little_endian 1.0\nelement vertex {aliveCount}\nproperty float x\nproperty float y\nproperty float z\nproperty float nx\nproperty float ny\nproperty float nz\nproperty float f_dc_0\nproperty float f_dc_1\nproperty float f_dc_2\nproperty float f_rest_0\nproperty float f_rest_1\nproperty float f_rest_2\nproperty float f_rest_3\nproperty float f_rest_4\nproperty float f_rest_5\nproperty float f_rest_6\nproperty float f_rest_7\nproperty float f_rest_8\nproperty float f_rest_9\nproperty float f_rest_10\nproperty float f_rest_11\nproperty float f_rest_12\nproperty float f_rest_13\nproperty float f_rest_14\nproperty float f_rest_15\nproperty float f_rest_16\nproperty float f_rest_17\nproperty float f_rest_18\nproperty float f_rest_19\nproperty float f_rest_20\nproperty float f_rest_21\nproperty float f_rest_22\nproperty float f_rest_23\nproperty float f_rest_24\nproperty float f_rest_25\nproperty float f_rest_26\nproperty float f_rest_27\nproperty float f_rest_28\nproperty float f_rest_29\nproperty float f_rest_30\nproperty float f_rest_31\nproperty float f_rest_32\nproperty float f_rest_33\nproperty float f_rest_34\nproperty float f_rest_35\nproperty float f_rest_36\nproperty float f_rest_37\nproperty float f_rest_38\nproperty float f_rest_39\nproperty float f_rest_40\nproperty float f_rest_41\nproperty float f_rest_42\nproperty float f_rest_43\nproperty float f_rest_44\nproperty float opacity\nproperty float scale_0\nproperty float scale_1\nproperty float scale_2\nproperty float rot_0\nproperty float rot_1\nproperty float rot_2\nproperty float rot_3\nend_header\n";
-            fs.Write(Encoding.UTF8.GetBytes(header));
+            fs.Write(Encoding.UTF8.GetBytes(header.ToString()));
             for (int i = 0; i < data.Length; ++i)
             {
                 int wordIdx = i >> 5;
@@ -120,8 +139,12 @@ namespace GaussianSplatting.Editor
                 if (!isDeleted && !isCutout)
                 {
                     var splat = data[i];
-                    byte* ptr = (byte*)&splat;
-                    fs.Write(new ReadOnlySpan<byte>(ptr, kSplatSize));
+                    float* ptr = (float*)&splat;
+                    fs.Write(new ReadOnlySpan<byte>(ptr, SHFloatOffset * 4));
+                    for (int c = 0; c < 3; ++c)
+                        fs.Write(new ReadOnlySpan<byte>(ptr + SHFloatOffset + c * SHPerChannel, coeffs * 4));
+                    int tail = SHFloatOffset + 3 * SHPerChannel;
+                    fs.Write(new ReadOnlySpan<byte>(ptr + tail, kSplatSize - tail * 4));
                 }
             }
 

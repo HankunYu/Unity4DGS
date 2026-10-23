@@ -17,11 +17,16 @@ namespace GaussianSplatting.Editor.Import
             "that change nothing on screen unless a renderer raises its opacity scale. 0 keeps all.");
         static readonly GUIContent s_CamerasLabel = new("Import Cameras",
             "Read the training cameras from a cameras.json next to the source file.");
+        static readonly GUIContent s_MaxSHDegreeLabel = new("Max SH Degree",
+            "Drop SH bands above this at import. Each band adds view-dependent color, and data the " +
+            "renderer reads for every splat each frame: degree 3 stores 15 coefficients per splat, " +
+            "1 stores 3, 0 none (base color only).");
 
         SerializedProperty _quality;
         SerializedProperty _customFormats;
         SerializedProperty _pruneOpacity;
         SerializedProperty _importCameras;
+        SerializedProperty _maxSHDegree;
 
         string _headerPath;
         SplatSourceHeader _header;
@@ -36,6 +41,7 @@ namespace GaussianSplatting.Editor.Import
             _customFormats = settings.FindPropertyRelative(nameof(GaussianSplatImportSettings.customFormats));
             _pruneOpacity = settings.FindPropertyRelative(nameof(GaussianSplatImportSettings.pruneOpacity));
             _importCameras = settings.FindPropertyRelative(nameof(GaussianSplatImportSettings.importCameras));
+            _maxSHDegree = settings.FindPropertyRelative(nameof(GaussianSplatImportSettings.maxSHDegree));
         }
 
         public override void OnInspectorGUI()
@@ -49,6 +55,7 @@ namespace GaussianSplatting.Editor.Import
             EditorGUILayout.LabelField("Import Settings", EditorStyles.boldLabel);
             EditorGUILayout.PropertyField(_importCameras, s_CamerasLabel);
             EditorGUILayout.PropertyField(_pruneOpacity, s_PruneLabel);
+            EditorGUILayout.PropertyField(_maxSHDegree, s_MaxSHDegreeLabel);
 
             EditorGUI.BeginChangeCheck();
             EditorGUILayout.PropertyField(_quality);
@@ -157,16 +164,14 @@ namespace GaussianSplatting.Editor.Import
             };
         }
 
-        // Upper bound: pruning can only shrink it.
         void DrawSizeEstimate(GaussianSplatFormats formats)
         {
-            int count = _header.splatCount;
-            long size = GaussianSplatAsset.CalcPosDataSize(count, formats.pos)
-                        + GaussianSplatAsset.CalcOtherDataSize(count, formats.scale)
-                        + GaussianSplatAsset.CalcColorDataSize(count, formats.color)
-                        + GaussianSplatAsset.CalcSHDataSize(count, formats.sh)
-                        + (formats.UsesChunks ? GaussianSplatAsset.CalcChunkDataSize(count) : 0);
-            EditorGUILayout.LabelField("Asset Size", $"{EditorUtility.FormatBytes(size)} - {(double)_fileSize / size:F2}x smaller than source");
+            if (_maxSHDegree.hasMultipleDifferentValues)
+                return;
+            int shDegree = Math.Min(_header.shDegree, _maxSHDegree.intValue);
+            long size = formats.CalcDataSize(_header.splatCount, shDegree);
+            EditorGUILayout.LabelField("Asset Size",
+                $"{EditorUtility.FormatBytes(size)} - {(double)_fileSize / size:F2}x smaller than source, SH degree {shDegree}");
         }
     }
 }

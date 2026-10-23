@@ -56,7 +56,7 @@ public class GaussianPlayer : MonoBehaviour
         {
             posDataMaxSize = asset.posData.dataSize > posDataMaxSize ? asset.posData.dataSize : posDataMaxSize;
             otherDataMaxSize = asset.otherData.dataSize > otherDataMaxSize ? asset.otherData.dataSize : otherDataMaxSize;
-            shDataMaxSize = asset.shData.dataSize > shDataMaxSize ? asset.shData.dataSize : shDataMaxSize;
+            shDataMaxSize = asset.SHDataSize > shDataMaxSize ? asset.SHDataSize : shDataMaxSize;
             if (asset.chunkData != null && asset.chunkData.dataSize != 0)
                 chunkDataMaxSize = asset.chunkData.dataSize > chunkDataMaxSize ? asset.chunkData.dataSize : chunkDataMaxSize;
             splatCountMaxSize = asset.splatCount > splatCountMaxSize ? asset.splatCount : splatCountMaxSize;

@@ -67,7 +67,7 @@ namespace GaussianSplatting.Editor
             if (!gs.HasValidAsset)
             {
                 var msg = gs.asset != null && gs.asset.formatVersion != GaussianSplatAsset.CurrentVersion
-                    ? "Gaussian Splat asset version is not compatible, please recreate the asset"
+                    ? "Gaussian Splat asset version is not compatible, reimport its source file"
                     : "Gaussian Splat asset is not assigned or is empty";
                 EditorGUILayout.HelpBox(msg, MessageType.Error);
             }

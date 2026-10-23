@@ -59,7 +59,7 @@ git clone https://github.com/HankunYu/Unity4DGS.git
 
 1. Add the `GaussianSplat URP Feature` to your URP Renderer asset.
 2. Put a `GaussianSplatConfig` component in the scene (holds global rendering settings and shader references).
-3. Drop a `.ply` / `.spz` file into the project. It imports in place as a splat asset; quality, pruning and other options are in its import settings (Inspector), and the source file stays usable by other tools.
+3. Drop a `.ply` / `.spz` file into the project. It imports in place as a splat asset; quality, pruning, SH degree and other options are in its import settings (Inspector), and the source file stays usable by other tools.
 4. Add a `GaussianSplatRenderer` component to a GameObject and assign the asset.
 5. For 4D sequences, use `GaussianPlayer` and point it at a folder of per-frame assets.
 

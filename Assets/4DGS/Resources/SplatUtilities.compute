@@ -688,7 +688,7 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
         else if (idx < _SrcSplatCount && _SHOrder > 0)
         {
             // Fallback: load source SH and fade by (1 - weight)
-            SplatData srcSplat = LoadSplatData(idx, true);
+            SplatData srcSplat = LoadSplatData(idx, _SHOrder);
             half shFade = (half)(1.0 - _MorphWeight);
             splat.sh.sh1  = srcSplat.sh.sh1  * shFade; splat.sh.sh2  = srcSplat.sh.sh2  * shFade;
             splat.sh.sh3  = srcSplat.sh.sh3  * shFade; splat.sh.sh4  = srcSplat.sh.sh4  * shFade;
@@ -709,7 +709,7 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
     }
     else
     {
-        splat = LoadSplatData(idx, _SHOrder > 0);
+        splat = LoadSplatData(idx, _SHOrder);
     }
 
     // Apply animation position offset if available
@@ -864,7 +864,7 @@ void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_Group
         }
         else if (idx < _SrcSplatCount && _SHOrder > 0)
         {
-            SplatData srcSplat = LoadSplatData(idx, true);
+            SplatData srcSplat = LoadSplatData(idx, _SHOrder);
             half shFade = (half)(1.0 - _MorphWeight);
             splat.sh.sh1  = srcSplat.sh.sh1  * shFade; splat.sh.sh2  = srcSplat.sh.sh2  * shFade;
             splat.sh.sh3  = srcSplat.sh.sh3  * shFade; splat.sh.sh4  = srcSplat.sh.sh4  * shFade;
@@ -883,7 +883,7 @@ void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_Group
     }
     else
     {
-        splat = LoadSplatData(idx, _SHOrder > 0);
+        splat = LoadSplatData(idx, _SHOrder);
     }
 
     float3 centerWorldPos = mul(_MatrixObjectToWorld, float4(splat.pos, 1)).xyz;
@@ -1189,7 +1189,7 @@ void CSTranslateSelection (uint3 id : SV_DispatchThreadID)
     if (!IsSplatSelected(idx))
         return;
 
-    uint fmt = _SplatFormat & 0xFF;
+    uint fmt = SplatFormatPos(_SplatFormat);
     if (_SplatChunkCount == 0 && fmt == VECTOR_FMT_32F)
     {
         uint stride = 12;
@@ -1213,7 +1213,7 @@ void CSRotateSelection (uint3 id : SV_DispatchThreadID)
     if (!IsSplatSelected(idx))
         return;
 
-    uint posFmt = _SplatFormat & 0xFF;
+    uint posFmt = SplatFormatPos(_SplatFormat);
     if (_SplatChunkCount == 0 && posFmt == VECTOR_FMT_32F)
     {
         uint posStride = 12;
@@ -1226,9 +1226,9 @@ void CSRotateSelection (uint3 id : SV_DispatchThreadID)
         _SplatPos.Store3(idx * posStride, asuint(pos));
     }
 
-    uint scaleFmt = (_SplatFormat >> 8) & 0xFF;
-    uint shFormat = (_SplatFormat >> 16) & 0xFF;
-    if (_SplatChunkCount == 0 && scaleFmt == VECTOR_FMT_32F && shFormat == VECTOR_FMT_32F)
+    uint scaleFmt = SplatFormatScale(_SplatFormat);
+    uint shFormat = SplatFormatSH(_SplatFormat);
+    if (_SplatChunkCount == 0 && scaleFmt == VECTOR_FMT_32F && shFormat == SPLAT_SH_FMT_32F)
     {
         uint otherStride = 4 + 12;
         uint rotVal = _SplatOtherMouseDown.Load(idx * otherStride);
@@ -1254,7 +1254,7 @@ void CSScaleSelection (uint3 id : SV_DispatchThreadID)
     if (!IsSplatSelected(idx))
         return;
 
-    uint fmt = _SplatFormat & 0xFF;
+    uint fmt = SplatFormatPos(_SplatFormat);
     if (_SplatChunkCount == 0 && fmt == VECTOR_FMT_32F)
     {
         uint stride = 12;
@@ -1426,6 +1426,8 @@ RWByteAddressBuffer _CopyDstSH;
 RWByteAddressBuffer _CopyDstEditDeleted;
 RWTexture2D<float4> _CopyDstColor;
 uint _CopyDstSize, _CopyCount;
+// The destination is all Float32 (VeryHigh); this is its SH degree
+uint _CopyDstSHDegree;
 
 float4x4 _CopyTransformMatrix;
 float4 _CopyTransformRotation;
@@ -1475,24 +1477,24 @@ void CSCopySplats (uint3 id : SV_DispatchThreadID)
     uint3 pixelIndex = SplatIndexToPixelIndex(dstIdx);
     _CopyDstColor[pixelIndex.xy] = float4(src.sh.col, src.opacity);
 
-    // SH
-    uint shStride = 192; // 15*3 fp32, rounded up to multiple of 16
-    uint shOffset = dstIdx * shStride;
-    _CopyDstSH.Store3(shOffset + 12 * 0, asuint(src.sh.sh1));
-    _CopyDstSH.Store3(shOffset + 12 * 1, asuint(src.sh.sh2));
-    _CopyDstSH.Store3(shOffset + 12 * 2, asuint(src.sh.sh3));
-    _CopyDstSH.Store3(shOffset + 12 * 3, asuint(src.sh.sh4));
-    _CopyDstSH.Store3(shOffset + 12 * 4, asuint(src.sh.sh5));
-    _CopyDstSH.Store3(shOffset + 12 * 5, asuint(src.sh.sh6));
-    _CopyDstSH.Store3(shOffset + 12 * 6, asuint(src.sh.sh7));
-    _CopyDstSH.Store3(shOffset + 12 * 7, asuint(src.sh.sh8));
-    _CopyDstSH.Store3(shOffset + 12 * 8, asuint(src.sh.sh9));
-    _CopyDstSH.Store3(shOffset + 12 * 9, asuint(src.sh.sh10));
-    _CopyDstSH.Store3(shOffset + 12 * 10, asuint(src.sh.sh11));
-    _CopyDstSH.Store3(shOffset + 12 * 11, asuint(src.sh.sh12));
-    _CopyDstSH.Store3(shOffset + 12 * 12, asuint(src.sh.sh13));
-    _CopyDstSH.Store3(shOffset + 12 * 13, asuint(src.sh.sh14));
-    _CopyDstSH.Store3(shOffset + 12 * 14, asuint(src.sh.sh15));
+    // SH: bands the destination does not store are dropped
+    uint shCount = SplatSHCoeffCount(_CopyDstSHDegree);
+    uint shOffset = dstIdx * SplatSHStride(SPLAT_SH_FMT_32F, _CopyDstSHDegree);
+    if (shCount > 0)  _CopyDstSH.Store3(shOffset + 12 * 0, asuint(src.sh.sh1));
+    if (shCount > 1)  _CopyDstSH.Store3(shOffset + 12 * 1, asuint(src.sh.sh2));
+    if (shCount > 2)  _CopyDstSH.Store3(shOffset + 12 * 2, asuint(src.sh.sh3));
+    if (shCount > 3)  _CopyDstSH.Store3(shOffset + 12 * 3, asuint(src.sh.sh4));
+    if (shCount > 4)  _CopyDstSH.Store3(shOffset + 12 * 4, asuint(src.sh.sh5));
+    if (shCount > 5)  _CopyDstSH.Store3(shOffset + 12 * 5, asuint(src.sh.sh6));
+    if (shCount > 6)  _CopyDstSH.Store3(shOffset + 12 * 6, asuint(src.sh.sh7));
+    if (shCount > 7)  _CopyDstSH.Store3(shOffset + 12 * 7, asuint(src.sh.sh8));
+    if (shCount > 8)  _CopyDstSH.Store3(shOffset + 12 * 8, asuint(src.sh.sh9));
+    if (shCount > 9)  _CopyDstSH.Store3(shOffset + 12 * 9, asuint(src.sh.sh10));
+    if (shCount > 10) _CopyDstSH.Store3(shOffset + 12 * 10, asuint(src.sh.sh11));
+    if (shCount > 11) _CopyDstSH.Store3(shOffset + 12 * 11, asuint(src.sh.sh12));
+    if (shCount > 12) _CopyDstSH.Store3(shOffset + 12 * 12, asuint(src.sh.sh13));
+    if (shCount > 13) _CopyDstSH.Store3(shOffset + 12 * 13, asuint(src.sh.sh14));
+    if (shCount > 14) _CopyDstSH.Store3(shOffset + 12 * 14, asuint(src.sh.sh15));
 
     // deleted bits
     uint srcWordIdx = srcIdx / 32;

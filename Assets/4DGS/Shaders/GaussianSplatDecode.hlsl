@@ -7,6 +7,8 @@
 #ifndef GAUSSIAN_SPLAT_DECODE_HLSL
 #define GAUSSIAN_SPLAT_DECODE_HLSL
 
+#include "GaussianSplatFormat.hlsl"
+
 // ── Vector format constants (must match GaussianSplatAsset.VectorFormat) ──
 
 #define SPLAT_FMT_32F 0
@@ -237,6 +239,22 @@ float4 SplatQuatSlerp(float4 a, float4 b, float t)
     return a * wa + b * wb;
 }
 
+// SH coefficient k of the entry at addr, laid out as GaussianSplatAsset.GetSHStride describes
+half3 SplatLoadSHCoeff(ByteAddressBuffer shBuf, uint addr, uint shFormat, uint k)
+{
+    if (shFormat == SPLAT_SH_FMT_32F)
+        return asfloat(shBuf.Load3(addr + k * 12));
+    if (shFormat == SPLAT_SH_FMT_11)
+        return SplatDecode_11_10_11(shBuf.Load(addr + k * 4));
+    if (shFormat == SPLAT_SH_FMT_6)
+        return SplatDecode_5_6_5(shBuf.Load(addr + (k >> 1) * 4) >> ((k & 1) * 16));
+    // Float16 and the cluster tables: 6 bytes each, so odd ones start mid-word
+    uint2 raw = shBuf.Load2(addr + ((k * 6) & ~3));
+    if (k & 1)
+        raw = uint2((raw.x >> 16) | (raw.y << 16), raw.y >> 16);
+    return half3(f16tof32(raw.x), f16tof32(raw.x >> 16), f16tof32(raw.y));
+}
+
 // ── Full splat decode from explicit buffer arguments ──
 //
 // Parameters:
@@ -252,7 +270,9 @@ float4 SplatQuatSlerp(float4 a, float4 b, float t)
 //   chunks      - StructuredBuffer of SplatChunkData for dequantization
 //   chunkCount  - number of valid chunks
 //   idx         - splat index
-//   formatFlags - packed format: bits [0..7] = posFmt, [8..15] = scaleFmt, [16..23] = shFormat
+//   formatFlags - GaussianSplatAsset.FormatFlags (see GaussianSplatFormat.hlsl)
+//
+// SH bands the asset does not store decode as zero.
 
 DecodedSplat SplatDecodeFromBuffers(
     ByteAddressBuffer posBuf,
@@ -266,10 +286,10 @@ DecodedSplat SplatDecodeFromBuffers(
 {
     DecodedSplat s = (DecodedSplat)0;
 
-    // Extract per-component formats
-    uint posFmt   = formatFlags & 0xFF;
-    uint scaleFmt = (formatFlags >> 8) & 0xFF;
-    uint shFormat = (formatFlags >> 16) & 0xFF;
+    uint posFmt   = SplatFormatPos(formatFlags);
+    uint scaleFmt = SplatFormatScale(formatFlags);
+    uint shFormat = SplatFormatSH(formatFlags);
+    uint shDegree = SplatFormatSHDegree(formatFlags);
 
     // -- Calculate strides and offsets --
 
@@ -278,20 +298,15 @@ DecodedSplat SplatDecodeFromBuffers(
 
     // Other buffer layout: rotation (4 bytes, 10.10.10.2) + scale + optional SH cluster index (2 bytes)
     uint otherStride = 4 + scaleStride;
-    if (shFormat > SPLAT_FMT_6)
+    if (SplatSHClustered(shFormat))
         otherStride += 2;
     uint otherAddr = idx * otherStride;
 
-    // SH stride per splat/cluster
-    uint shStride = 0;
-    if (shFormat == SPLAT_FMT_32F)
-        shStride = 192; // 15*3 fp32, rounded up to multiple of 16
-    else if (shFormat == SPLAT_FMT_16 || shFormat > SPLAT_FMT_6)
-        shStride = 96;  // 15*3 fp16, rounded up to multiple of 16
-    else if (shFormat == SPLAT_FMT_11)
-        shStride = 60;  // 15x uint
-    else if (shFormat == SPLAT_FMT_6)
-        shStride = 32;  // 15x ushort, rounded up to multiple of 4
+    uint chunkIdx = idx / kSplatChunkSize;
+    bool chunked = chunkIdx < chunkCount;
+    SplatChunkData chunk = (SplatChunkData)0;
+    if (chunked)
+        chunk = chunks[chunkIdx];
 
     // -- Load raw data --
 
@@ -304,117 +319,38 @@ DecodedSplat SplatDecodeFromBuffers(
     // Scale
     s.scale = SplatDecodeVector(otherBuf, otherAddr + 4, scaleFmt);
 
-    // SH cluster index (if clustered SH format)
-    uint shIndex = idx;
-    if (shFormat > SPLAT_FMT_6)
-        shIndex = SplatLoadUShort(otherBuf, otherAddr + otherStride - 2);
-
     // -- Load SH data --
 
-    uint shOffset = shIndex * shStride;
-
-    if (shStride > 0)
+    uint shCount = SplatSHCoeffCount(shDegree);
+    if (shCount > 0)
     {
-        uint4 shRaw0 = shBuf.Load4(shOffset);
-        uint4 shRaw1 = shBuf.Load4(shOffset + 16);
+        uint shIndex = idx;
+        if (SplatSHClustered(shFormat))
+            shIndex = SplatLoadUShort(otherBuf, otherAddr + otherStride - 2);
+        uint shAddr = shIndex * SplatSHStride(shFormat, shDegree);
 
-        if (shFormat == SPLAT_FMT_32F)
+        // Float16/Norm11/Norm6 are chunk-relative; Float32 and the cluster
+        // tables are stored as-is, which lerp(0, 1, x) leaves untouched.
+        half3 shMin = 0;
+        half3 shMax = 1;
+        if (chunked && shFormat > SPLAT_SH_FMT_32F && !SplatSHClustered(shFormat))
         {
-            uint4 shRaw2 = shBuf.Load4(shOffset + 32);
-            uint4 shRaw3 = shBuf.Load4(shOffset + 48);
-            uint4 shRaw4 = shBuf.Load4(shOffset + 64);
-            uint4 shRaw5 = shBuf.Load4(shOffset + 80);
-            uint4 shRaw6 = shBuf.Load4(shOffset + 96);
-            uint4 shRaw7 = shBuf.Load4(shOffset + 112);
-            uint4 shRaw8 = shBuf.Load4(shOffset + 128);
-            uint4 shRaw9 = shBuf.Load4(shOffset + 144);
-            uint4 shRawA = shBuf.Load4(shOffset + 160);
-            uint  shRawB = shBuf.Load(shOffset + 176);
-            s.sh[0]  = half3(asfloat(shRaw0.x), asfloat(shRaw0.y), asfloat(shRaw0.z));
-            s.sh[1]  = half3(asfloat(shRaw0.w), asfloat(shRaw1.x), asfloat(shRaw1.y));
-            s.sh[2]  = half3(asfloat(shRaw1.z), asfloat(shRaw1.w), asfloat(shRaw2.x));
-            s.sh[3]  = half3(asfloat(shRaw2.y), asfloat(shRaw2.z), asfloat(shRaw2.w));
-            s.sh[4]  = half3(asfloat(shRaw3.x), asfloat(shRaw3.y), asfloat(shRaw3.z));
-            s.sh[5]  = half3(asfloat(shRaw3.w), asfloat(shRaw4.x), asfloat(shRaw4.y));
-            s.sh[6]  = half3(asfloat(shRaw4.z), asfloat(shRaw4.w), asfloat(shRaw5.x));
-            s.sh[7]  = half3(asfloat(shRaw5.y), asfloat(shRaw5.z), asfloat(shRaw5.w));
-            s.sh[8]  = half3(asfloat(shRaw6.x), asfloat(shRaw6.y), asfloat(shRaw6.z));
-            s.sh[9]  = half3(asfloat(shRaw6.w), asfloat(shRaw7.x), asfloat(shRaw7.y));
-            s.sh[10] = half3(asfloat(shRaw7.z), asfloat(shRaw7.w), asfloat(shRaw8.x));
-            s.sh[11] = half3(asfloat(shRaw8.y), asfloat(shRaw8.z), asfloat(shRaw8.w));
-            s.sh[12] = half3(asfloat(shRaw9.x), asfloat(shRaw9.y), asfloat(shRaw9.z));
-            s.sh[13] = half3(asfloat(shRaw9.w), asfloat(shRawA.x), asfloat(shRawA.y));
-            s.sh[14] = half3(asfloat(shRawA.z), asfloat(shRawA.w), asfloat(shRawB));
+            shMin = half3(f16tof32(chunk.shR    ), f16tof32(chunk.shG    ), f16tof32(chunk.shB    ));
+            shMax = half3(f16tof32(chunk.shR>>16), f16tof32(chunk.shG>>16), f16tof32(chunk.shB>>16));
         }
-        else if (shFormat == SPLAT_FMT_16 || shFormat > SPLAT_FMT_6)
+
+        [unroll]
+        for (uint k = 0; k < 15; k++)
         {
-            uint4 shRaw2 = shBuf.Load4(shOffset + 32);
-            uint4 shRaw3 = shBuf.Load4(shOffset + 48);
-            uint4 shRaw4 = shBuf.Load4(shOffset + 64);
-            uint3 shRaw5 = shBuf.Load3(shOffset + 80);
-            s.sh[0]  = half3(f16tof32(shRaw0.x      ), f16tof32(shRaw0.x >> 16), f16tof32(shRaw0.y      ));
-            s.sh[1]  = half3(f16tof32(shRaw0.y >> 16), f16tof32(shRaw0.z      ), f16tof32(shRaw0.z >> 16));
-            s.sh[2]  = half3(f16tof32(shRaw0.w      ), f16tof32(shRaw0.w >> 16), f16tof32(shRaw1.x      ));
-            s.sh[3]  = half3(f16tof32(shRaw1.x >> 16), f16tof32(shRaw1.y      ), f16tof32(shRaw1.y >> 16));
-            s.sh[4]  = half3(f16tof32(shRaw1.z      ), f16tof32(shRaw1.z >> 16), f16tof32(shRaw1.w      ));
-            s.sh[5]  = half3(f16tof32(shRaw1.w >> 16), f16tof32(shRaw2.x      ), f16tof32(shRaw2.x >> 16));
-            s.sh[6]  = half3(f16tof32(shRaw2.y      ), f16tof32(shRaw2.y >> 16), f16tof32(shRaw2.z      ));
-            s.sh[7]  = half3(f16tof32(shRaw2.z >> 16), f16tof32(shRaw2.w      ), f16tof32(shRaw2.w >> 16));
-            s.sh[8]  = half3(f16tof32(shRaw3.x      ), f16tof32(shRaw3.x >> 16), f16tof32(shRaw3.y      ));
-            s.sh[9]  = half3(f16tof32(shRaw3.y >> 16), f16tof32(shRaw3.z      ), f16tof32(shRaw3.z >> 16));
-            s.sh[10] = half3(f16tof32(shRaw3.w      ), f16tof32(shRaw3.w >> 16), f16tof32(shRaw4.x      ));
-            s.sh[11] = half3(f16tof32(shRaw4.x >> 16), f16tof32(shRaw4.y      ), f16tof32(shRaw4.y >> 16));
-            s.sh[12] = half3(f16tof32(shRaw4.z      ), f16tof32(shRaw4.z >> 16), f16tof32(shRaw4.w      ));
-            s.sh[13] = half3(f16tof32(shRaw4.w >> 16), f16tof32(shRaw5.x      ), f16tof32(shRaw5.x >> 16));
-            s.sh[14] = half3(f16tof32(shRaw5.y      ), f16tof32(shRaw5.y >> 16), f16tof32(shRaw5.z      ));
-        }
-        else if (shFormat == SPLAT_FMT_11)
-        {
-            uint4 shRaw2 = shBuf.Load4(shOffset + 32);
-            uint3 shRaw3 = shBuf.Load3(shOffset + 48);
-            s.sh[0]  = SplatDecode_11_10_11(shRaw0.x);
-            s.sh[1]  = SplatDecode_11_10_11(shRaw0.y);
-            s.sh[2]  = SplatDecode_11_10_11(shRaw0.z);
-            s.sh[3]  = SplatDecode_11_10_11(shRaw0.w);
-            s.sh[4]  = SplatDecode_11_10_11(shRaw1.x);
-            s.sh[5]  = SplatDecode_11_10_11(shRaw1.y);
-            s.sh[6]  = SplatDecode_11_10_11(shRaw1.z);
-            s.sh[7]  = SplatDecode_11_10_11(shRaw1.w);
-            s.sh[8]  = SplatDecode_11_10_11(shRaw2.x);
-            s.sh[9]  = SplatDecode_11_10_11(shRaw2.y);
-            s.sh[10] = SplatDecode_11_10_11(shRaw2.z);
-            s.sh[11] = SplatDecode_11_10_11(shRaw2.w);
-            s.sh[12] = SplatDecode_11_10_11(shRaw3.x);
-            s.sh[13] = SplatDecode_11_10_11(shRaw3.y);
-            s.sh[14] = SplatDecode_11_10_11(shRaw3.z);
-        }
-        else if (shFormat == SPLAT_FMT_6)
-        {
-            s.sh[0]  = SplatDecode_5_6_5(shRaw0.x);
-            s.sh[1]  = SplatDecode_5_6_5(shRaw0.x >> 16);
-            s.sh[2]  = SplatDecode_5_6_5(shRaw0.y);
-            s.sh[3]  = SplatDecode_5_6_5(shRaw0.y >> 16);
-            s.sh[4]  = SplatDecode_5_6_5(shRaw0.z);
-            s.sh[5]  = SplatDecode_5_6_5(shRaw0.z >> 16);
-            s.sh[6]  = SplatDecode_5_6_5(shRaw0.w);
-            s.sh[7]  = SplatDecode_5_6_5(shRaw0.w >> 16);
-            s.sh[8]  = SplatDecode_5_6_5(shRaw1.x);
-            s.sh[9]  = SplatDecode_5_6_5(shRaw1.x >> 16);
-            s.sh[10] = SplatDecode_5_6_5(shRaw1.y);
-            s.sh[11] = SplatDecode_5_6_5(shRaw1.y >> 16);
-            s.sh[12] = SplatDecode_5_6_5(shRaw1.z);
-            s.sh[13] = SplatDecode_5_6_5(shRaw1.z >> 16);
-            s.sh[14] = SplatDecode_5_6_5(shRaw1.w);
+            if (k < shCount)
+                s.sh[k] = lerp(shMin, shMax, SplatLoadSHCoeff(shBuf, shAddr, shFormat, k));
         }
     }
 
     // -- Chunk dequantization --
 
-    uint chunkIdx = idx / kSplatChunkSize;
-    if (chunkIdx < chunkCount)
+    if (chunked)
     {
-        SplatChunkData chunk = chunks[chunkIdx];
-
         // Position dequantization
         float3 posMin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
         float3 posMax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
@@ -434,16 +370,6 @@ DecodedSplat SplatDecodeFromBuffers(
         half4 colMax = half4(f16tof32(chunk.colR>>16), f16tof32(chunk.colG>>16), f16tof32(chunk.colB>>16), f16tof32(chunk.colA>>16));
         col = lerp(colMin, colMax, col);
         col.a = SplatInvSquareCentered01(col.a);
-
-        // SH dequantization (only for quantized non-float32 formats that are standard, not cluster)
-        if (shFormat > SPLAT_FMT_32F && shFormat <= SPLAT_FMT_6)
-        {
-            half3 shMin = half3(f16tof32(chunk.shR    ), f16tof32(chunk.shG    ), f16tof32(chunk.shB    ));
-            half3 shMax = half3(f16tof32(chunk.shR>>16), f16tof32(chunk.shG>>16), f16tof32(chunk.shB>>16));
-            [unroll]
-            for (int i = 0; i < 15; i++)
-                s.sh[i] = lerp(shMin, shMax, s.sh[i]);
-        }
     }
 
     s.opacity = col.a;

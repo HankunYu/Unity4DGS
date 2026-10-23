@@ -1,4 +1,5 @@
 using System;
+using GaussianSplatting.Runtime;
 using UnityEngine;
 
 namespace GaussianSplatting.Editor.Import
@@ -19,7 +20,14 @@ namespace GaussianSplatting.Editor.Import
 
         public bool importCameras = true;
 
+        // SH bands above this are dropped. Each band adds view-dependent
+        // color but also data that the view-data pass reads every frame.
+        [Range(0, GaussianSplatAsset.MaxSHDegree)] public int maxSHDegree = GaussianSplatAsset.MaxSHDegree;
+
         public GaussianSplatFormats Formats =>
             quality == GaussianSplatQuality.Custom ? customFormats : GaussianSplatFormats.ForQuality(quality);
+
+        // The SH degree an asset built from a source with sourceDegree gets
+        public int SHDegreeFor(int sourceDegree) => Math.Min(sourceDegree, maxSHDegree);
     }
 }

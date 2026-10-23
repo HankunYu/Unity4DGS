@@ -373,12 +373,12 @@ namespace GaussianSplatting.Runtime
 
             int posStride = (int)(_renderer.asset.posData.dataSize / _renderer.asset.splatCount);
             int otherStride = (int)(_renderer.asset.otherData.dataSize / _renderer.asset.splatCount);
-            int shStride = (int)(_renderer.asset.shData.dataSize / _renderer.asset.splatCount);
+            int shStride = GaussianSplatAsset.GetSHStride(_renderer.asset.shFormat, _renderer.asset.shDegree);
 
             // create new GPU buffers
             var newPosData = new GraphicsBuffer(GraphicsBuffer.Target.Raw | GraphicsBuffer.Target.CopySource, newSplatCount * posStride / 4, 4) { name = "GaussianPosData" };
             var newOtherData = new GraphicsBuffer(GraphicsBuffer.Target.Raw | GraphicsBuffer.Target.CopySource, newSplatCount * otherStride / 4, 4) { name = "GaussianOtherData" };
-            var newSHData = new GraphicsBuffer(GraphicsBuffer.Target.Raw, newSplatCount * shStride / 4, 4) { name = "GaussianSHData" };
+            var newSHData = GaussianSplatRenderer.CreateSHBuffer((long)newSplatCount * shStride);
 
             // new texture is a RenderTexture so we can write to it from a compute shader
             var (texWidth, texHeight) = GaussianSplatAsset.CalcTextureSize(newSplatCount);
@@ -400,7 +400,7 @@ namespace GaussianSplatting.Runtime
             _renderer.InitSortBuffers(newSplatCount);
 
             // copy existing data over into new buffers
-            CopySplats(_renderer.transform, newPosData, newOtherData, newSHData, newColorData, newEditDeleted, newSplatCount, 0, 0, _renderer.SplatCount);
+            CopySplats(_renderer.transform, newPosData, newOtherData, newSHData, _renderer.asset.shDegree, newColorData, newEditDeleted, newSplatCount, 0, 0, _renderer.SplatCount);
 
             // use the new buffers and the new splat count
             _renderer._gpuPosData.Dispose();
@@ -433,7 +433,7 @@ namespace GaussianSplatting.Runtime
         {
             CopySplats(
                 dst.transform,
-                dst._gpuPosData, dst._gpuOtherData, dst._gpuSHData, dst._gpuColorData, dst.EditManager.GpuEditDeleted,
+                dst._gpuPosData, dst._gpuOtherData, dst._gpuSHData, dst.asset.shDegree, dst._gpuColorData, dst.EditManager.GpuEditDeleted,
                 dst.splatCount,
                 copySrcStartIndex, copyDstStartIndex, copyCount);
             dst.EditManager.Modified = true;
@@ -441,7 +441,7 @@ namespace GaussianSplatting.Runtime
 
         public void CopySplats(
             Transform dstTransform,
-            GraphicsBuffer dstPos, GraphicsBuffer dstOther, GraphicsBuffer dstSH, Texture dstColor,
+            GraphicsBuffer dstPos, GraphicsBuffer dstOther, GraphicsBuffer dstSH, int dstSHDegree, Texture dstColor,
             GraphicsBuffer dstEditDeleted,
             int dstSize,
             int copySrcStartIndex, int copyDstStartIndex, int copyCount)
@@ -463,6 +463,7 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeBufferParam(_renderer.csSplatUtilities, kernelIndex, "_CopyDstEditDeleted", dstEditDeleted);
 
             cmb.SetComputeIntParam(_renderer.csSplatUtilities, "_CopyDstSize", dstSize);
+            cmb.SetComputeIntParam(_renderer.csSplatUtilities, "_CopyDstSHDegree", dstSHDegree);
             cmb.SetComputeIntParam(_renderer.csSplatUtilities, "_CopySrcStartIndex", copySrcStartIndex);
             cmb.SetComputeIntParam(_renderer.csSplatUtilities, "_CopyDstStartIndex", copyDstStartIndex);
             cmb.SetComputeIntParam(_renderer.csSplatUtilities, "_CopyCount", copyCount);

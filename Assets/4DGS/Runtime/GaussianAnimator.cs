@@ -316,8 +316,7 @@ namespace GaussianSplatting.Runtime
             cs.SetInt(PropAnimSplatCount, splatCount);
 
             var asset = _renderer.asset;
-            uint format = (uint)asset.posFormat | ((uint)asset.scaleFormat << 8) | ((uint)asset.shFormat << 16);
-            cs.SetInt(PropAnimSplatFormat, (int)format);
+            cs.SetInt(PropAnimSplatFormat, (int)asset.FormatFlags);
 
             cs.SetInt(PropAnimChunkCount, ChunkCount());
             cs.SetBuffer(kernel, PropAnimChunkBounds, _chunkBoundsBuffer);

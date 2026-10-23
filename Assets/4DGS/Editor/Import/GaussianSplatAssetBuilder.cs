@@ -24,15 +24,18 @@ namespace GaussianSplatting.Editor.Import
         // Reports a stage name and overall progress in 0..1.
         public delegate void ProgressCallback(string stage, float progress);
 
-        // Builds the asset data from splats. The array is reordered in place
-        // and may be replaced (pruning), so it is passed by ref; the caller
-        // keeps owning whatever it holds afterwards. Throws
-        // InvalidOperationException when the result would be unusable.
-        public static GaussianSplatBuildResult Build(ref NativeArray<InputSplatData> splats, GaussianSplatImportSettings settings,
-            GaussianSplatAsset.CameraInfo[] cameras, ProgressCallback progress = null)
+        // Builds the asset data from splats whose SH goes up to sourceSHDegree.
+        // The array is reordered in place and may be replaced (pruning), so it
+        // is passed by ref; the caller keeps owning whatever it holds
+        // afterwards. Throws InvalidOperationException when the result would
+        // be unusable.
+        public static GaussianSplatBuildResult Build(ref NativeArray<InputSplatData> splats, int sourceSHDegree,
+            GaussianSplatImportSettings settings, GaussianSplatAsset.CameraInfo[] cameras, ProgressCallback progress = null)
         {
             progress ??= (_, _) => { };
-            GaussianSplatFormats formats = settings.Formats;
+            int shDegree = settings.SHDegreeFor(sourceSHDegree);
+            int shCoeffs = GaussianSplatAsset.GetSHCoeffCount(shDegree);
+            GaussianSplatFormats formats = settings.Formats.ForSHDegree(shDegree);
 
             if (settings.pruneOpacity > 0f)
                 splats = PruneTransparentSplats(splats, settings.pruneOpacity);
@@ -57,13 +60,13 @@ namespace GaussianSplatting.Editor.Import
 
             var result = new GaussianSplatBuildResult();
             NativeArray<int> splatSHIndices = default;
-            NativeArray<GaussianSplatAsset.SHTableItemFloat16> clusteredSHs = default;
+            NativeArray<float> clusteredSHs = default;
             try
             {
                 if (formats.UsesSHClusters)
                 {
                     progress("Cluster SHs", 0.2f);
-                    ClusterSHs(splats, formats.sh, val =>
+                    ClusterSHs(splats, formats.sh, shCoeffs, val =>
                     {
                         progress($"Cluster SHs ({val:P0})", 0.2f + val * 0.5f);
                         return true;
@@ -72,18 +75,19 @@ namespace GaussianSplatting.Editor.Import
 
                 progress("Creating data objects", 0.7f);
                 GaussianSplatAsset asset = ScriptableObject.CreateInstance<GaussianSplatAsset>();
-                asset.Initialize(splats.Length, formats.pos, formats.scale, formats.color, formats.sh, boundsMin, boundsMax, cameras);
+                asset.Initialize(splats.Length, formats.pos, formats.scale, formats.color, formats.sh, shDegree, boundsMin, boundsMax, cameras);
                 result.asset = asset;
 
-                var dataHash = new Hash128((uint)asset.splatCount, (uint)asset.formatVersion, 0, 0);
+                var dataHash = new Hash128((uint)asset.splatCount, (uint)asset.formatVersion, (uint)shDegree, 0);
                 // Chunking normalizes the splats in place, so it must run
                 // before the per-attribute encoders.
                 if (formats.UsesChunks)
-                    result.chunkData = CreateChunkData(splats, ref dataHash, formats.sh);
+                    result.chunkData = CreateChunkData(splats, ref dataHash, formats.sh, shCoeffs);
                 result.posData = CreatePositionsData(splats, ref dataHash, formats.pos);
                 result.otherData = CreateOtherData(splats, ref dataHash, formats.scale, splatSHIndices);
                 result.colorData = CreateColorData(splats, ref dataHash, formats.color);
-                result.shData = CreateSHData(splats, ref dataHash, formats.sh, clusteredSHs);
+                if (shCoeffs > 0)
+                    result.shData = CreateSHData(splats, ref dataHash, formats.sh, shDegree, clusteredSHs);
                 asset.SetDataHash(dataHash);
                 return result;
             }
@@ -194,51 +198,28 @@ namespace GaussianSplatting.Editor.Import
             order.m_Order.Dispose();
         }
 
+        // First 'coeffs' SH coefficients of each splat, back to back
         [BurstCompile]
-        static unsafe void GatherSHs(int splatCount, InputSplatData* splatData, float* shData)
+        static unsafe void GatherSHs(int splatCount, InputSplatData* splatData, int coeffs, float* shData)
         {
             for (int i = 0; i < splatCount; ++i)
             {
-                UnsafeUtility.MemCpy(shData, ((float*)splatData) + 9, 15 * 3 * sizeof(float));
+                UnsafeUtility.MemCpy(shData, SHCoeffs(splatData), coeffs * 3 * sizeof(float));
                 splatData++;
-                shData += 15 * 3;
+                shData += coeffs * 3;
             }
         }
 
-        [BurstCompile]
-        struct ConvertSHClustersJob : IJobParallelFor
+        static unsafe float3* SHCoeffs(InputSplatData* splat)
         {
-            [ReadOnly] public NativeArray<float3> m_Input;
-            public NativeArray<GaussianSplatAsset.SHTableItemFloat16> m_Output;
-            public void Execute(int index)
-            {
-                var addr = index * 15;
-                GaussianSplatAsset.SHTableItemFloat16 res;
-                res.sh1 = new half3(m_Input[addr+0]);
-                res.sh2 = new half3(m_Input[addr+1]);
-                res.sh3 = new half3(m_Input[addr+2]);
-                res.sh4 = new half3(m_Input[addr+3]);
-                res.sh5 = new half3(m_Input[addr+4]);
-                res.sh6 = new half3(m_Input[addr+5]);
-                res.sh7 = new half3(m_Input[addr+6]);
-                res.sh8 = new half3(m_Input[addr+7]);
-                res.sh9 = new half3(m_Input[addr+8]);
-                res.shA = new half3(m_Input[addr+9]);
-                res.shB = new half3(m_Input[addr+10]);
-                res.shC = new half3(m_Input[addr+11]);
-                res.shD = new half3(m_Input[addr+12]);
-                res.shE = new half3(m_Input[addr+13]);
-                res.shF = new half3(m_Input[addr+14]);
-                res.shPadding = default;
-                m_Output[index] = res;
-            }
+            return (float3*)UnsafeUtility.AddressOf(ref splat->sh1);
         }
-        static unsafe void ClusterSHs(NativeArray<InputSplatData> splatData, GaussianSplatAsset.SHFormat format, Func<float, bool> progress, out NativeArray<GaussianSplatAsset.SHTableItemFloat16> shs, out NativeArray<int> shIndices)
-        {
-            shs = default;
-            shIndices = default;
 
-            const int kShDim = 15 * 3;
+        // Outputs the cluster table, coeffs float3 per entry, and each
+        // splat's entry.
+        static unsafe void ClusterSHs(NativeArray<InputSplatData> splatData, GaussianSplatAsset.SHFormat format, int coeffs, Func<float, bool> progress, out NativeArray<float> shs, out NativeArray<int> shIndices)
+        {
+            int shDim = coeffs * 3;
             int shCount = GaussianSplatAsset.GetSHCount(format, splatData.Length);
             if (shCount >= splatData.Length)
             {
@@ -246,15 +227,8 @@ namespace GaussianSplatting.Editor.Import
                 // is still a cluster format — the decoder reads a per-splat
                 // table index from the other data — so emit a table with one
                 // entry per splat and identity indices.
-                NativeArray<float> rawSH = new(splatData.Length * kShDim, Allocator.Persistent);
-                GatherSHs(splatData.Length, (InputSplatData*) splatData.GetUnsafeReadOnlyPtr(), (float*) rawSH.GetUnsafePtr());
-                shs = new NativeArray<GaussianSplatAsset.SHTableItemFloat16>(splatData.Length, Allocator.Persistent);
-                new ConvertSHClustersJob
-                {
-                    m_Input = rawSH.Reinterpret<float3>(4),
-                    m_Output = shs
-                }.Schedule(splatData.Length, 256).Complete();
-                rawSH.Dispose();
+                shs = new NativeArray<float>(splatData.Length * shDim, Allocator.Persistent);
+                GatherSHs(splatData.Length, (InputSplatData*) splatData.GetUnsafeReadOnlyPtr(), coeffs, (float*) shs.GetUnsafePtr());
                 shIndices = new NativeArray<int>(splatData.Length, Allocator.Persistent);
                 for (int i = 0; i < shIndices.Length; ++i)
                     shIndices[i] = i;
@@ -273,24 +247,14 @@ namespace GaussianSplatting.Editor.Import
             };
 
             float t0 = Time.realtimeSinceStartup;
-            NativeArray<float> shData = new(splatData.Length * kShDim, Allocator.Persistent);
-            GatherSHs(splatData.Length, (InputSplatData*) splatData.GetUnsafeReadOnlyPtr(), (float*) shData.GetUnsafePtr());
+            NativeArray<float> shData = new(splatData.Length * shDim, Allocator.Persistent);
+            GatherSHs(splatData.Length, (InputSplatData*) splatData.GetUnsafeReadOnlyPtr(), coeffs, (float*) shData.GetUnsafePtr());
 
-            NativeArray<float> shMeans = new(shCount * kShDim, Allocator.Persistent);
+            shs = new(shCount * shDim, Allocator.Persistent);
             shIndices = new(splatData.Length, Allocator.Persistent);
 
-            KMeansClustering.Calculate(kShDim, shData, kBatchSize, passesOverData, progress, shMeans, shIndices);
+            KMeansClustering.Calculate(shDim, shData, kBatchSize, passesOverData, progress, shs, shIndices);
             shData.Dispose();
-
-            shs = new NativeArray<GaussianSplatAsset.SHTableItemFloat16>(shCount, Allocator.Persistent);
-
-            ConvertSHClustersJob job = new ConvertSHClustersJob
-            {
-                m_Input = shMeans.Reinterpret<float3>(4),
-                m_Output = shs
-            };
-            job.Schedule(shCount, 256).Complete();
-            shMeans.Dispose();
             float t1 = Time.realtimeSinceStartup;
             Debug.Log($"GS: clustered {splatData.Length/1000000.0:F2}M SHs into {shCount/1024}K ({passesOverData:F1}pass/{kBatchSize}batch) in {t1-t0:F0}s");
         }
@@ -305,8 +269,11 @@ namespace GaussianSplatting.Editor.Import
             // store SH in a separate table — normalizing those here would bake
             // permanently corrupted SH into the asset.
             public bool normalizeSh;
+            // Only these SH coefficients are stored; the rest must not widen
+            // the bounds
+            public int shCoeffs;
 
-            public void Execute(int chunkIdx)
+            public unsafe void Execute(int chunkIdx)
             {
                 float3 chunkMinpos = float.PositiveInfinity;
                 float3 chunkMinscl = float.PositiveInfinity;
@@ -334,40 +301,16 @@ namespace GaussianSplatting.Editor.Import
                     chunkMinpos = math.min(chunkMinpos, s.pos);
                     chunkMinscl = math.min(chunkMinscl, s.scale);
                     chunkMincol = math.min(chunkMincol, new float4(s.dc0, s.opacity));
-                    chunkMinshs = math.min(chunkMinshs, s.sh1);
-                    chunkMinshs = math.min(chunkMinshs, s.sh2);
-                    chunkMinshs = math.min(chunkMinshs, s.sh3);
-                    chunkMinshs = math.min(chunkMinshs, s.sh4);
-                    chunkMinshs = math.min(chunkMinshs, s.sh5);
-                    chunkMinshs = math.min(chunkMinshs, s.sh6);
-                    chunkMinshs = math.min(chunkMinshs, s.sh7);
-                    chunkMinshs = math.min(chunkMinshs, s.sh8);
-                    chunkMinshs = math.min(chunkMinshs, s.sh9);
-                    chunkMinshs = math.min(chunkMinshs, s.shA);
-                    chunkMinshs = math.min(chunkMinshs, s.shB);
-                    chunkMinshs = math.min(chunkMinshs, s.shC);
-                    chunkMinshs = math.min(chunkMinshs, s.shD);
-                    chunkMinshs = math.min(chunkMinshs, s.shE);
-                    chunkMinshs = math.min(chunkMinshs, s.shF);
 
                     chunkMaxpos = math.max(chunkMaxpos, s.pos);
                     chunkMaxscl = math.max(chunkMaxscl, s.scale);
                     chunkMaxcol = math.max(chunkMaxcol, new float4(s.dc0, s.opacity));
-                    chunkMaxshs = math.max(chunkMaxshs, s.sh1);
-                    chunkMaxshs = math.max(chunkMaxshs, s.sh2);
-                    chunkMaxshs = math.max(chunkMaxshs, s.sh3);
-                    chunkMaxshs = math.max(chunkMaxshs, s.sh4);
-                    chunkMaxshs = math.max(chunkMaxshs, s.sh5);
-                    chunkMaxshs = math.max(chunkMaxshs, s.sh6);
-                    chunkMaxshs = math.max(chunkMaxshs, s.sh7);
-                    chunkMaxshs = math.max(chunkMaxshs, s.sh8);
-                    chunkMaxshs = math.max(chunkMaxshs, s.sh9);
-                    chunkMaxshs = math.max(chunkMaxshs, s.shA);
-                    chunkMaxshs = math.max(chunkMaxshs, s.shB);
-                    chunkMaxshs = math.max(chunkMaxshs, s.shC);
-                    chunkMaxshs = math.max(chunkMaxshs, s.shD);
-                    chunkMaxshs = math.max(chunkMaxshs, s.shE);
-                    chunkMaxshs = math.max(chunkMaxshs, s.shF);
+                    float3* sh = SHCoeffs(&s);
+                    for (int k = 0; k < shCoeffs; ++k)
+                    {
+                        chunkMinshs = math.min(chunkMinshs, sh[k]);
+                        chunkMaxshs = math.max(chunkMaxshs, sh[k]);
+                    }
                 }
 
                 // make sure bounds are not zero
@@ -403,28 +346,16 @@ namespace GaussianSplatting.Editor.Import
                     s.opacity = (s.opacity - chunkMincol.w) / (chunkMaxcol.w - chunkMincol.w);
                     if (normalizeSh)
                     {
-                        s.sh1 = ((float3) s.sh1 - chunkMinshs) / (chunkMaxshs - chunkMinshs);
-                        s.sh2 = ((float3) s.sh2 - chunkMinshs) / (chunkMaxshs - chunkMinshs);
-                        s.sh3 = ((float3) s.sh3 - chunkMinshs) / (chunkMaxshs - chunkMinshs);
-                        s.sh4 = ((float3) s.sh4 - chunkMinshs) / (chunkMaxshs - chunkMinshs);
-                        s.sh5 = ((float3) s.sh5 - chunkMinshs) / (chunkMaxshs - chunkMinshs);
-                        s.sh6 = ((float3) s.sh6 - chunkMinshs) / (chunkMaxshs - chunkMinshs);
-                        s.sh7 = ((float3) s.sh7 - chunkMinshs) / (chunkMaxshs - chunkMinshs);
-                        s.sh8 = ((float3) s.sh8 - chunkMinshs) / (chunkMaxshs - chunkMinshs);
-                        s.sh9 = ((float3) s.sh9 - chunkMinshs) / (chunkMaxshs - chunkMinshs);
-                        s.shA = ((float3) s.shA - chunkMinshs) / (chunkMaxshs - chunkMinshs);
-                        s.shB = ((float3) s.shB - chunkMinshs) / (chunkMaxshs - chunkMinshs);
-                        s.shC = ((float3) s.shC - chunkMinshs) / (chunkMaxshs - chunkMinshs);
-                        s.shD = ((float3) s.shD - chunkMinshs) / (chunkMaxshs - chunkMinshs);
-                        s.shE = ((float3) s.shE - chunkMinshs) / (chunkMaxshs - chunkMinshs);
-                        s.shF = ((float3) s.shF - chunkMinshs) / (chunkMaxshs - chunkMinshs);
+                        float3* sh = SHCoeffs(&s);
+                        for (int k = 0; k < shCoeffs; ++k)
+                            sh[k] = (sh[k] - chunkMinshs) / (chunkMaxshs - chunkMinshs);
                     }
                     splatData[i] = s;
                 }
             }
         }
 
-        static NativeArray<byte> CreateChunkData(NativeArray<InputSplatData> splatData, ref Hash128 dataHash, GaussianSplatAsset.SHFormat shFormat)
+        static NativeArray<byte> CreateChunkData(NativeArray<InputSplatData> splatData, ref Hash128 dataHash, GaussianSplatAsset.SHFormat shFormat, int shCoeffs)
         {
             int chunkCount = (splatData.Length + GaussianSplatAsset.ChunkSize - 1) / GaussianSplatAsset.ChunkSize;
             CalcChunkDataJob job = new CalcChunkDataJob
@@ -434,6 +365,7 @@ namespace GaussianSplatting.Editor.Import
                 normalizeSh = shFormat is GaussianSplatAsset.SHFormat.Float16
                     or GaussianSplatAsset.SHFormat.Norm11
                     or GaussianSplatAsset.SHFormat.Norm6,
+                shCoeffs = shCoeffs,
             };
 
             job.Schedule(chunkCount, 8).Complete();
@@ -710,107 +642,39 @@ namespace GaussianSplatting.Editor.Import
             return result;
         }
 
+        // Packs SH entries back to back, GetSHStride bytes each
         [BurstCompile]
-        struct CreateSHDataJob : IJobParallelFor
+        unsafe struct CreateSHDataJob : IJobParallelFor
         {
-            [ReadOnly] public NativeArray<InputSplatData> m_Input;
+            // Entry i's coefficients are float3s at m_Input + i * m_InputStride floats
+            [NativeDisableUnsafePtrRestriction] public float* m_Input;
+            public int m_InputStride;
+            public int m_Coeffs;
             public GaussianSplatAsset.SHFormat m_Format;
-            public NativeArray<byte> m_Output;
-            public unsafe void Execute(int index)
-            {
-                var splat = m_Input[index];
+            public int m_OutputStride;
+            [NativeDisableParallelForRestriction] public NativeArray<byte> m_Output;
 
-                switch (m_Format)
+            public void Execute(int index)
+            {
+                float3* src = (float3*)(m_Input + (long)index * m_InputStride);
+                byte* dst = (byte*)m_Output.GetUnsafePtr() + (long)index * m_OutputStride;
+                for (int k = 0; k < m_Coeffs; ++k)
                 {
-                    case GaussianSplatAsset.SHFormat.Float32:
+                    switch (m_Format)
                     {
-                        GaussianSplatAsset.SHTableItemFloat32 res;
-                        res.sh1 = splat.sh1;
-                        res.sh2 = splat.sh2;
-                        res.sh3 = splat.sh3;
-                        res.sh4 = splat.sh4;
-                        res.sh5 = splat.sh5;
-                        res.sh6 = splat.sh6;
-                        res.sh7 = splat.sh7;
-                        res.sh8 = splat.sh8;
-                        res.sh9 = splat.sh9;
-                        res.shA = splat.shA;
-                        res.shB = splat.shB;
-                        res.shC = splat.shC;
-                        res.shD = splat.shD;
-                        res.shE = splat.shE;
-                        res.shF = splat.shF;
-                        res.shPadding = default;
-                        ((GaussianSplatAsset.SHTableItemFloat32*) m_Output.GetUnsafePtr())[index] = res;
+                        case GaussianSplatAsset.SHFormat.Float32:
+                            ((float3*)dst)[k] = src[k];
+                            break;
+                        case GaussianSplatAsset.SHFormat.Norm11:
+                            ((uint*)dst)[k] = EncodeFloat3ToNorm11(src[k]);
+                            break;
+                        case GaussianSplatAsset.SHFormat.Norm6:
+                            ((ushort*)dst)[k] = EncodeFloat3ToNorm565(src[k]);
+                            break;
+                        default: // Float16, and the cluster tables
+                            ((half3*)dst)[k] = new half3(src[k]);
+                            break;
                     }
-                        break;
-                    case GaussianSplatAsset.SHFormat.Float16:
-                    {
-                        GaussianSplatAsset.SHTableItemFloat16 res;
-                        res.sh1 = new half3(splat.sh1);
-                        res.sh2 = new half3(splat.sh2);
-                        res.sh3 = new half3(splat.sh3);
-                        res.sh4 = new half3(splat.sh4);
-                        res.sh5 = new half3(splat.sh5);
-                        res.sh6 = new half3(splat.sh6);
-                        res.sh7 = new half3(splat.sh7);
-                        res.sh8 = new half3(splat.sh8);
-                        res.sh9 = new half3(splat.sh9);
-                        res.shA = new half3(splat.shA);
-                        res.shB = new half3(splat.shB);
-                        res.shC = new half3(splat.shC);
-                        res.shD = new half3(splat.shD);
-                        res.shE = new half3(splat.shE);
-                        res.shF = new half3(splat.shF);
-                        res.shPadding = default;
-                        ((GaussianSplatAsset.SHTableItemFloat16*) m_Output.GetUnsafePtr())[index] = res;
-                    }
-                        break;
-                    case GaussianSplatAsset.SHFormat.Norm11:
-                    {
-                        GaussianSplatAsset.SHTableItemNorm11 res;
-                        res.sh1 = EncodeFloat3ToNorm11(splat.sh1);
-                        res.sh2 = EncodeFloat3ToNorm11(splat.sh2);
-                        res.sh3 = EncodeFloat3ToNorm11(splat.sh3);
-                        res.sh4 = EncodeFloat3ToNorm11(splat.sh4);
-                        res.sh5 = EncodeFloat3ToNorm11(splat.sh5);
-                        res.sh6 = EncodeFloat3ToNorm11(splat.sh6);
-                        res.sh7 = EncodeFloat3ToNorm11(splat.sh7);
-                        res.sh8 = EncodeFloat3ToNorm11(splat.sh8);
-                        res.sh9 = EncodeFloat3ToNorm11(splat.sh9);
-                        res.shA = EncodeFloat3ToNorm11(splat.shA);
-                        res.shB = EncodeFloat3ToNorm11(splat.shB);
-                        res.shC = EncodeFloat3ToNorm11(splat.shC);
-                        res.shD = EncodeFloat3ToNorm11(splat.shD);
-                        res.shE = EncodeFloat3ToNorm11(splat.shE);
-                        res.shF = EncodeFloat3ToNorm11(splat.shF);
-                        ((GaussianSplatAsset.SHTableItemNorm11*) m_Output.GetUnsafePtr())[index] = res;
-                    }
-                        break;
-                    case GaussianSplatAsset.SHFormat.Norm6:
-                    {
-                        GaussianSplatAsset.SHTableItemNorm6 res;
-                        res.sh1 = EncodeFloat3ToNorm565(splat.sh1);
-                        res.sh2 = EncodeFloat3ToNorm565(splat.sh2);
-                        res.sh3 = EncodeFloat3ToNorm565(splat.sh3);
-                        res.sh4 = EncodeFloat3ToNorm565(splat.sh4);
-                        res.sh5 = EncodeFloat3ToNorm565(splat.sh5);
-                        res.sh6 = EncodeFloat3ToNorm565(splat.sh6);
-                        res.sh7 = EncodeFloat3ToNorm565(splat.sh7);
-                        res.sh8 = EncodeFloat3ToNorm565(splat.sh8);
-                        res.sh9 = EncodeFloat3ToNorm565(splat.sh9);
-                        res.shA = EncodeFloat3ToNorm565(splat.shA);
-                        res.shB = EncodeFloat3ToNorm565(splat.shB);
-                        res.shC = EncodeFloat3ToNorm565(splat.shC);
-                        res.shD = EncodeFloat3ToNorm565(splat.shD);
-                        res.shE = EncodeFloat3ToNorm565(splat.shE);
-                        res.shF = EncodeFloat3ToNorm565(splat.shF);
-                        res.shPadding = default;
-                        ((GaussianSplatAsset.SHTableItemNorm6*) m_Output.GetUnsafePtr())[index] = res;
-                    }
-                        break;
-                    default:
-                        break;
                 }
             }
         }
@@ -820,23 +684,24 @@ namespace GaussianSplatting.Editor.Import
             return new NativeArray<byte>(data.Reinterpret<byte>(UnsafeUtility.SizeOf<T>()), Allocator.Persistent);
         }
 
-        static NativeArray<byte> CreateSHData(NativeArray<InputSplatData> inputSplats, ref Hash128 dataHash, GaussianSplatAsset.SHFormat formatSH, NativeArray<GaussianSplatAsset.SHTableItemFloat16> clusteredSHs)
+        // From the cluster table when there is one, else per splat
+        static unsafe NativeArray<byte> CreateSHData(NativeArray<InputSplatData> inputSplats, ref Hash128 dataHash, GaussianSplatAsset.SHFormat formatSH, int shDegree, NativeArray<float> clusteredSHs)
         {
-            if (clusteredSHs.IsCreated)
+            int coeffs = GaussianSplatAsset.GetSHCoeffCount(shDegree);
+            int entries = clusteredSHs.IsCreated ? clusteredSHs.Length / (coeffs * 3) : inputSplats.Length;
+            int stride = GaussianSplatAsset.GetSHStride(formatSH, shDegree);
+            NativeArray<byte> data = new(entries * stride, Allocator.Persistent);
+            new CreateSHDataJob
             {
-                dataHash.Append(clusteredSHs);
-                return ToPersistentBytes(clusteredSHs);
-            }
-
-            int dataLen = (int)GaussianSplatAsset.CalcSHDataSize(inputSplats.Length, formatSH);
-            NativeArray<byte> data = new(dataLen, Allocator.Persistent);
-            CreateSHDataJob job = new CreateSHDataJob
-            {
-                m_Input = inputSplats,
+                m_Input = clusteredSHs.IsCreated
+                    ? (float*)clusteredSHs.GetUnsafeReadOnlyPtr()
+                    : (float*)SHCoeffs((InputSplatData*)inputSplats.GetUnsafeReadOnlyPtr()),
+                m_InputStride = clusteredSHs.IsCreated ? coeffs * 3 : UnsafeUtility.SizeOf<InputSplatData>() / sizeof(float),
+                m_Coeffs = coeffs,
                 m_Format = formatSH,
-                m_Output = data
-            };
-            job.Schedule(inputSplats.Length, 8192).Complete();
+                m_OutputStride = stride,
+                m_Output = data,
+            }.Schedule(entries, 8192).Complete();
             dataHash.Append(data);
             return data;
         }

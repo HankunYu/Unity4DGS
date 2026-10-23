@@ -34,6 +34,10 @@ namespace GaussianSplatting.Runtime
         [Range(0, 3)] [Tooltip("Spherical Harmonics order to use")]
         [FormerlySerializedAs("m_SHOrder")]
         public int shOrder = 3;
+        // What is actually shaded: also capped by the config and by the SH
+        // bands the asset stores
+        public int EffectiveSHOrder => Mathf.Min(shOrder,
+            Mathf.Min(GaussianSplatRenderSystem.instance.Config?.maxSHOrder ?? 3, splatAsset != null ? splatAsset.shDegree : 0));
         [Tooltip("Show only Spherical Harmonics contribution, using gray color")]
         [FormerlySerializedAs("m_SHOnly")]
         public bool shOnly;
@@ -338,7 +342,7 @@ namespace GaussianSplatting.Runtime
             splatAsset.formatVersion == GaussianSplatAsset.CurrentVersion &&
             splatAsset.posData != null &&
             splatAsset.otherData != null &&
-            splatAsset.shData != null &&
+            (splatAsset.shData != null || splatAsset.shDegree == 0) &&
             splatAsset.colorData != null;
         // Must cover every resource the draw path binds: between
         // InitResourcesForAssets (pos/view created) and CreateResourcesForAsset
@@ -364,7 +368,7 @@ namespace GaussianSplatting.Runtime
 
             _gpuPosData = new GraphicsBuffer(GraphicsBuffer.Target.Raw | GraphicsBuffer.Target.CopySource, (int)(posDataMaxSize / 4), 4) { name = "GaussianPosData" };
             _gpuOtherData = new GraphicsBuffer(GraphicsBuffer.Target.Raw | GraphicsBuffer.Target.CopySource, (int)(otherDataMaxSize / 4), 4) { name = "GaussianOtherData" };
-            _gpuSHData = new GraphicsBuffer(GraphicsBuffer.Target.Raw, (int)(shDataMaxSize / 4), 4) { name = "GaussianSHData" };
+            _gpuSHData = CreateSHBuffer(shDataMaxSize);
             if (chunkDataMaxSize != 0)
                 _gpuChunks = new GraphicsBuffer(GraphicsBuffer.Target.Structured,
                     (int)(chunkDataMaxSize / UnsafeUtility.SizeOf<GaussianSplatAsset.ChunkInfo>()),
@@ -391,7 +395,7 @@ namespace GaussianSplatting.Runtime
             _preallocatedSplatCount = 0;
             _gpuPosData = new GraphicsBuffer(GraphicsBuffer.Target.Raw | GraphicsBuffer.Target.CopySource, (int)(asset.posData.dataSize / 4), 4) { name = "GaussianPosData" };
             _gpuOtherData = new GraphicsBuffer(GraphicsBuffer.Target.Raw | GraphicsBuffer.Target.CopySource, (int)(asset.otherData.dataSize / 4), 4) { name = "GaussianOtherData" };
-            _gpuSHData = new GraphicsBuffer(GraphicsBuffer.Target.Raw, (int)(asset.shData.dataSize / 4), 4) { name = "GaussianSHData" };
+            _gpuSHData = CreateSHBuffer(asset.SHDataSize);
             if (asset.chunkData != null && asset.chunkData.dataSize != 0)
             {
                 _gpuChunks = new GraphicsBuffer(GraphicsBuffer.Target.Structured,
@@ -426,7 +430,7 @@ namespace GaussianSplatting.Runtime
                 return false;
             if ((long)_gpuPosData.count * 4 < asset.posData.dataSize ||
                 (long)_gpuOtherData.count * 4 < asset.otherData.dataSize ||
-                (long)_gpuSHData.count * 4 < asset.shData.dataSize)
+                (long)_gpuSHData.count * 4 < asset.SHDataSize)
                 return false;
             if (_gpuView.count < asset.splatCount * 2)
                 return false;
@@ -455,7 +459,8 @@ namespace GaussianSplatting.Runtime
             _splatCount = asset.splatCount;
             _gpuPosData.SetData(asset.posData.GetData<uint>());
             _gpuOtherData.SetData(asset.otherData.GetData<uint>());
-            _gpuSHData.SetData(asset.shData.GetData<uint>());
+            if (asset.shData != null)
+                _gpuSHData.SetData(asset.shData.GetData<uint>());
 
             UploadColorData();
             if (asset.chunkData != null && asset.chunkData.dataSize != 0)
@@ -642,8 +647,7 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.OrderBuffer, _gpuSortKeys);
 
             cmb.SetComputeIntParam(cs, Props.SplatBitsValid, editSelected != null && editDeleted != null ? 1 : 0);
-            uint format = (uint)splatAsset.posFormat | ((uint)splatAsset.scaleFormat << 8) | ((uint)splatAsset.shFormat << 16);
-            cmb.SetComputeIntParam(cs, Props.SplatFormat, (int)format);
+            cmb.SetComputeIntParam(cs, Props.SplatFormat, (int)splatAsset.FormatFlags);
             cmb.SetComputeIntParam(cs, Props.SplatCount, EffectiveSplatCount);
             cmb.SetComputeIntParam(cs, Props.SrcSplatCount, _splatCount);
             cmb.SetComputeIntParam(cs, Props.SplatChunkCount, _gpuChunksValid ? _gpuChunks.count : 0);
@@ -678,10 +682,15 @@ namespace GaussianSplatting.Runtime
             mat.SetBuffer(Props.SplatSelectedBits, editSelected ?? _gpuPosData);
             mat.SetBuffer(Props.SplatDeletedBits, editDeleted ?? _gpuPosData);
             mat.SetInt(Props.SplatBitsValid, editSelected != null && editDeleted != null ? 1 : 0);
-            uint format = (uint)splatAsset.posFormat | ((uint)splatAsset.scaleFormat << 8) | ((uint)splatAsset.shFormat << 16);
-            mat.SetInteger(Props.SplatFormat, (int)format);
+            mat.SetInteger(Props.SplatFormat, (int)splatAsset.FormatFlags);
             mat.SetInteger(Props.SplatCount, _splatCount);
             mat.SetInteger(Props.SplatChunkCount, _gpuChunksValid ? _gpuChunks.count : 0);
+        }
+
+        // An asset without SH has no SH data, but the shaders still bind a buffer
+        internal static GraphicsBuffer CreateSHBuffer(long size)
+        {
+            return new GraphicsBuffer(GraphicsBuffer.Target.Raw, (int)Math.Max(1, size / 4), 4) { name = "GaussianSHData" };
         }
 
         private static void DisposeBuffer(ref GraphicsBuffer buf)
@@ -812,10 +821,10 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeVectorParam(csSplatUtilities, Props.VecWorldSpaceCameraPos, camPos);
             cmb.SetComputeFloatParam(csSplatUtilities, Props.SplatScale, splatScale);
             cmb.SetComputeFloatParam(csSplatUtilities, Props.SplatOpacityScale, opacityScale);
-            // The global cap trades view-dependent shading for bandwidth: order
-            // 0 skips every SH read in the view-data pass.
-            int shOrderCap = GaussianSplatRenderSystem.instance.Config?.maxSHOrder ?? 3;
-            cmb.SetComputeIntParam(csSplatUtilities, Props.SHOrder, Mathf.Min(shOrder, shOrderCap));
+            // The view-data pass reads only the SH bands it shades: a lower
+            // order trades view-dependent shading for bandwidth, and order 0
+            // skips every SH read.
+            cmb.SetComputeIntParam(csSplatUtilities, Props.SHOrder, EffectiveSHOrder);
             cmb.SetComputeIntParam(csSplatUtilities, Props.SHOnly, shOnly ? 1 : 0);
 
             csSplatUtilities.GetKernelThreadGroupSizes(kernelIndex, out uint gsX, out _, out _);
@@ -959,7 +968,7 @@ namespace GaussianSplatting.Runtime
             cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.VisibleCounter, _gpuVisibleCounter);
             cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.SplatChunks, _gpuChunks);
             cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.SplatPos, _gpuPosData);
-            cmd.SetComputeIntParam(csSplatUtilities, Props.SplatFormat, (int)splatAsset.posFormat);
+            cmd.SetComputeIntParam(csSplatUtilities, Props.SplatFormat, (int)splatAsset.FormatFlags);
             cmd.SetComputeIntParam(csSplatUtilities, Props.IsStereo, IsStereoCapture(cam) ? 1 : 0);
             cmd.SetComputeMatrixParam(csSplatUtilities, Props.MatrixMV, SortViewMatrix(cam) * matrix);
             cmd.SetComputeIntParam(csSplatUtilities, Props.SplatCount, EffectiveSplatCount);
@@ -1099,9 +1108,9 @@ namespace GaussianSplatting.Runtime
         public void EditCopySplatsInto(GaussianSplatRenderer dst, int srcStart, int dstStart, int count)
             => EditManager.CopySplatsInto(dst, srcStart, dstStart, count);
         public void EditCopySplats(Transform dstTransform, GraphicsBuffer dstPos, GraphicsBuffer dstOther,
-            GraphicsBuffer dstSH, Texture dstColor, GraphicsBuffer dstEditDeleted, int dstSize,
+            GraphicsBuffer dstSH, int dstSHDegree, Texture dstColor, GraphicsBuffer dstEditDeleted, int dstSize,
             int srcStart, int dstStart, int count)
-            => EditManager.CopySplats(dstTransform, dstPos, dstOther, dstSH, dstColor, dstEditDeleted,
+            => EditManager.CopySplats(dstTransform, dstPos, dstOther, dstSH, dstSHDegree, dstColor, dstEditDeleted,
                 dstSize, srcStart, dstStart, count);
         public GraphicsBuffer GpuEditDeleted => EditManager.GpuEditDeleted;
     }

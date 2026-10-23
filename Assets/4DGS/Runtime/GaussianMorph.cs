@@ -194,11 +194,10 @@ namespace GaussianSplatting.Runtime
             _tgtOtherData.SetData(tgt.otherData.GetData<uint>());
 
             // SH data
-            _tgtSHData = new GraphicsBuffer(
-                GraphicsBuffer.Target.Raw,
-                (int)(tgt.shData.dataSize / 4), 4)
-            { name = "MorphTgtSHData" };
-            _tgtSHData.SetData(tgt.shData.GetData<uint>());
+            _tgtSHData = GaussianSplatRenderer.CreateSHBuffer(tgt.SHDataSize);
+            _tgtSHData.name = "MorphTgtSHData";
+            if (tgt.shData != null)
+                _tgtSHData.SetData(tgt.shData.GetData<uint>());
 
             // Color texture
             var (texWidth, texHeight) = GaussianSplatAsset.CalcTextureSize(tgt.splatCount);
@@ -328,10 +327,7 @@ namespace GaussianSplatting.Runtime
             int mk = _kernelMorton;
             var cs = _morphShader;
 
-            // Pack source format flags (same as morph kernel)
-            uint srcFormat = (uint)srcAsset.posFormat |
-                             ((uint)srcAsset.scaleFormat << 8) |
-                             ((uint)srcAsset.shFormat << 16);
+            uint srcFormat = srcAsset.FormatFlags;
 
             // --- Compute Morton codes for source (bind source data to _Src* slots) ---
             cmd.SetComputeBufferParam(cs, mk, PropSrcPos, _renderer.GpuPosData);
@@ -349,10 +345,7 @@ namespace GaussianSplatting.Runtime
             cmd.SetComputeBufferParam(cs, mk, PropMortonIndices, srcMortonIndices);
             cmd.DispatchCompute(cs, mk, (srcCount + GroupSize - 1) / GroupSize, 1, 1);
 
-            // Pack target format flags
-            uint tgtFormat = (uint)_targetAsset.posFormat |
-                             ((uint)_targetAsset.scaleFormat << 8) |
-                             ((uint)_targetAsset.shFormat << 16);
+            uint tgtFormat = _targetAsset.FormatFlags;
 
             // --- Compute Morton codes for target (rebind target data to _Src* slots) ---
             cmd.SetComputeBufferParam(cs, mk, PropSrcPos, _tgtPosData);
@@ -456,10 +449,7 @@ namespace GaussianSplatting.Runtime
             cs.SetTexture(kernel, PropSrcColor, _renderer.GpuColorData);
             cs.SetBuffer(kernel, PropSrcChunks, _renderer.GpuChunksBuffer);
 
-            // Source format flags: posFormat | (scaleFormat << 8) | (shFormat << 16)
-            uint srcFormat = (uint)srcAsset.posFormat |
-                             ((uint)srcAsset.scaleFormat << 8) |
-                             ((uint)srcAsset.shFormat << 16);
+            uint srcFormat = srcAsset.FormatFlags;
             cs.SetInt(PropSrcFormat, (int)srcFormat);
             cs.SetInt(PropSrcChunkCount, _renderer.GpuChunksValid ? _renderer.GpuChunksBuffer.count : 0);
             cs.SetInt(PropSrcSplatCount, _renderer.splatCount);
@@ -471,10 +461,7 @@ namespace GaussianSplatting.Runtime
             cs.SetTexture(kernel, PropTgtColor, _tgtColorTex);
             cs.SetBuffer(kernel, PropTgtChunks, _tgtChunks);
 
-            // Target format flags
-            uint tgtFormat = (uint)_targetAsset.posFormat |
-                             ((uint)_targetAsset.scaleFormat << 8) |
-                             ((uint)_targetAsset.shFormat << 16);
+            uint tgtFormat = _targetAsset.FormatFlags;
             cs.SetInt(PropTgtFormat, (int)tgtFormat);
             cs.SetInt(PropTgtChunkCount, _tgtChunksValid ? _tgtChunks.count : 0);
             cs.SetInt(PropTgtSplatCount, _targetAsset.splatCount);

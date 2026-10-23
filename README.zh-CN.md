@@ -59,7 +59,7 @@ git clone https://github.com/HankunYu/Unity4DGS.git
 
 1. 将 `GaussianSplat URP Feature` 添加到你的 URP Renderer 资产。
 2. 在场景中放置一个 `GaussianSplatConfig` 组件(保存全局渲染设置与 shader 引用)。
-3. 把 `.ply` / `.spz` 文件放进项目，它会原地导入为泼溅资产；质量、剪枝等选项在其导入设置（Inspector）里调整，源文件保持不变，可继续给其他工具使用。
+3. 把 `.ply` / `.spz` 文件放进项目，它会原地导入为泼溅资产；质量、剪枝、SH 阶数等选项在其导入设置（Inspector）里调整，源文件保持不变，可继续给其他工具使用。
 4. 为一个 GameObject 添加 `GaussianSplatRenderer` 组件并指定资产。
 5. 对于 4D 序列,使用 `GaussianPlayer` 并将其指向一个存放逐帧资产的文件夹。
 

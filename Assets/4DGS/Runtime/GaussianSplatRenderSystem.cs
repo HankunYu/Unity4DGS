@@ -649,7 +649,7 @@ namespace GaussianSplatting.Runtime
                     PointProjectionScale(cam.projectionMatrix.m11));
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointMaxSize, _config.pointCloudMaxDisplaySize);
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointOpacityBoost, _config.pointCloudOpacityBoost);
-                mpb.SetInteger(GaussianSplatRenderer.Props.SHOrder, gs.shOrder);
+                mpb.SetInteger(GaussianSplatRenderer.Props.SHOrder, gs.EffectiveSHOrder);
                 mpb.SetInteger(GaussianSplatRenderer.Props.SHOnly, gs.shOnly ? 1 : 0);
                 mpb.SetInteger(GaussianSplatRenderer.Props.DisplayIndex,
                     _config.renderMode == GaussianSplatRenderMode.DebugPointIndices ? 1 : 0);
@@ -1060,7 +1060,7 @@ namespace GaussianSplatting.Runtime
                     PointProjectionScale(MatrixOverride?.Proj.m11 ?? cam.projectionMatrix.m11));
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointMaxSize, _config.pointCloudMaxDisplaySize);
                 mpb.SetFloat(GaussianSplatRenderer.Props.PointOpacityBoost, _config.pointCloudOpacityBoost);
-                mpb.SetInteger(GaussianSplatRenderer.Props.SHOrder, gs.shOrder);
+                mpb.SetInteger(GaussianSplatRenderer.Props.SHOrder, gs.EffectiveSHOrder);
                 mpb.SetInteger(GaussianSplatRenderer.Props.SHOnly, gs.shOnly ? 1 : 0);
                 mpb.SetInteger(GaussianSplatRenderer.Props.DisplayIndex, _config.renderMode == GaussianSplatRenderMode.DebugPointIndices ? 1 : 0);
                 mpb.SetInteger(GaussianSplatRenderer.Props.DisplayChunks, _config.renderMode == GaussianSplatRenderMode.DebugChunkBounds ? 1 : 0);
