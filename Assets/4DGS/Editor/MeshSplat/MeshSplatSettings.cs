@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using GaussianSplatting.Editor.Import;
 using UnityEngine;
 
@@ -20,7 +21,9 @@ namespace GaussianSplatting.Editor.MeshSplat
         public ScanlineSampler scanline = new();
         public GridSampler grid = new();
 
+        // Source for every surface whose material has no override
         public SplatColorKind color = SplatColorKind.Uniform;
+        public List<MaterialColorOverride> colorOverrides = new();
         public UniformColorSource uniformColor = new();
         public MaterialColorSource materialColor = new();
         public VertexColorSource vertexColor = new();
@@ -56,13 +59,28 @@ namespace GaussianSplatting.Editor.MeshSplat
             _ => throw new ArgumentOutOfRangeException(nameof(sampler), sampler, null),
         };
 
-        public ISplatColorSource ColorSource => color switch
+        public ISplatColorSource ColorSource(SplatColorKind kind) => kind switch
         {
             SplatColorKind.Uniform => uniformColor,
             SplatColorKind.Material => materialColor,
             SplatColorKind.VertexColor => vertexColor,
-            _ => throw new ArgumentOutOfRangeException(nameof(color), color, null),
+            _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
         };
+
+        // The first override for the material wins; surfaces without a
+        // material use the default source
+        public SplatColorKind ColorKindFor(Material material)
+        {
+            if (material != null)
+            {
+                foreach (MaterialColorOverride entry in colorOverrides)
+                {
+                    if (entry != null && entry.material == material)
+                        return entry.color;
+                }
+            }
+            return color;
+        }
 
         // Generated splats are all needed (they are bound to the surface) and
         // have no SH, so only the data formats carry over

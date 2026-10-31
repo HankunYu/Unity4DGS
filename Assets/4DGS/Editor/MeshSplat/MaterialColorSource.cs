@@ -28,8 +28,7 @@ namespace GaussianSplatting.Editor.MeshSplat
             {
                 SurfaceSample sample = samples[i];
                 SurfaceMesh mesh = meshes[sample.mesh];
-                int slot = mesh.triangleMaterials[sample.triangle];
-                Material material = slot < mesh.materials.Length ? mesh.materials[slot] : null;
+                Material material = mesh.MaterialAt(sample);
                 Color color = material != null ? BaseColor(material) : fallbackColor;
                 Texture texture = null;
                 Vector2 scale = Vector2.one, offset = Vector2.zero;
@@ -45,16 +44,13 @@ namespace GaussianSplatting.Editor.MeshSplat
         }
 
         // The materials' textures, for import dependencies
-        public IEnumerable<Texture> Textures(IReadOnlyList<SurfaceMesh> meshes)
+        public IEnumerable<Texture> Textures(IEnumerable<Material> materials)
         {
-            foreach (SurfaceMesh mesh in meshes)
+            foreach (Material material in materials)
             {
-                foreach (Material material in mesh.materials)
-                {
-                    Texture texture = material != null ? BaseTexture(material, out _, out _) : null;
-                    if (texture != null)
-                        yield return texture;
-                }
+                Texture texture = material != null ? BaseTexture(material, out _, out _) : null;
+                if (texture != null)
+                    yield return texture;
             }
         }
 

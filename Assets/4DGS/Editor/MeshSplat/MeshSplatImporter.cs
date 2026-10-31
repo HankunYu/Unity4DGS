@@ -153,22 +153,15 @@ namespace GaussianSplatting.Editor.MeshSplat
         public static int LastClipFrame(AnimationClip clip, float frameRate) =>
             Math.Max(0, (int)Math.Floor(clip.length * frameRate + 1e-3));
 
-        // Materials and textures outside the model file (the model's own
-        // are covered by depending on it)
+        // Materials and textures outside the model file that color splats
+        // (the model's own are covered by depending on it)
         private void AddColorDependencies(AssetImportContext ctx, List<SurfaceMesh> meshes)
         {
-            if (settings.color != SplatColorKind.Material)
-                return;
-            var objects = new HashSet<UnityEngine.Object>();
-            foreach (SurfaceMesh mesh in meshes)
-            {
-                foreach (Material material in mesh.materials)
-                {
-                    if (material != null)
-                        objects.Add(material);
-                }
-            }
-            foreach (Texture texture in settings.materialColor.Textures(meshes))
+            var materials = new HashSet<Material>(meshes
+                .SelectMany(m => m.materials)
+                .Where(m => m != null && settings.ColorKindFor(m) == SplatColorKind.Material));
+            var objects = new HashSet<UnityEngine.Object>(materials);
+            foreach (Texture texture in settings.materialColor.Textures(materials))
                 objects.Add(texture);
             foreach (UnityEngine.Object obj in objects)
                 AddDependency(ctx, obj);

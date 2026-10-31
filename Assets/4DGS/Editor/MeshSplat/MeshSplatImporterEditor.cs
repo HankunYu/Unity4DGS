@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using GaussianSplatting.Editor.Import;
@@ -22,6 +23,9 @@ namespace GaussianSplatting.Editor.MeshSplat
             "Asset: one splat asset in the rest pose; drag it into the scene and a GaussianMeshDriver moves it with " +
             "the model. Sequence: one splat asset per animation frame, played by a GaussianPlayer. Every frame is " +
             "held in memory while importing.");
+        private static readonly GUIContent s_OverridesLabel = new("Overrides",
+            "Materials colored by another source than the default one, e.g. a textured character among " +
+            "uniformly colored props.");
         private static readonly GUIContent s_LightLabel = new("Bake Lighting",
             "Multiply the color by a fixed directional light. An asset bakes it in the rest pose, so it turns " +
             "with the model as it animates; a sequence bakes it for every frame's pose.");
@@ -37,6 +41,7 @@ namespace GaussianSplatting.Editor.MeshSplat
         private SerializedProperty _sequence;
         private SerializedProperty _sampler;
         private SerializedProperty _color;
+        private SerializedProperty _colorOverrides;
         private SerializedProperty _bakeLighting;
         private SerializedProperty _lightDirection;
         private SerializedProperty _ambient;
@@ -55,6 +60,7 @@ namespace GaussianSplatting.Editor.MeshSplat
             _sequence = settings.FindPropertyRelative(nameof(MeshSplatSettings.sequence));
             _sampler = settings.FindPropertyRelative(nameof(MeshSplatSettings.sampler));
             _color = settings.FindPropertyRelative(nameof(MeshSplatSettings.color));
+            _colorOverrides = settings.FindPropertyRelative(nameof(MeshSplatSettings.colorOverrides));
             _bakeLighting = settings.FindPropertyRelative(nameof(MeshSplatSettings.bakeLighting));
             _lightDirection = settings.FindPropertyRelative(nameof(MeshSplatSettings.lightDirection));
             _ambient = settings.FindPropertyRelative(nameof(MeshSplatSettings.ambient));
@@ -96,6 +102,9 @@ namespace GaussianSplatting.Editor.MeshSplat
             EditorGUILayout.PropertyField(_color, new GUIContent("Source"));
             if (!_color.hasMultipleDifferentValues)
                 DrawFields(ColorProperty((SplatColorKind)_color.enumValueIndex));
+            EditorGUILayout.PropertyField(_colorOverrides, s_OverridesLabel, true);
+            if (!_color.hasMultipleDifferentValues && !_colorOverrides.hasMultipleDifferentValues)
+                DrawOverrideSources();
             EditorGUILayout.PropertyField(_bakeLighting, s_LightLabel);
             if (_bakeLighting.boolValue || _bakeLighting.hasMultipleDifferentValues)
             {
@@ -142,6 +151,22 @@ namespace GaussianSplatting.Editor.MeshSplat
             SplatColorKind.VertexColor => nameof(MeshSplatSettings.vertexColor),
             _ => throw new System.ArgumentOutOfRangeException(nameof(kind)),
         });
+
+        // Settings of the sources only the overrides use, below the list
+        private void DrawOverrideSources()
+        {
+            var defaultKind = (SplatColorKind)_color.enumValueIndex;
+            var shown = new HashSet<SplatColorKind> { defaultKind };
+            for (int i = 0; i < _colorOverrides.arraySize; i++)
+            {
+                SerializedProperty entry = _colorOverrides.GetArrayElementAtIndex(i);
+                var kind = (SplatColorKind)entry.FindPropertyRelative(nameof(MaterialColorOverride.color)).enumValueIndex;
+                if (!shown.Add(kind))
+                    continue;
+                EditorGUILayout.LabelField(ObjectNames.NicifyVariableName(kind.ToString()));
+                DrawFields(ColorProperty(kind));
+            }
+        }
 
         // The selected sampler's or color source's own settings, indented
         // below its popup

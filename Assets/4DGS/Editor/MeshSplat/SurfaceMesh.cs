@@ -59,6 +59,13 @@ namespace GaussianSplatting.Editor.MeshSplat
             return sample.bary.x * uvs[t.x] + sample.bary.y * uvs[t.y] + sample.bary.z * uvs[t.z];
         }
 
+        // Null where the renderer has fewer materials than submeshes
+        public Material MaterialAt(in SurfaceSample sample)
+        {
+            int slot = triangleMaterials[sample.triangle];
+            return slot < materials.Length ? materials[slot] : null;
+        }
+
         public Color VertexColor(in SurfaceSample sample)
         {
             int3 t = triangles[sample.triangle];

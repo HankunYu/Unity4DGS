@@ -51,8 +51,7 @@ namespace GaussianSplatting.Editor.MeshSplat
             if (samples.Count == 0)
                 throw new InvalidOperationException("the sampler placed no splats");
 
-            var colors = new float3[samples.Count];
-            settings.ColorSource.Fill(meshes, samples, colors);
+            float3[] colors = FillColors(meshes, samples, settings);
 
             float3 light = math.normalizesafe((float3)settings.lightDirection, new float3(0, 1, 0));
 
@@ -79,6 +78,27 @@ namespace GaussianSplatting.Editor.MeshSplat
                 };
             }
             return splats;
+        }
+
+        // Each color source fills the samples whose material uses it
+        private static float3[] FillColors(IReadOnlyList<SurfaceMesh> meshes, IReadOnlyList<SurfaceSample> samples,
+            MeshSplatSettings settings)
+        {
+            var kinds = new SplatColorKind[samples.Count];
+            for (int i = 0; i < samples.Count; i++)
+                kinds[i] = settings.ColorKindFor(meshes[samples[i].mesh].MaterialAt(samples[i]));
+
+            var colors = new float3[samples.Count];
+            foreach (SplatColorKind kind in kinds.Distinct())
+            {
+                int[] indices = Enumerable.Range(0, samples.Count).Where(i => kinds[i] == kind).ToArray();
+                var subset = indices.Select(i => samples[i]).ToArray();
+                var subsetColors = new float3[indices.Length];
+                settings.ColorSource(kind).Fill(meshes, subset, subsetColors);
+                for (int i = 0; i < indices.Length; i++)
+                    colors[indices[i]] = subsetColors[i];
+            }
+            return colors;
         }
 
         // One binding entry per asset splat, grouped by mesh, plus each
