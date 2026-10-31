@@ -13,6 +13,8 @@
 // global buffers (_SplatPos, _SplatOther, etc.) that are not bound by
 // GaussianAnimator. We replicate the position loading logic here.
 
+#include "../Shaders/GaussianVolume.hlsl"
+
 // ── Vector format constants (must match GaussianSplatAsset.VectorFormat) ──
 
 #define VECTOR_FMT_32F 0
@@ -132,36 +134,7 @@ float ValueNoise3D(float3 p)
 float CalcVolumeWeight(float3 worldPos, AnimVolumeData vol)
 {
     float3 localPos = mul(vol.worldToLocal, float4(worldPos, 1)).xyz;
-    float shapeType = vol.shapeParams.x;
-    float falloff = max(vol.shapeParams.y, 0.001);
-
-    float dist = 0;
-
-    if (shapeType < 0.5) // Box
-    {
-        // distance from unit cube center, mapped so inside = negative, outside = positive
-        float3 halfExt = float3(0.5, 0.5, 0.5);
-        float3 d = abs(localPos) - halfExt;
-        dist = length(max(d, 0)); // 0 inside, positive outside
-        // for falloff inside the box, use max component
-        float inside = max(max(d.x, d.y), d.z);
-        if (inside < 0)
-            dist = inside; // negative = inside
-    }
-    else // Sphere
-    {
-        dist = length(localPos) - 0.5;
-    }
-
-    // dist < 0 means inside volume, dist > 0 means outside
-    if (dist > falloff)
-        return 0;
-    if (dist < 0)
-        return 1;
-
-    // smooth falloff from 1 (at boundary) to 0 (at falloff distance)
-    float t = dist / falloff;
-    return 1.0 - t * t; // quadratic falloff
+    return GaussianVolumeWeight(localPos, vol.shapeParams.x, vol.shapeParams.y);
 }
 
 // ── Position decoding (matches GaussianSplatting.hlsl logic) ──

@@ -1,42 +1,22 @@
 // SPDX-License-Identifier: MIT
 
-using System.Collections;
 using UnityEngine;
 
 namespace GaussianSplatting.Runtime
 {
     /// <summary>
     /// Defines a spatial region (Box or Sphere) that controls which splats
-    /// are affected by animation modifiers. Place this on a scene object,
-    /// adjust the transform to position/scale the volume, and add modifier
-    /// components as siblings.
+    /// are affected by animation modifiers. Place this under a
+    /// GaussianAnimator, adjust the transform to position/scale the volume,
+    /// and add modifier components as siblings.
     /// </summary>
-    public class GaussianAnimVolume : MonoBehaviour
+    public class GaussianAnimVolume : GaussianVolume
     {
-        private Vector3 _originalScale;
-        private Coroutine _scaleCoroutine;
-
-        private void Awake()
-        {
-            _originalScale = transform.localScale;
-        }
-
-        public enum VolumeShape
-        {
-            Box = 0,
-            Sphere = 1
-        }
-
-        [Tooltip("Shape of the influence region")]
-        public VolumeShape shape = VolumeShape.Box;
-
-        [Range(0f, 5f)]
-        [Tooltip("Falloff distance at the volume boundary. 0 = hard edge, higher = softer gradient.")]
-        public float falloff = 0.5f;
-
         [Range(0f, 5f)]
         [Tooltip("How long the effect lingers after the volume moves away (seconds). 0 = instant off.")]
         public float trailDuration = 0f;
+
+        protected override Color GizmoColor => Color.cyan;
 
         /// <summary>
         /// GPU-uploadable data matching AnimVolumeData in the compute shader.
@@ -45,7 +25,7 @@ namespace GaussianSplatting.Runtime
         {
             public Matrix4x4 worldToLocal;  // 64 bytes
             public Matrix4x4 localToWorld;  // 64 bytes
-            public Vector4 shapeParams;     // x: type(0=box,1=sphere), y: falloff, zw: reserved
+            public Vector4 shapeParams;     // x: type(0=box,1=sphere), y: falloff, z: trail duration, w: reserved
             public Vector4 boundsSize;      // box half-extents from scale, or sphere radius
         }
 
@@ -71,7 +51,7 @@ namespace GaussianSplatting.Runtime
             sd.shapeParams = new Vector4((float)shape, falloff, trailDuration, 0);
 
             Vector3 scale = tr.lossyScale;
-            if (shape == VolumeShape.Box)
+            if (shape == GaussianVolumeShape.Box)
             {
                 // box half-extents: unit cube [-1,1] scaled by transform
                 sd.boundsSize = new Vector4(scale.x * 0.5f, scale.y * 0.5f, scale.z * 0.5f, 0);
@@ -85,68 +65,5 @@ namespace GaussianSplatting.Runtime
 
             return sd;
         }
-
-        /// <summary>
-        /// Shrink the volume to zero over duration seconds.
-        /// Trail persistence will handle the fade-out. Call from UnityEvent when tracking is lost.
-        /// </summary>
-        public void Release(float duration = 0.1f)
-        {
-            if (_scaleCoroutine != null)
-                StopCoroutine(_scaleCoroutine);
-            _scaleCoroutine = StartCoroutine(ScaleTo(Vector3.zero, duration));
-        }
-
-        /// <summary>
-        /// Restore the volume to its original scale over duration seconds.
-        /// Call from UnityEvent when tracking is regained.
-        /// </summary>
-        public void Restore(float duration = 0.1f)
-        {
-            if (_originalScale == Vector3.zero)
-                return;
-            if (_scaleCoroutine != null)
-                StopCoroutine(_scaleCoroutine);
-            _scaleCoroutine = StartCoroutine(ScaleTo(_originalScale, duration));
-        }
-
-        private IEnumerator ScaleTo(Vector3 target, float duration)
-        {
-            Vector3 start = transform.localScale;
-            float elapsed = 0f;
-            while (elapsed < duration)
-            {
-                elapsed += Time.deltaTime;
-                float t = Mathf.Clamp01(elapsed / duration);
-                transform.localScale = Vector3.Lerp(start, target, t);
-                yield return null;
-            }
-            transform.localScale = target;
-            _scaleCoroutine = null;
-        }
-
-#if UNITY_EDITOR
-        private void OnDrawGizmos()
-        {
-            Gizmos.matrix = transform.localToWorldMatrix;
-            var color = Color.cyan;
-            color.a = 0.15f;
-            if (UnityEditor.Selection.Contains(gameObject))
-                color.a = 0.4f;
-
-            Gizmos.color = color;
-            if (shape == VolumeShape.Box)
-            {
-                Gizmos.DrawWireCube(Vector3.zero, Vector3.one);
-                color.a *= 0.3f;
-                Gizmos.color = color;
-                Gizmos.DrawCube(Vector3.zero, Vector3.one);
-            }
-            else
-            {
-                Gizmos.DrawWireSphere(Vector3.zero, 0.5f);
-            }
-        }
-#endif
     }
 }
