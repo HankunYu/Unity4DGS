@@ -572,6 +572,14 @@ namespace GaussianSplatting.Runtime
             return true;
         }
 
+        // Gather sorts front to back, the order the offscreen under-blend
+        // composites in; the direct over-blend needs the reverse, so a nearer
+        // object (and a higher render order) lands on top in both
+        private (GaussianSplatRenderer, MaterialPropertyBlock) ActiveSplatInDrawOrder(int i)
+        {
+            return _activeSplats[DirectToTarget ? _activeSplats.Count - 1 - i : i];
+        }
+
         public static int MaxTilePairsCapacity => GlobalOrderGroupCache.MaxTilePairs;
 
         // Latest tile pair count from async readback (for diagnostics / Inspector).
@@ -611,8 +619,9 @@ namespace GaussianSplatting.Runtime
             _preparedItems.Clear();
             Material matComposite = _matComposite;
 
-            foreach (var kvp in _activeSplats)
+            for (int drawIdx = 0; drawIdx < _activeSplats.Count; drawIdx++)
             {
+                var kvp = ActiveSplatInDrawOrder(drawIdx);
                 var gs = kvp.Item1;
                 var mpb = kvp.Item2;
 
@@ -856,16 +865,16 @@ namespace GaussianSplatting.Runtime
             int groupStart = 0;
             while (groupStart < _activeSplats.Count)
             {
-                int order = _activeSplats[groupStart].Item1.renderOrder;
+                int order = ActiveSplatInDrawOrder(groupStart).Item1.renderOrder;
                 int groupEnd = groupStart + 1;
-                int groupSplatCount = _activeSplats[groupStart].Item1.EffectiveSplatCount;
-                while (groupEnd < _activeSplats.Count && _activeSplats[groupEnd].Item1.renderOrder == order)
+                int groupSplatCount = ActiveSplatInDrawOrder(groupStart).Item1.EffectiveSplatCount;
+                while (groupEnd < _activeSplats.Count && ActiveSplatInDrawOrder(groupEnd).Item1.renderOrder == order)
                 {
-                    groupSplatCount += _activeSplats[groupEnd].Item1.EffectiveSplatCount;
+                    groupSplatCount += ActiveSplatInDrawOrder(groupEnd).Item1.EffectiveSplatCount;
                     ++groupEnd;
                 }
 
-                var reference = _activeSplats[groupStart].Item1;
+                var reference = ActiveSplatInDrawOrder(groupStart).Item1;
                 if (!EnsureGlobalGroupCache(order, groupSplatCount, out var groupCache))
                 {
                     if (!hasRenderedAGroup)
@@ -883,7 +892,7 @@ namespace GaussianSplatting.Runtime
                 bool groupAnimated = false;
                 for (int i = groupStart; i < groupEnd; ++i)
                 {
-                    var gs = _activeSplats[i].Item1;
+                    var gs = ActiveSplatInDrawOrder(i).Item1;
                     groupSignature = groupSignature * 31 + gs.GetInstanceID();
                     groupSignature = groupSignature * 31 + gs.EffectiveSplatCount;
                     // Keys are sorted in world space: any member's data or
@@ -911,7 +920,7 @@ namespace GaussianSplatting.Runtime
                 bool groupValid = true;
                 for (int i = groupStart; i < groupEnd; ++i)
                 {
-                    var gs = _activeSplats[i].Item1;
+                    var gs = ActiveSplatInDrawOrder(i).Item1;
                     matComposite = _matComposite;
                     groupDisplayMat ??= modeDisplayMat;
                     if (modeDisplayMat == null)
@@ -1020,8 +1029,9 @@ namespace GaussianSplatting.Runtime
         Material SortAndRenderSplatsPerObject(Camera cam, CommandBuffer cmb)
         {
             Material matComposite = _matComposite;
-            foreach (var kvp in _activeSplats)
+            for (int drawIdx = 0; drawIdx < _activeSplats.Count; drawIdx++)
             {
+                var kvp = ActiveSplatInDrawOrder(drawIdx);
                 var gs = kvp.Item1;
                 var mpb = kvp.Item2;
 
