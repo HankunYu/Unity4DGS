@@ -14,7 +14,7 @@ namespace GaussianSplatting.Editor
     /// </summary>
     internal static class GaussianSplatExporter
     {
-        const string PrefExportBake = "nesnausk.GaussianSplatting.ExportBakeTransform";
+        const string PrefExportBake = "Unity4DGS.ExportBakeTransform";
 
         /// <summary>
         /// Draws the export section in the Renderer Inspector.
