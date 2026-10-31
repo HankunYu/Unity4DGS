@@ -11,11 +11,14 @@ namespace GaussianSplatting.Runtime
     /// composite mode and under ODS. Out-of-focus splats cost fill rate in
     /// proportion to their blurred area, and a headset viewer focuses with
     /// their own eyes: meant for flat and 360 renders.
+    /// Timelines drive the focus distance, aperture and blur cap as channels.
     /// </summary>
     [RequireComponent(typeof(Camera))]
     [DisallowMultipleComponent]
-    public class GaussianDepthOfField : MonoBehaviour
+    public class GaussianDepthOfField : MonoBehaviour, IGaussianTimelineTarget
     {
+        private static readonly string[] ChannelNames = { "Focus Distance", "Aperture Radius", "Max Blur Radius" };
+
         [Min(0.01f)]
         [Tooltip("Distance in focus, in world units. Ignored while a focus target is set")]
         public float focusDistance = 3f;
@@ -54,5 +57,37 @@ namespace GaussianSplatting.Runtime
         // _DofParams: x lens radius, y reciprocal focus distance, z largest
         // blur radius in pixels
         internal Vector4 ShaderParams => new(apertureRadius, 1f / FocusDistance, maxBlurRadius, 0f);
+
+        int IGaussianTimelineTarget.ChannelCount => ChannelNames.Length;
+
+        string IGaussianTimelineTarget.GetChannelName(int index) => ChannelNames[index];
+
+        float IGaussianTimelineTarget.GetChannelValue(int index)
+        {
+            return index switch
+            {
+                0 => focusDistance,
+                1 => apertureRadius,
+                _ => maxBlurRadius
+            };
+        }
+
+        void IGaussianTimelineTarget.SetChannelValue(int index, float value)
+        {
+            switch (index)
+            {
+                case 0:
+                    focusDistance = Mathf.Max(0.01f, value);
+                    break;
+                case 1:
+                    apertureRadius = Mathf.Max(0f, value);
+                    break;
+                default:
+                    maxBlurRadius = Mathf.Clamp(value, 1f, 64f);
+                    break;
+            }
+        }
+
+        float IGaussianTimelineTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
     }
 }

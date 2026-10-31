@@ -36,16 +36,21 @@ namespace GaussianSplatting.Runtime
             "", "", "", ""
         };
 
-        private float _noisePhase;
+        public override int PhaseCount => 1;
+
+        public override void GetPhaseRates(float[] rates)
+        {
+            rates[0] = noiseSpeed;
+        }
 
         public override void FillParams(float time, out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3)
         {
-            _noisePhase += AdvanceFillTime(time) * noiseSpeed;
+            AdvanceFillTime(time);
             Vector3 dir = direction.normalized;
             // p0: direction xyz, strength
             p0 = new Vector4(dir.x, dir.y, dir.z, strength);
             // p1: noiseScale, noiseSpeed, accumulated noise phase, unused
-            p1 = new Vector4(noiseScale, noiseSpeed, _noisePhase, 0);
+            p1 = new Vector4(noiseScale, noiseSpeed, (float)Phase(0), 0);
             p2 = Vector4.zero;
             p3 = Vector4.zero;
         }

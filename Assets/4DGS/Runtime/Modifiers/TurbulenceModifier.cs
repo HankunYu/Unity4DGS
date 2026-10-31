@@ -41,16 +41,24 @@ namespace GaussianSplatting.Runtime
             "", "", "", ""
         };
 
-        private Vector3 _windOffset;
+        public override int PhaseCount => 3;
+
+        // The noise scrolls by the wind: one phase per axis
+        public override void GetPhaseRates(float[] rates)
+        {
+            rates[0] = windDirection.x;
+            rates[1] = windDirection.y;
+            rates[2] = windDirection.z;
+        }
 
         public override void FillParams(float time, out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3)
         {
-            // Accumulate the scroll offset so runtime wind changes shift the
-            // noise smoothly instead of jumping by time * Δwind.
-            _windOffset += windDirection * AdvanceFillTime(time);
+            // The scroll offset is accumulated (one phase per axis) so runtime
+            // wind changes shift the noise smoothly instead of jumping by time * Δwind
+            AdvanceFillTime(time);
             p0 = new Vector4(strength, frequency, octaves, lacunarity);
             p1 = new Vector4(gain, 0f, 0f, 0f);
-            p2 = new Vector4(_windOffset.x, _windOffset.y, _windOffset.z, 0f);
+            p2 = new Vector4((float)Phase(0), (float)Phase(1), (float)Phase(2), 0f);
             p3 = Vector4.zero;
         }
 

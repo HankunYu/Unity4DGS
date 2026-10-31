@@ -51,13 +51,18 @@ namespace GaussianSplatting.Runtime
             "", "", "", ""
         };
 
-        private float _phase;
+        public override int PhaseCount => 1;
+
+        public override void GetPhaseRates(float[] rates)
+        {
+            rates[0] = speed;
+        }
 
         public override void FillParams(float time, out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3)
         {
-            _phase += AdvanceFillTime(time) * speed;
+            AdvanceFillTime(time);
             p0 = new Vector4(speed, cellSize, lineWidth, intensity);
-            p1 = new Vector4(tint.r, tint.g, tint.b, _phase);
+            p1 = new Vector4(tint.r, tint.g, tint.b, (float)Phase(0));
             p2 = new Vector4((float)pattern, noiseThreshold, 0, 0);
             p3 = Vector4.zero;
         }

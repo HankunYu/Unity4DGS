@@ -28,8 +28,9 @@
 - **GaussianMorph** — 两个泼溅资产之间的 GPU 变形过渡
 - **GaussianCutout** — box / 椭球裁剪区域
 - **GaussianStylizeVolume** — 风格化后处理(立体感知)
-- **GaussianSplatStyle + GaussianStyleVolume** — 逐 splat 风格化(颜色渐变、轮廓光、圆点、拉线、切片与网格、闪烁),按权重混入;风格体积把风格限制在某个区域内,比如相机周围
+- **GaussianSplatStyle + GaussianStyleVolume** — 逐 splat 风格化(颜色渐变、轮廓光、圆点、拉线、切片与网格、闪烁),按权重混入;风格体积把风格限制在某个区域内,比如相机周围;时间轴的风格轨道用来切换和淡入淡出风格
 - **GaussianDepthOfField** — 挂在相机上的薄透镜景深,逐 splat 计算:不需要深度缓冲,Direct 模式和 360(ODS)录制都能用
+- **GaussianTimeline + GaussianTimelinePlayer** — 自带的时间轴(不依赖 Unity Timeline 包):片段带淡入淡出和交叉淡化,轨道有通道(修改器、体积、景深参数)、风格、修改器状态、变换、激活、4D 序列、音频、标记和嵌套子时间轴。每一帧只由时间决定(修改器相位也是),所以跳转和拖动与播放一致;时钟可以跟随 AudioSource。在 *Window > Gaussian Splatting > Timeline* 里编辑,不进 Play 模式就能在场景里预览
 
 ![Unity4DGS 演示](Docs/media/demo.gif)
 

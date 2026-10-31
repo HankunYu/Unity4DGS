@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+using System.Collections.Generic;
 using Unity.Collections;
 using UnityEngine;
 
@@ -8,9 +9,11 @@ namespace GaussianSplatting.Runtime
     /// <summary>
     /// Base class for all Gaussian Splat animation modifiers.
     /// Each modifier defines a type ID and packs its parameters into 4 Vector4s
-    /// for upload to the GPU animation compute shader.
+    /// for upload to the GPU animation compute shader. Timelines drive the
+    /// labelled parameter slots (see <see cref="GetParamLabels"/>) and Enabled
+    /// as channels.
     /// </summary>
-    public abstract class GaussianAnimModifier : MonoBehaviour
+    public abstract class GaussianAnimModifier : MonoBehaviour, IGaussianTimelineTarget
     {
         public const int TypeDissolve = 0;
         public const int TypeWave = 1;
@@ -26,21 +29,75 @@ namespace GaussianSplatting.Runtime
         public const int ParamSlotCount = 16;
 
         private float _lastFillTime = -1f;
+        // Accumulated phases (see PhaseCount), in double so hours of running keep their precision
+        private double[] _phases;
+        private float[] _phaseRates;
+        private IGaussianPhaseSource _phaseSource;
+        // Timeline channels: the labelled param slots, then Enabled
+        private int[] _channelSlots;
+        private string[] _channelLabels;
+        private readonly Vector4[] _channelParams = new Vector4[4];
 
         public abstract int ModifierType { get; }
 
         /// <summary>
-        /// Time delta since the previous FillParams call, for phase accumulation.
-        /// Time-driven modifiers must accumulate phase (phase += speed * dt)
-        /// instead of packing absolute time and multiplying by speed on the GPU:
-        /// with time * speed, any runtime speed change (state machine lerp,
-        /// inspector edit) shifts the phase by time * Δspeed and the animation
+        /// How many phases this modifier accumulates. Time-driven modifiers
+        /// must accumulate phase (phase += speed * dt) instead of packing
+        /// absolute time and multiplying by speed on the GPU: with time * speed,
+        /// any runtime speed change (state machine lerp, inspector edit, a
+        /// timeline) shifts the phase by time * Δspeed and the animation
         /// visibly jumps — worse the longer the app has been running.
+        /// </summary>
+        public virtual int PhaseCount => 0;
+
+        /// <summary>
+        /// Per-second growth of each phase, from the current field values.
+        /// <paramref name="rates"/> holds <see cref="PhaseCount"/> entries.
+        /// </summary>
+        public virtual void GetPhaseRates(float[] rates)
+        {
+        }
+
+        /// <summary>
+        /// Hands the phases to <paramref name="source"/> (a timeline playing
+        /// this modifier, which knows the phase at any of its times), or back
+        /// to accumulation with null.
+        /// </summary>
+        public void SetPhaseSource(IGaussianPhaseSource source)
+        {
+            _phaseSource = source;
+        }
+
+        public IGaussianPhaseSource PhaseSource => _phaseSource;
+
+        /// <summary>The accumulated phase, as of the last <see cref="AdvanceFillTime"/>.</summary>
+        protected double Phase(int index)
+        {
+            return _phases != null ? _phases[index] : 0.0;
+        }
+
+        /// <summary>
+        /// Moves the phases on to <paramref name="time"/> and returns the time
+        /// since the previous FillParams call. Call first thing in FillParams.
         /// </summary>
         protected float AdvanceFillTime(float time)
         {
             float dt = _lastFillTime >= 0f ? Mathf.Max(0f, time - _lastFillTime) : 0f;
             _lastFillTime = time;
+
+            int count = PhaseCount;
+            if (count == 0)
+                return dt;
+            if (_phases == null || _phases.Length != count)
+            {
+                _phases = new double[count];
+                _phaseRates = new float[count];
+            }
+            if (_phaseSource != null && _phaseSource.TryGetPhases(this, _phases))
+                return dt;
+            GetPhaseRates(_phaseRates);
+            for (int i = 0; i < count; i++)
+                _phases[i] += _phaseRates[i] * (double)dt;
             return dt;
         }
 
@@ -104,6 +161,68 @@ namespace GaussianSplatting.Runtime
         public virtual Vector4 LerpParams(int paramIndex, Vector4 from, Vector4 to, float t)
         {
             return Vector4.Lerp(from, to, t);
+        }
+
+        // ------------------------------------------------------------------ timeline channels
+
+        int IGaussianTimelineTarget.ChannelCount => ChannelSlots.Length + 1;
+
+        string IGaussianTimelineTarget.GetChannelName(int index)
+        {
+            return index < ChannelSlots.Length ? _channelLabels[ChannelSlots[index]] : "Enabled";
+        }
+
+        float IGaussianTimelineTarget.GetChannelValue(int index)
+        {
+            if (index >= ChannelSlots.Length)
+                return enabled ? 1f : 0f;
+            int slot = ChannelSlots[index];
+            CaptureParams(out _channelParams[0], out _channelParams[1], out _channelParams[2], out _channelParams[3]);
+            return _channelParams[slot / 4][slot % 4];
+        }
+
+        void IGaussianTimelineTarget.SetChannelValue(int index, float value)
+        {
+            if (index >= ChannelSlots.Length)
+            {
+                enabled = value >= 0.5f;
+                return;
+            }
+            int slot = ChannelSlots[index];
+            CaptureParams(out _channelParams[0], out _channelParams[1], out _channelParams[2], out _channelParams[3]);
+            _channelParams[slot / 4][slot % 4] = value;
+            ApplyParams(_channelParams[0], _channelParams[1], _channelParams[2], _channelParams[3]);
+        }
+
+        float IGaussianTimelineTarget.BlendChannel(int index, float from, float to, float t)
+        {
+            if (index >= ChannelSlots.Length)
+                return t < 0.5f ? from : to;
+            // LerpParams knows which slots are discrete
+            int slot = ChannelSlots[index];
+            Vector4 a = default;
+            Vector4 b = default;
+            a[slot % 4] = from;
+            b[slot % 4] = to;
+            return LerpParams(slot / 4, a, b, t)[slot % 4];
+        }
+
+        private int[] ChannelSlots
+        {
+            get
+            {
+                if (_channelSlots != null)
+                    return _channelSlots;
+                _channelLabels = GetParamLabels();
+                var slots = new List<int>();
+                for (int i = 0; i < _channelLabels.Length && i < ParamSlotCount; i++)
+                {
+                    if (!string.IsNullOrEmpty(_channelLabels[i]))
+                        slots.Add(i);
+                }
+                _channelSlots = slots.ToArray();
+                return _channelSlots;
+            }
         }
     }
 }

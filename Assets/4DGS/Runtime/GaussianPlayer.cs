@@ -137,7 +137,7 @@ namespace GaussianSplatting.Runtime
             ShowFrame(frame);
         }
 
-        private void ShowFrame(int frame)
+        internal void ShowFrame(int frame)
         {
             currentFrame = frame;
             if (_gsRender != null && sequence != null && frame < sequence.FrameCount)

@@ -9,14 +9,33 @@ namespace GaussianSplatting.Runtime
     /// are affected by animation modifiers. Place this under a
     /// GaussianAnimator, adjust the transform to position/scale the volume,
     /// and add modifier components as siblings.
+    /// Timelines drive Falloff and Trail Duration as channels.
     /// </summary>
-    public class GaussianAnimVolume : GaussianVolume
+    public class GaussianAnimVolume : GaussianVolume, IGaussianTimelineTarget
     {
+        private static readonly string[] ChannelNames = { "Falloff", "Trail Duration" };
+
         [Range(0f, 5f)]
         [Tooltip("How long the effect lingers after the volume moves away (seconds). 0 = instant off.")]
         public float trailDuration = 0f;
 
         protected override Color GizmoColor => Color.cyan;
+
+        int IGaussianTimelineTarget.ChannelCount => ChannelNames.Length;
+
+        string IGaussianTimelineTarget.GetChannelName(int index) => ChannelNames[index];
+
+        float IGaussianTimelineTarget.GetChannelValue(int index) => index == 0 ? falloff : trailDuration;
+
+        void IGaussianTimelineTarget.SetChannelValue(int index, float value)
+        {
+            if (index == 0)
+                falloff = Mathf.Max(0f, value);
+            else
+                trailDuration = Mathf.Max(0f, value);
+        }
+
+        float IGaussianTimelineTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
 
         /// <summary>
         /// GPU-uploadable data matching AnimVolumeData in the compute shader.

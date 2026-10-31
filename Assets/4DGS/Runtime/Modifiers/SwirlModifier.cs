@@ -43,15 +43,20 @@ namespace GaussianSplatting.Runtime
             "", "", "", ""
         };
 
-        private float _phase;
+        public override int PhaseCount => 1;
+
+        public override void GetPhaseRates(float[] rates)
+        {
+            rates[0] = speed;
+        }
 
         public override void FillParams(float time, out Vector4 p0, out Vector4 p1, out Vector4 p2, out Vector4 p3)
         {
-            _phase += AdvanceFillTime(time) * speed;
+            AdvanceFillTime(time);
             Vector3 ax = axis.normalized;
             p0 = new Vector4(ax.x, ax.y, ax.z, strength);
             p1 = new Vector4(center.x, center.y, center.z, radius);
-            p2 = new Vector4(speed, softness, _phase, 0);
+            p2 = new Vector4(speed, softness, (float)Phase(0), 0);
             p3 = Vector4.zero;
         }
 

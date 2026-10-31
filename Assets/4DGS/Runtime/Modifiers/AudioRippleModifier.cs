@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+using System;
 using Unity.Collections;
 using UnityEngine;
 
@@ -89,8 +90,6 @@ namespace GaussianSplatting.Runtime
         private float _sampleAccum;
         private float _smoothedLow;
         private float _smoothedHigh;
-        private float _phaseLow;
-        private float _phaseHigh;
 #if UNITY_EDITOR
         private float _previewTime;
 #endif
@@ -111,10 +110,10 @@ namespace GaussianSplatting.Runtime
             UpdateAudio(dt);
 
             // Carrier phases accumulate on the CPU so runtime speed/frequency
-            // edits never jump the ring positions (see AdvanceFillTime docs).
-            const float tau = 2f * Mathf.PI;
-            _phaseLow = Mathf.Repeat(_phaseLow + dt * waveSpeed * ringFrequency * tau, tau);
-            _phaseHigh = Mathf.Repeat(_phaseHigh + dt * waveSpeed * ringFrequency * TrebleRingScale * tau, tau);
+            // edits never jump the ring positions (see PhaseCount docs)
+            const double tau = 2.0 * Math.PI;
+            float phaseLow = (float)(Phase(0) % tau);
+            float phaseHigh = (float)(Phase(1) % tau);
 
             Vector3 c = (center != null ? center : transform).position;
             Vector3 ax = axis.sqrMagnitude > 1e-6f ? axis.normalized : Vector3.up;
@@ -128,7 +127,17 @@ namespace GaussianSplatting.Runtime
             // p2: displacement axis, color blend
             p2 = new Vector4(ax.x, ax.y, ax.z, colorBlend);
             // p3: mode, distance falloff, accumulated carrier phases
-            p3 = new Vector4((float)mode, distanceFalloff, _phaseLow, _phaseHigh);
+            p3 = new Vector4((float)mode, distanceFalloff, phaseLow, phaseHigh);
+        }
+
+        public override int PhaseCount => 2;
+
+        // Bass and treble ring carriers, in radians
+        public override void GetPhaseRates(float[] rates)
+        {
+            const float tau = 2f * Mathf.PI;
+            rates[0] = waveSpeed * ringFrequency * tau;
+            rates[1] = waveSpeed * ringFrequency * TrebleRingScale * tau;
         }
 
         public override int ExtraDataCount => 6 + HistoryLength * 2;

@@ -14,7 +14,7 @@ using UnityEngine.XR;
 namespace GaussianSplatting.Runtime
 {
     [ExecuteInEditMode]
-    public class GaussianSplatRenderer : MonoBehaviour
+    public class GaussianSplatRenderer : MonoBehaviour, IGaussianTimelineTarget
     {
         [FormerlySerializedAs("m_Asset")]
         public GaussianSplatAsset splatAsset;
@@ -62,6 +62,25 @@ namespace GaussianSplatting.Runtime
         public GaussianSplatStyle style;
         [Range(0.0f, 1.0f)] [Tooltip("How far the style replaces the plain splat look; animate it for transitions")]
         public float styleWeight = 1.0f;
+
+        // Timeline channels; the style itself is a GaussianStyleTrack's
+        private static readonly string[] TimelineChannels = { "Splat Scale", "Opacity Scale" };
+
+        int IGaussianTimelineTarget.ChannelCount => TimelineChannels.Length;
+
+        string IGaussianTimelineTarget.GetChannelName(int index) => TimelineChannels[index];
+
+        float IGaussianTimelineTarget.GetChannelValue(int index) => index == 0 ? splatScale : opacityScale;
+
+        void IGaussianTimelineTarget.SetChannelValue(int index, float value)
+        {
+            if (index == 0)
+                splatScale = Mathf.Max(0f, value);
+            else
+                opacityScale = Mathf.Max(0f, value);
+        }
+
+        float IGaussianTimelineTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
 
         private readonly List<GaussianStyleVolume> _styleVolumes = new();
         private readonly Matrix4x4[] _styleVolumeMatrices = new Matrix4x4[GaussianStyleVolume.MaxPerRenderer];
