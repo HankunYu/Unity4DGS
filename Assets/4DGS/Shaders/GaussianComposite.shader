@@ -3,10 +3,11 @@ Shader "Hidden/Gaussian Splatting/Composite"
 {
     // Material-driven blend so the AOV variant can write raw values straight
     // through without a second pass — every DrawProcedural site for this
-    // material hardcodes pass index 0. Defaults are the beauty alpha blend.
+    // material hardcodes pass index 0. Defaults are the beauty premultiplied
+    // blend.
     Properties
     {
-        [HideInInspector] _SrcBlend ("", Float) = 5    // SrcAlpha
+        [HideInInspector] _SrcBlend ("", Float) = 1    // One
         [HideInInspector] _DstBlend ("", Float) = 10   // OneMinusSrcAlpha
     }
 
@@ -90,8 +91,9 @@ half4 frag (v2f i) : SV_Target
         col.rgb = col.r > 0 ? _AovDepthScale / col.r : 0.0;
         return col;
     #else
-        col.rgb = GammaToLinearSpace(col.rgb);
-        col.a = saturate(col.a * 1.5);
+        // The RT holds premultiplied linear color, blended over the scene by
+        // the One/OneMinusSrcAlpha material blend: the same result the direct
+        // path gets by drawing into the target itself.
         return col;
     #endif
 }

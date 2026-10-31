@@ -5,8 +5,9 @@ Shader "Gaussian Splatting/Render Splats"
     {
         Tags { "RenderType"="Transparent" "Queue"="Transparent" }
 
-        // Pass 0: offscreen. Front-to-back under-blend into the splat RT; the
-        // composite pass converts to linear and blends over the scene.
+        // Pass 0: offscreen. Front-to-back under-blend into the splat RT, in
+        // linear space like the direct pass; the composite blends the
+        // premultiplied result over the scene.
         Pass
         {
             ZWrite Off
@@ -37,8 +38,7 @@ ENDCG
 
         // Pass 1: direct. Back-to-front premultiplied over-blend straight into
         // the camera target, depth-tested against the scene. No intermediate
-        // RT and no composite pass; blending happens in the target's linear
-        // space instead of gamma space.
+        // RT and no composite pass.
         Pass
         {
             ZWrite Off
@@ -59,9 +59,6 @@ CGPROGRAM
 // Enable foveated rendering (VRR) support on visionOS Metal.
 #include_with_pragmas "Packages/com.unity.render-pipelines.core/ShaderLibrary/FoveatedRenderingKeywords.hlsl"
 
-// Blending happens in the target's space: the vertex stage converts the
-// splat color to linear once instead of every fragment.
-#define SPLAT_OUTPUT_LINEAR
 #include "RenderGaussianSplatsPass.hlsl"
 
 half4 frag (v2f i) : SV_Target

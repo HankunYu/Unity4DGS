@@ -201,7 +201,7 @@ namespace GaussianSplatting.Runtime
             }
             if (_matComposite != null)
             {
-                _matComposite.SetFloat(PropSrcBlend, (float)(aov ? BlendMode.One : BlendMode.SrcAlpha));
+                _matComposite.SetFloat(PropSrcBlend, (float)BlendMode.One);
                 _matComposite.SetFloat(PropDstBlend, (float)(aov ? BlendMode.Zero : BlendMode.OneMinusSrcAlpha));
                 _matComposite.SetFloat(PropAovDepthScale,
                     _config != null ? Mathf.Max(_config.pointCloudAovDepthScale, 1e-4f) : 1.0f);

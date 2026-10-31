@@ -75,9 +75,6 @@ CGPROGRAM
 // Enable foveated rendering (VRR) support on visionOS Metal.
 #include_with_pragmas "Packages/com.unity.render-pipelines.core/ShaderLibrary/FoveatedRenderingKeywords.hlsl"
 
-// Blending happens in the target's space: the vertex stage converts the
-// point color to linear once instead of every fragment.
-#define SPLAT_OUTPUT_LINEAR
 #include "RenderGaussianPointCloudPass.hlsl"
 
 half4 frag (v2f i) : SV_Target

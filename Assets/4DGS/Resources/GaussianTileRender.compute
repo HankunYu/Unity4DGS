@@ -305,7 +305,12 @@ void CSRenderTiles(uint3 groupId : SV_GroupID, uint3 threadId : SV_GroupThreadID
                 float alpha   = min(0.99, opacity * exp(power));
                 float contrib = alpha * (1.0 - accum.a);
 
-                accum.rgb += contrib * float3(r, g, b);
+                // Blend in linear space, like the raster passes
+                float3 rgb = float3(r, g, b);
+                #if !defined(UNITY_COLORSPACE_GAMMA)
+                rgb = rgb * (rgb * (rgb * 0.305306011 + 0.682171111) + 0.012522878);
+                #endif
+                accum.rgb += contrib * rgb;
                 accum.a   += contrib;
 
                 if (accum.a >= 0.99)
