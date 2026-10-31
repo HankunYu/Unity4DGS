@@ -10,5 +10,10 @@ namespace GaussianSplatting.Runtime
         // Away from the camera along the view ray: on screen the streaks
         // radiate from the centre of view.
         ViewRay,
+        // Behind the splat along its motion, as long as the path it covers
+        // in the streak time: fast splats draw long lines. Needs a velocity
+        // source on the renderer (GaussianParticleEmitter); without one, or
+        // for still splats, the streaks shrink to dots.
+        Velocity,
     }
 }

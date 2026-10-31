@@ -5,18 +5,19 @@ using UnityEngine.Rendering;
 
 namespace GaussianSplatting.Runtime
 {
-    // Particles drifting off another splat renderer: each one is born at a
-    // random splat of the source, as it is drawn right now, with its color
-    // and the velocity of that spot of the surface plus a push along its
-    // normal, so a moving body throws particles off. It is then simulated
-    // step by step, its velocity settling into a flow of wind plus curl
-    // noise; it fades, flickers and shrinks, and is born again elsewhere.
-    // The particles are this GameObject's own splats: the emitter
+    // Particles drifting off another splat renderer, the source. Each
+    // particle is born at a random splat of the source, as it is drawn right
+    // now, with the color it is drawn in (style included) and the velocity of
+    // that spot of the surface plus a push along its normal, so a moving body
+    // throws particles off. It is then simulated step by step, its velocity
+    // settling into a flow of wind plus curl noise; its color and opacity
+    // follow a curve over the life, it shrinks, and it is born again
+    // elsewhere. The particles are this GameObject's own splats: the emitter
     // gives its GaussianSplatRenderer a generated asset of `capacity` splats
-    // and drives their pose, size, opacity and color on the GPU each frame,
-    // so sorting, styles (the source's styler, or one of its own), ODS
-    // capture and depth of field treat them like any other splats, and the
-    // source is untouched.
+    // and drives their pose, size, opacity, color and velocity on the GPU
+    // each frame, so sorting, styles (from a GaussianStyler of its own, e.g.
+    // with Velocity streaks, or the source's), ODS capture and depth of field
+    // treat them like any other splats, and the source is untouched.
     //
     // Runs after the source's mesh driver and animator in LateUpdate, and on
     // every render in edit mode.
@@ -41,9 +42,13 @@ namespace GaussianSplatting.Runtime
         private static readonly int PropParticleObjectScale = Shader.PropertyToID("_ParticleObjectScale");
         private static readonly int PropSourceObjectToWorld = Shader.PropertyToID("_SourceObjectToWorld");
         private static readonly int PropSourcePrev = Shader.PropertyToID("_SourcePrev");
+        private static readonly int PropMatrixWorldToObject = Shader.PropertyToID("_MatrixWorldToObject");
+        private static readonly int PropCameraPos = Shader.PropertyToID("_VecWorldSpaceCameraPos");
         private static readonly int PropParticleState = Shader.PropertyToID("_ParticleState");
         private static readonly int PropParticleBase = Shader.PropertyToID("_ParticleBase");
         private static readonly int PropParticleAnim = Shader.PropertyToID("_ParticleAnim");
+        private static readonly int PropParticleVelocity = Shader.PropertyToID("_ParticleVelocity");
+        private static readonly int PropParticleColorOverLife = Shader.PropertyToID("_ParticleColorOverLife");
 
         private const int GroupSize = 256;
         // Splat scale of the template's splats; the particle size scales it
@@ -55,59 +60,75 @@ namespace GaussianSplatting.Runtime
         // renders around one update) must not fling particles away
         private const float MinVelocityStep = 1f / 240f;
         private const float MaxInheritedSpeed = 3f;
+        // Must match COLOR_OVER_LIFE_SAMPLES in GaussianParticles.compute
+        private const int ColorOverLifeSamples = 32;
 
         private static readonly string[] TimelineChannels = { "Emission", "Opacity", "Turbulence" };
 
         [Tooltip("Renderer the particles are born on")]
         [SerializeField] private GaussianSplatRenderer source;
         [Tooltip("Number of particles, alive or between lives")]
-        [SerializeField, Min(1)] private int capacity = 8000;
+        [SerializeField, Min(1)] private int capacity = 100000;
         [Tooltip("Varies which splats the particles are born on")]
         [SerializeField] private int seed;
         [Tooltip("Style the particles with the source's GaussianStyler and its volumes, instead of this object's own")]
-        [SerializeField] private bool followSourceStyle = true;
+        [SerializeField] private bool followSourceStyle;
 
         [Header("Life")]
         [Tooltip("Seconds a particle lives, varied by +-25% per particle")]
         [SerializeField, Min(0.05f)] private float lifetime = 2.5f;
         [Tooltip("Fraction of lives that show; animate it to start and stop the effect")]
         [SerializeField, Range(0f, 1f)] private float emission = 1f;
-        [Tooltip("Fraction of a life spent fading in")]
-        [SerializeField, Range(0f, 1f)] private float fadeIn = 0.1f;
-        [Tooltip("Fraction of a life spent fading out")]
-        [SerializeField, Range(0f, 1f)] private float fadeOut = 0.5f;
 
         [Header("Birth")]
         [Tooltip("Fraction of the velocity of the source surface a particle starts with: a moving body throws particles off and trails them")]
         [SerializeField, Range(0f, 2f)] private float inheritVelocity = 1f;
         [Tooltip("World units per second a particle is pushed off along the surface normal (the splat's local +Z, which mesh splats align with the surface)")]
-        [SerializeField, Min(0f)] private float normalSpeed = 0.05f;
+        [SerializeField, Min(0f)] private float normalSpeed = 0.1f;
 
         [Header("Flow")]
         [Tooltip("World units per second the flow carries particles along: up for rising embers, zero to hover")]
-        [SerializeField] private Vector3 wind = new(0f, 0.08f, 0f);
+        [SerializeField] private Vector3 wind = new(0f, 0.1f, 0f);
         [Tooltip("How fast (per second) a particle's velocity settles into the flow: low keeps thrown particles flying, high makes them follow the streams closely")]
-        [SerializeField, Min(0f)] private float drag = 1.5f;
+        [SerializeField, Min(0f)] private float drag = 1f;
         [Tooltip("Speed of the curl noise swirls, in world units per second")]
-        [SerializeField, Min(0f)] private float turbulence = 0.15f;
+        [SerializeField, Min(0f)] private float turbulence = 1f;
         [Tooltip("Spatial frequency of the swirls: higher gives smaller, tighter streams")]
-        [SerializeField, Min(0f)] private float turbulenceFrequency = 2f;
+        [SerializeField, Min(0f)] private float turbulenceFrequency = 1.5f;
         [Tooltip("How fast the swirl pattern drifts and changes")]
         [SerializeField, Min(0f)] private float turbulenceSpeed = 0.3f;
 
         [Header("Look")]
         [Tooltip("Average size of a new particle, as a splat scale (Gaussian sigma) in world units")]
-        [SerializeField, Min(0f)] private float size = 0.0025f;
+        [SerializeField, Min(0f)] private float size = 0.0015f;
         [Tooltip("0 makes every particle the same size; 1 makes most small and a few up to three times the average")]
         [SerializeField, Range(0f, 1f)] private float sizeVariation = 0.7f;
         [Tooltip("Size at the end of a life, as a fraction of the starting size")]
         [SerializeField, Range(0f, 2f)] private float endSize = 0.4f;
         [Tooltip("Multiplies the opacity a particle takes from its source splat")]
         [SerializeField, Range(0f, 4f)] private float opacity = 1f;
-        [Tooltip("Multiplies the color a particle takes from its source splat; above 1 glows with bloom")]
-        [SerializeField, Min(0f)] private float brightness = 1.5f;
-        [Tooltip("How deep each particle's opacity twinkles")]
-        [SerializeField, Range(0f, 1f)] private float flicker = 0.3f;
+        [Tooltip("Color (above 1 glows with bloom) and opacity over a life, from birth on the left to death on the right")]
+        [SerializeField, GradientUsage(true)] private Gradient colorOverLife = new()
+        {
+            colorKeys = new[]
+            {
+                new GradientColorKey(new Color(3f, 2.4f, 1.8f), 0f),
+                new GradientColorKey(new Color(2.2f, 1.1f, 0.5f), 0.12f),
+                new GradientColorKey(new Color(1f, 0.6f, 0.6f), 0.4f),
+                new GradientColorKey(new Color(0.4f, 0.45f, 0.6f), 1f),
+            },
+            alphaKeys = new[]
+            {
+                new GradientAlphaKey(0f, 0f),
+                new GradientAlphaKey(1f, 0.04f),
+                new GradientAlphaKey(1f, 0.5f),
+                new GradientAlphaKey(0f, 1f),
+            },
+        };
+        [Tooltip("How much the color over life is tinted by the color the splat a particle was born on is drawn in, style included: 0 ignores it, 1 multiplies by it")]
+        [SerializeField, Range(0f, 1f)] private float sourceColor = 1f;
+        [Tooltip("Brightens dark source colors while keeping their hue, so particles off a dark surface still show: 0 takes them as drawn, 1 brings every color up to full brightness")]
+        [SerializeField, Range(0f, 1f)] private float sourceLift;
 
         private GaussianSplatRenderer _renderer;
         private ComputeShader _shader;
@@ -121,6 +142,8 @@ namespace GaussianSplatting.Runtime
         private GraphicsBuffer _sourcePrev;
         private GraphicsBuffer _base;
         private GraphicsBuffer _anim;
+        private GraphicsBuffer _velocity;
+        private readonly Vector4[] _colorOverLifeSamples = new Vector4[ColorOverLifeSamples];
 
         private double _time;
         private double _lastEditTime = -1.0;
@@ -204,10 +227,25 @@ namespace GaussianSplatting.Runtime
             // Births measure the source's velocity against its pose at the
             // previous step
             float velocityScale = inheritVelocity / Mathf.Max(deltaTime, MinVelocityStep);
+            for (int i = 0; i < ColorOverLifeSamples; i++)
+            {
+                Color c = colorOverLife.Evaluate(i / (ColorOverLifeSamples - 1f));
+                _colorOverLifeSamples[i] = new Vector4(c.r, c.g, c.b, c.a);
+            }
+
+            // The source's view-dependent style terms (rim, depth ramp) are
+            // judged from the main camera
+            Camera cam = Camera.main;
+            Vector3 cameraPos = cam != null ? cam.transform.position : source.transform.position;
 
             _cmd.Clear();
+            // A hidden source is not drawn, so nothing else refreshes its style
+            source.RefreshStyle();
             source.SetAssetDataOnCS(_cmd, _shader, _kernel);
+            source.SetStyleColorOnCS(_cmd, _shader, _kernel);
             _cmd.SetComputeMatrixParam(_shader, PropSourceObjectToWorld, source.transform.localToWorldMatrix);
+            _cmd.SetComputeMatrixParam(_shader, PropMatrixWorldToObject, source.transform.worldToLocalMatrix);
+            _cmd.SetComputeVectorParam(_shader, PropCameraPos, cameraPos);
             _cmd.SetComputeIntParam(_shader, PropParticleCount, capacity);
             _cmd.SetComputeIntParam(_shader, PropParticleSeed, seed);
             _cmd.SetComputeFloatParam(_shader, PropParticleTime, (float)_time);
@@ -217,14 +255,16 @@ namespace GaussianSplatting.Runtime
             _cmd.SetComputeVectorParam(_shader, PropParticleBirth, new Vector4(velocityScale, normalSpeed, MaxInheritedSpeed, 0f));
             _cmd.SetComputeVectorParam(_shader, PropParticleWind, wind);
             _cmd.SetComputeVectorParam(_shader, PropParticleFlow, new Vector4(drag, turbulence, turbulenceFrequency, turbulenceSpeed));
-            _cmd.SetComputeVectorParam(_shader, PropParticleShape, new Vector4(size, endSize, fadeIn, fadeOut));
-            _cmd.SetComputeVectorParam(_shader, PropParticleLook, new Vector4(opacity, brightness, sizeVariation, flicker));
+            _cmd.SetComputeVectorParam(_shader, PropParticleShape, new Vector4(size, endSize, sizeVariation, 0f));
+            _cmd.SetComputeVectorParam(_shader, PropParticleLook, new Vector4(opacity, sourceColor, sourceLift, 0f));
+            _cmd.SetComputeVectorArrayParam(_shader, PropParticleColorOverLife, _colorOverLifeSamples);
             _cmd.SetComputeMatrixParam(_shader, PropParticleWorldToObject, t.worldToLocalMatrix);
             _cmd.SetComputeFloatParam(_shader, PropParticleObjectScale, objectScale);
             _cmd.SetComputeBufferParam(_shader, _kernel, PropSourcePrev, _sourcePrev);
             _cmd.SetComputeBufferParam(_shader, _kernel, PropParticleState, _state);
             _cmd.SetComputeBufferParam(_shader, _kernel, PropParticleBase, _base);
             _cmd.SetComputeBufferParam(_shader, _kernel, PropParticleAnim, _anim);
+            _cmd.SetComputeBufferParam(_shader, _kernel, PropParticleVelocity, _velocity);
             _cmd.DispatchCompute(_shader, _kernel, (capacity + GroupSize - 1) / GroupSize, 1, 1);
 
             source.SetAssetDataOnCS(_cmd, _shader, _kernelStore);
@@ -234,6 +274,8 @@ namespace GaussianSplatting.Runtime
 
             _renderer.SetDeformedBase(_base, null);
             _renderer.SetAnimationOutput(_anim, null);
+            // A bound on the particle speed, for how far velocity streaks reach
+            _renderer.SetVelocity(_velocity, MaxInheritedSpeed + normalSpeed + wind.magnitude + turbulence * 2f);
         }
 
         private bool CanEmit()
@@ -250,6 +292,7 @@ namespace GaussianSplatting.Runtime
             _renderer.StylerOverride = null;
             _renderer.ClearDeformedBase();
             _renderer.ClearAnimationOutput();
+            _renderer.ClearVelocity();
         }
 
         private void EnsureResources()
@@ -286,6 +329,7 @@ namespace GaussianSplatting.Runtime
             _state.SetData(unborn);
             _base = new GraphicsBuffer(GraphicsBuffer.Target.Structured, capacity * 2, 16) { name = "GaussianParticleBase" };
             _anim = new GraphicsBuffer(GraphicsBuffer.Target.Structured, capacity * 3, 16) { name = "GaussianParticleAnim" };
+            _velocity = new GraphicsBuffer(GraphicsBuffer.Target.Structured, capacity, 16) { name = "GaussianParticleVelocity" };
         }
 
         private void ReleaseResources()
@@ -299,6 +343,8 @@ namespace GaussianSplatting.Runtime
             _base = null;
             _anim?.Dispose();
             _anim = null;
+            _velocity?.Dispose();
+            _velocity = null;
             if (_renderer != null && _renderer.splatAsset == _template)
             {
                 _renderer.splatAsset = null;

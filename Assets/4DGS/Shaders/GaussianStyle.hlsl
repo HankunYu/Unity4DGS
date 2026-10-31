@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Style color (GaussianSplatStyle): which style a splat wears and how
 // strongly (the strongest of its renderer's GaussianStyleVolumes, scaled by
-// the GaussianStyler's weight), and the color that style gives it, for the
-// view data pass (SplatUtilities.compute) and any other compute shader that
-// colors splats the way they are drawn.
+// the GaussianStyler's weight), and the color that style gives it. Shared by
+// the view data pass (SplatUtilities.compute) and GaussianParticleEmitter,
+// which colors each particle the way its source splat is drawn.
 // GaussianStyleSet binds the parameters, one slot per distinct style.
 // View-dependent terms use the camera centre, so both eyes of a stereo pair
 // agree, like the SH evaluation.

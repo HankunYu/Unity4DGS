@@ -21,7 +21,7 @@ namespace GaussianSplatting.Runtime
         [FormerlySerializedAs("m_NextAsset")]
         public GaussianSplatAsset nextAsset;
 
-        [Tooltip("Draw the splats. Off, everything else keeps running (mesh driver, animation), so the renderer can still feed a particle emitter that shows it only through its particles")]
+        [Tooltip("Draw the splats. Off, everything else keeps running (mesh driver, animation, style), so the renderer can still feed a particle emitter that shows it only through its particles")]
         public bool visible = true;
         [Tooltip("Rendering order compared to other splats. Within same order splats are sorted by distance. Higher order splats render 'on top of' lower order splats.")]
         [FormerlySerializedAs("m_RenderOrder")]
@@ -160,6 +160,8 @@ namespace GaussianSplatting.Runtime
         // position and rotation (2 float4s per splat), and its chunk bounds
         private GraphicsBuffer _deformedBase;
         private GraphicsBuffer _deformedChunkBounds;
+        private GraphicsBuffer _velocity;
+        private float _velocityMaxSpeed;
         // Set by GaussianMorph: pre-blended splat data (4 float4s per splat)
         private GraphicsBuffer _morphedDataBuffer;
         private GraphicsBuffer _morphSHBuffer;
@@ -290,6 +292,8 @@ namespace GaussianSplatting.Runtime
             public static readonly int DynamicChunkBoundsValid = Shader.PropertyToID("_DynamicChunkBoundsValid");
             public static readonly int DeformedBase = Shader.PropertyToID("_DeformedBase");
             public static readonly int DeformedBaseValid = Shader.PropertyToID("_DeformedBaseValid");
+            public static readonly int SplatVelocity = Shader.PropertyToID("_SplatVelocity");
+            public static readonly int SplatVelocityValid = Shader.PropertyToID("_SplatVelocityValid");
             public static readonly int MorphedData = Shader.PropertyToID("_MorphedData");
             public static readonly int MorphDataValid = Shader.PropertyToID("_MorphDataValid");
             public static readonly int MorphWeight = Shader.PropertyToID("_MorphWeight");
@@ -398,6 +402,21 @@ namespace GaussianSplatting.Runtime
         {
             _deformedBase = null;
             _deformedChunkBounds = null;
+        }
+
+        // Per-splat world velocity (1 float4 per splat: xyz, 0) for Velocity
+        // streaks, with the fastest speed in it, which bounds how far the
+        // streaks reach for culling
+        internal void SetVelocity(GraphicsBuffer velocity, float maxSpeed)
+        {
+            _velocity = velocity;
+            _velocityMaxSpeed = maxSpeed;
+        }
+
+        internal void ClearVelocity()
+        {
+            _velocity = null;
+            _velocityMaxSpeed = 0f;
         }
 
         internal void SetAnimationOutput(GraphicsBuffer animBuffer, GraphicsBuffer chunkBounds)
@@ -814,6 +833,7 @@ namespace GaussianSplatting.Runtime
             GraphicsBuffer chunkBounds = hasAnim ? _animChunkBounds : hasDeformed ? _deformedChunkBounds : null;
             cmb.SetComputeIntParam(cs, Props.DynamicChunkBoundsValid, chunkBounds != null ? 1 : 0);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.DynamicChunkBounds, chunkBounds ?? _gpuView);
+            SetVelocityOnCS(cmb, cs, kernelIndex);
 
             // Morph data binding
             bool hasMorph = _morphedDataBuffer != null && _morphDataValid != 0;
@@ -822,6 +842,13 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeFloatParam(cs, Props.MorphWeight, hasMorph ? _morphWeight : 0f);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.MorphedData, hasMorph ? _morphedDataBuffer : _gpuView);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.MorphSHData, hasMorphSH ? _morphSHBuffer : _gpuView);
+        }
+
+        private void SetVelocityOnCS(CommandBuffer cmb, ComputeShader cs, int kernelIndex)
+        {
+            bool hasVelocity = _velocity != null;
+            cmb.SetComputeIntParam(cs, Props.SplatVelocityValid, hasVelocity ? 1 : 0);
+            cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatVelocity, hasVelocity ? _velocity : _gpuView);
         }
 
         internal void SetAssetDataOnMaterial(MaterialPropertyBlock mat)
@@ -1087,6 +1114,7 @@ namespace GaussianSplatting.Runtime
                 cmb.SetComputeMatrixParam(cs, Props.MatrixInvVP, vp.inverse);
             }
             cmb.SetComputeBufferParam(cs, kernel, Props.SplatViewData, _gpuView);
+            SetVelocityOnCS(cmb, cs, kernel);
             cs.GetKernelThreadGroupSizes(kernel, out uint group, out _, out _);
             cmb.DispatchCompute(cs, kernel, (EffectiveSplatCount + (int)group - 1) / (int)group, 1, 1);
         }
@@ -1141,7 +1169,7 @@ namespace GaussianSplatting.Runtime
             SetStyleColorOnCS(cmb, cs, kernelIndex);
             // Read whether or not a style is set: the culling margins, and the
             // additivity occlusion culling discounts
-            _styleSet.SetShapeOnCS(cmb, cs, StyleActive, transform.lossyScale);
+            _styleSet.SetShapeOnCS(cmb, cs, StyleActive, _velocity != null ? _velocityMaxSpeed : 0f, transform.lossyScale);
 
             bool baked = QuadsBaked;
             cmb.SetComputeIntParam(cs, Props.BakeQuads, baked ? 1 : 0);
@@ -1165,8 +1193,8 @@ namespace GaussianSplatting.Runtime
 
         // The style color parameters (GaussianStyle.hlsl): for the view data,
         // and for another compute shader that colors splats the way this
-        // renderer draws them. Styles only apply in the render modes that draw
-        // them (StyleActive).
+        // renderer draws them, e.g. GaussianParticleEmitter. Styles only apply
+        // in the render modes that draw them (StyleActive).
         internal void SetStyleColorOnCS(CommandBuffer cmb, ComputeShader cs, int kernelIndex) =>
             _styleSet.SetColorOnCS(cmb, cs, kernelIndex, StyleActive);
 

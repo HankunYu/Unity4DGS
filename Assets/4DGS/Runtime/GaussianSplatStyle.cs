@@ -42,8 +42,10 @@ namespace GaussianSplatting.Runtime
         [SerializeField] private GaussianSplatStyleStreakAxis streakAxis = GaussianSplatStyleStreakAxis.WorldAxis;
         [Tooltip("World direction streaks trail in, for the World Axis streak axis")]
         [SerializeField] private Vector3 streakDirection = Vector3.down;
-        [Tooltip("Streak length in world units")]
+        [Tooltip("Streak length in world units, for the World Axis and View Ray streak axes")]
         [SerializeField, Min(0f)] private float streakLength = 0.3f;
+        [Tooltip("Seconds of motion a streak covers, for the Velocity streak axis")]
+        [SerializeField, Min(0f)] private float streakTime = 0.05f;
         [Tooltip("Streak width in pixels. Below 2 pixels a streak is drawn 2 pixels wide and dimmer, so it does not alias")]
         [SerializeField, Range(0.5f, 8f)] private float streakWidth = 1f;
         [Tooltip("How fast a streak fades from the splat to its tail: higher keeps the light near the splat")]
@@ -93,6 +95,7 @@ namespace GaussianSplatting.Runtime
         public GaussianSplatStyleStreakAxis StreakAxis => streakAxis;
         public Vector3 StreakDirection => streakDirection.sqrMagnitude > 1e-8f ? streakDirection.normalized : Vector3.down;
         public float StreakLength => streakLength;
+        public float StreakTime => streakTime;
         public float StreakWidth => streakWidth;
         public float StreakTailPower => streakTailPower;
         public float MinWorldSize => minWorldSize;
@@ -109,26 +112,27 @@ namespace GaussianSplatting.Runtime
 
         // How far what the style draws can lie from the splat's own position,
         // in world units: the snap distance plus the streak length and the
-        // world size floor's radius
-        public float Reach
+        // world size floor's radius. Velocity streaks are as long as the
+        // fastest splat moves in the streak time.
+        public float Reach(float maxSpeed)
         {
-            get
+            float snap = quantize switch
             {
-                float snap = quantize switch
-                {
-                    GaussianSplatStyleQuantize.Slices => quantizeSpacing * 0.5f,
-                    GaussianSplatStyleQuantize.Grid => quantizeSpacing * 0.5f * Mathf.Sqrt(3f),
-                    _ => 0f,
-                };
-                float extent = shape switch
-                {
-                    GaussianSplatStyleShape.Disc => minWorldSize * 0.5f,
-                    GaussianSplatStyleShape.Streak => streakLength + minWorldSize * 0.5f,
-                    _ => 0f,
-                };
-                return snap + extent;
-            }
+                GaussianSplatStyleQuantize.Slices => quantizeSpacing * 0.5f,
+                GaussianSplatStyleQuantize.Grid => quantizeSpacing * 0.5f * Mathf.Sqrt(3f),
+                _ => 0f,
+            };
+            float extent = shape switch
+            {
+                GaussianSplatStyleShape.Disc => minWorldSize * 0.5f,
+                GaussianSplatStyleShape.Streak => StreakReach(maxSpeed) + minWorldSize * 0.5f,
+                _ => 0f,
+            };
+            return snap + extent;
         }
+
+        private float StreakReach(float maxSpeed) =>
+            streakAxis == GaussianSplatStyleStreakAxis.Velocity ? streakTime * maxSpeed : streakLength;
 
         // The ramp baked into a 1D lookup texture, holding the gradient's
         // values unconverted: splat colors are gamma space at this stage

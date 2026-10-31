@@ -2,13 +2,15 @@
 // Particles drifting off a splat renderer (GaussianParticleEmitter). Each
 // particle runs its own endless cycle of lives. At the start of a life it
 // takes the position and color of a random source splat, as the source is
-// drawn right now (mesh driver, morph and animation included), and the
+// drawn right now (mesh driver, morph, animation and style included), and the
 // velocity of that spot of the surface plus a push along its normal. During
 // the life it is simulated step by step: its velocity relaxes towards a flow
 // of wind plus curl noise, so particles leaving the body are swept along in
-// streams; it fades in and out, flickers and shrinks. The result is written
-// as the particle renderer's base pose and animation output, so sorting,
-// styles, ODS and depth of field treat the particles like any other splats.
+// streams; its color and opacity follow a curve over the life, and it
+// shrinks. The result is written as the particle renderer's base pose,
+// animation output and velocity, so sorting, styles (velocity streaks
+// included), ODS and depth of field treat the particles like any other
+// splats.
 
 #pragma kernel CSUpdateParticles
 #pragma kernel CSStoreSource
@@ -17,6 +19,13 @@
 
 #include "../Shaders/GaussianSplatting.hlsl"
 #include "../Shaders/GaussianNoise.hlsl"
+
+// The source's transform and the camera its style is seen from (rim and
+// depth ramp), for GaussianStyle.hlsl
+float4x4 _MatrixWorldToObject;
+float4 _VecWorldSpaceCameraPos;
+// The source's style, bound by GaussianSplatRenderer.SetStyleColorOnCS
+#include "../Shaders/GaussianStyle.hlsl"
 
 // The source, bound by GaussianSplatRenderer.SetAssetDataOnCS
 uint _SplatCount;
@@ -41,8 +50,12 @@ float _ParticleEmission;    // fraction of lives that show
 float4 _ParticleBirth;      // source velocity scale (inherit / step), push along the normal, max inherited speed, 0
 float3 _ParticleWind;       // world units per second the flow carries particles
 float4 _ParticleFlow;       // drag (1/s), turbulence (world units/s), frequency (1/world), speed
-float4 _ParticleShape;      // size (world sigma), end size factor, fade in, fade out (fractions of a life)
-float4 _ParticleLook;       // opacity, brightness, size variation, flicker
+float4 _ParticleShape;      // size (world sigma), end size factor, size variation, 0
+float4 _ParticleLook;       // opacity, source color weight, source lift, 0
+// Color (gamma, may exceed 1) and opacity over a life, sampled evenly from
+// birth to death
+#define COLOR_OVER_LIFE_SAMPLES 32
+float4 _ParticleColorOverLife[COLOR_OVER_LIFE_SAMPLES];
 float4x4 _ParticleWorldToObject;
 float _ParticleObjectScale; // world size to particle object size
 
@@ -52,6 +65,8 @@ RWStructuredBuffer<float4> _ParticleState;
 RWStructuredBuffer<float4> _ParticleBase;
 // The particle renderer's animation output: offset, opacity; scale, color blend; color
 RWStructuredBuffer<float4> _ParticleAnim;
+// The particle renderer's velocity (world), for velocity streaks
+RWStructuredBuffer<float4> _ParticleVelocity;
 
 uint PcgHash(uint v)
 {
@@ -65,39 +80,40 @@ float Hash01(uint v)
     return PcgHash(v) * (1.0 / 4294967296.0);
 }
 
-// The source splat as the view data pass sees it, in world space; normal is
-// the splat's local +Z, the surface normal for mesh splats
+// The source splat as the view data pass sees it, in world space, its color
+// (gamma) styled as drawn but without view-dependent SH; normal is the
+// splat's local +Z, the surface normal for mesh splats
 void LoadSourceSplat(uint idx, out float3 worldPos, out float3 worldNormal, out float3 color, out float opacity)
 {
     SplatData splat = LoadSplatData(idx, 0);
-    float3 pos = splat.pos;
-    float4 rot = splat.rot;
     color = splat.sh.col;
     opacity = splat.opacity;
     if (_MorphDataValid != 0)
     {
         float4 md0 = _MorphedData[idx * 4];
-        pos = md0.xyz;
-        rot = _MorphedData[idx * 4 + 1];
+        splat.pos = md0.xyz;
+        splat.rot = _MorphedData[idx * 4 + 1];
+        splat.scale = _MorphedData[idx * 4 + 2].xyz;
         opacity = md0.w;
         color = _MorphedData[idx * 4 + 3].rgb;
     }
     else if (_DeformedBaseValid != 0)
     {
-        pos = _DeformedBase[idx * 2].xyz;
-        rot = _DeformedBase[idx * 2 + 1];
+        splat.pos = _DeformedBase[idx * 2].xyz;
+        splat.rot = _DeformedBase[idx * 2 + 1];
     }
     if (_AnimDataValid != 0 && idx < _SrcSplatCount)
     {
         float4 posOpacity = _AnimOutputData[idx * 3];
         float4 scaleBlend = _AnimOutputData[idx * 3 + 1];
         float4 tint = _AnimOutputData[idx * 3 + 2];
-        pos += posOpacity.xyz;
+        splat.pos += posOpacity.xyz;
         opacity *= posOpacity.w;
         color = lerp(color, tint.rgb, scaleBlend.y);
     }
-    worldPos = mul(_SourceObjectToWorld, float4(pos, 1)).xyz;
-    float3 normal = mul((float3x3)_SourceObjectToWorld, QuatRotateVector(float3(0, 0, 1), rot));
+    worldPos = mul(_SourceObjectToWorld, float4(splat.pos, 1)).xyz;
+    color = ApplyStyle((half3)color, StyleAt(worldPos), splat, worldPos, idx);
+    float3 normal = mul((float3x3)_SourceObjectToWorld, QuatRotateVector(float3(0, 0, 1), splat.rot));
     worldNormal = dot(normal, normal) > 1e-12 ? normalize(normal) : float3(0, 1, 0);
 }
 
@@ -114,6 +130,24 @@ float3 LoadSourcePos(uint idx)
     if (_AnimDataValid != 0 && idx < _SrcSplatCount)
         pos += _AnimOutputData[idx * 3].xyz;
     return mul(_SourceObjectToWorld, float4(pos, 1)).xyz;
+}
+
+// Raises a color's brightest channel towards 1 by the lift, scaling all
+// channels alike so hue and saturation stay; near black the gain is capped,
+// since hue there is mostly noise
+float3 LiftColor(float3 color, float lift)
+{
+    static const float MaxGain = 16.0;
+    float value = max(max(color.r, color.g), color.b);
+    float target = lerp(value, max(value, 1.0), lift);
+    return color * min(target / max(value, 1e-4), MaxGain);
+}
+
+float4 ColorOverLife(float age)
+{
+    float x = saturate(age) * (COLOR_OVER_LIFE_SAMPLES - 1);
+    uint i = min((uint)x, COLOR_OVER_LIFE_SAMPLES - 2);
+    return lerp(_ParticleColorOverLife[i], _ParticleColorOverLife[i + 1], x - i);
 }
 
 // Divergence-free flow (Bridson 2007): the curl of three noise potentials,
@@ -191,22 +225,21 @@ void CSUpdateParticles(uint3 id : SV_DispatchThreadID)
     _ParticleState[i * 3] = position;
     _ParticleState[i * 3 + 1] = velocity;
 
-    float fadeIn = _ParticleShape.z > 0 ? smoothstep(0.0, _ParticleShape.z, age) : 1.0;
-    float fadeOut = _ParticleShape.w > 0 ? 1.0 - smoothstep(1.0 - _ParticleShape.w, 1.0, age) : 1.0;
-    float flickerRate = lerp(6.0, 20.0, Hash01(lifeKey + 4u));
-    float flicker = 1.0 - _ParticleLook.w * (0.5 + 0.5 * sin(_ParticleTime * flickerRate + Hash01(lifeKey + 5u) * 6.2831853));
+    float4 overLife = ColorOverLife(age);
+    float3 color = overLife.rgb * lerp(1.0, LiftColor(birthColor.rgb, _ParticleLook.z), _ParticleLook.y);
     bool shown = _SplatCount > 0 && Hash01(lifeKey + 6u) < _ParticleEmission;
-    float opacity = shown ? saturate(birthColor.a) * _ParticleLook.x * fadeIn * fadeOut * flicker : 0.0;
+    float opacity = shown ? saturate(birthColor.a) * _ParticleLook.x * overLife.a : 0.0;
 
     // Mostly small particles and a few large ones, averaging the set size
-    float sizeFactor = lerp(1.0, 0.5 + 2.5 * pow(Hash01(lifeKey + 7u), 4.0), _ParticleLook.z);
+    float sizeFactor = lerp(1.0, 0.5 + 2.5 * pow(Hash01(lifeKey + 7u), 4.0), _ParticleShape.z);
     float size = _ParticleShape.x * sizeFactor * lerp(1.0, _ParticleShape.y, age) * _ParticleObjectScale;
 
     _ParticleBase[i * 2] = float4(mul(_ParticleWorldToObject, float4(position.xyz, 1)).xyz, 0);
     _ParticleBase[i * 2 + 1] = float4(0, 0, 0, 1);
     _ParticleAnim[i * 3] = float4(0, 0, 0, opacity);
     _ParticleAnim[i * 3 + 1] = float4(size, 1, 0, 0);
-    _ParticleAnim[i * 3 + 2] = float4(birthColor.rgb * _ParticleLook.y, 1);
+    _ParticleAnim[i * 3 + 2] = float4(color, 1);
+    _ParticleVelocity[i] = float4(velocity.xyz, 0);
 }
 
 // Keeps the source's world positions for the next step's births, which take

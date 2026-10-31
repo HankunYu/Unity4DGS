@@ -107,15 +107,12 @@ namespace GaussianSplatting.Runtime
 
         // How far what the styles draw can lie from a splat's own position,
         // in world units (GaussianSplatStyle.Reach), at the set's weight
-        public float Reach
+        public float Reach(float maxSpeed)
         {
-            get
-            {
-                float reach = 0f;
-                for (int i = 0; i < StyleCount; i++)
-                    reach = Mathf.Max(reach, _styles[i].Reach);
-                return reach * Weight;
-            }
+            float reach = 0f;
+            for (int i = 0; i < StyleCount; i++)
+                reach = Mathf.Max(reach, _styles[i].Reach(maxSpeed));
+            return reach * Weight;
         }
 
         // The draw-side parameters of each slot, for the quad shader
@@ -135,7 +132,7 @@ namespace GaussianSplatting.Runtime
 
         // The color side (GaussianStyle.hlsl): for the view data, and for any
         // other compute shader that colors splats the way the renderer draws
-        // them. Disabled, it binds no style.
+        // them, e.g. GaussianParticleEmitter. Disabled, it binds no style.
         public void SetColorOnCS(CommandBuffer cmb, ComputeShader cs, int kernelIndex, bool enabled)
         {
             bool active = enabled && Active;
@@ -171,7 +168,7 @@ namespace GaussianSplatting.Runtime
         // margins are read whether or not a style is set; objectScale is the
         // renderer's, for the object-space chunk bounds. Disabled, it binds no
         // style.
-        public void SetShapeOnCS(CommandBuffer cmb, ComputeShader cs, bool enabled, Vector3 objectScale)
+        public void SetShapeOnCS(CommandBuffer cmb, ComputeShader cs, bool enabled, float maxSpeed, Vector3 objectScale)
         {
             bool active = enabled && Active;
             for (int i = 0; i < StyleCount; i++)
@@ -180,7 +177,7 @@ namespace GaussianSplatting.Runtime
                 bool quantized = style.Quantize != GaussianSplatStyleQuantize.None;
                 _slotParams0[i] = new Vector4((float)style.Shape, style.DotSize * 0.5f, (float)style.StreakAxis, style.StreakLength);
                 Vector3 dir = style.StreakDirection;
-                _slotParams1[i] = new Vector4(dir.x, dir.y, dir.z, 0f);
+                _slotParams1[i] = new Vector4(dir.x, dir.y, dir.z, style.StreakTime);
                 _slotParams2[i] = new Vector4(style.StreakWidth * 0.5f, style.MinWorldSize, style.Additivity, style.KeepFraction);
                 _slotParams3[i] = new Vector4((float)style.Quantize, style.QuantizeSpacing,
                     quantized ? style.QuantizeBand * style.QuantizeSpacing * 0.5f : float.MaxValue, style.SliceOffset);
@@ -201,7 +198,7 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeVectorArrayParam(cs, Props.StyleSliceNormals, _slotParams4);
 
             // The reach shrinks with the weight, like the snap and shape it bounds
-            float reach = active ? Reach : 0f;
+            float reach = active ? Reach(maxSpeed) : 0f;
             cmb.SetComputeFloatParam(cs, Props.StyleReach, reach);
             // Object-space reach for the chunk bounds; the smallest axis scale
             // stretches a world distance the most
