@@ -255,11 +255,7 @@ namespace GaussianSplatting.Runtime
             // Pack shared extra data (concatenated per-modifier segments)
             var extraData = new NativeArray<float>(Mathf.Max(extraFloatCount, 1), Allocator.Temp);
 
-            float time = Time.time;
-#if UNITY_EDITOR
-            if (!Application.isPlaying)
-                time = (float)UnityEditor.EditorApplication.timeSinceStartup;
-#endif
+            float time = (float)GaussianSceneClock.Time;
 
             int vi = 0;
             int mi = 0;

@@ -14,6 +14,9 @@ namespace GaussianSplatting.Runtime
     /// seeking anywhere shows the same frame playback would; that includes the
     /// animated phases of the modifiers the tracks drive, which come from a
     /// table built at binding (see <see cref="GaussianTimelinePhaseTable"/>).
+    /// A player that drives the scene clock (<see cref="GaussianSceneClock"/>)
+    /// also sets the time of the effects no track drives, modifier phases and
+    /// style animation, so a frame depends on the timeline alone.
     /// Runs before other scripts so effects see this frame's values.
     /// </summary>
     [AddComponentMenu("Gaussian Splatting/Timeline/Timeline Player")]
@@ -41,6 +44,9 @@ namespace GaussianSplatting.Runtime
         [Min(0f)]
         [SerializeField] private float playbackSpeed = 1f;
 
+        [Tooltip("While bound, set the time every animation modifier and style follows, not only those the tracks drive, so each frame depends on the timeline alone (repeatable captures). Leave it on for the scene's main timeline only")]
+        [SerializeField] private bool drivesSceneClock = true;
+
         [SerializeField] private List<GaussianTimelineBinding> bindings = new();
 
         private readonly List<GaussianTimelineTrackInstance> _instances = new();
@@ -51,6 +57,31 @@ namespace GaussianSplatting.Runtime
         private double _time;
         // The player whose sub-timeline track drives this one, if any
         private GaussianTimelinePlayer _driver;
+
+#if UNITY_EDITOR
+        // Players bound in edit mode (a timeline window preview, a script),
+        // which get no OnDisable: they are unbound before a domain reload or
+        // quitting, so their targets are restored and their playable graphs
+        // destroyed
+        private static readonly HashSet<GaussianTimelinePlayer> s_editModeBound = new();
+
+        [UnityEditor.InitializeOnLoadMethod]
+        private static void HookEditorShutdown()
+        {
+            UnityEditor.AssemblyReloadEvents.beforeAssemblyReload += UnbindEditModePlayers;
+            UnityEditor.EditorApplication.quitting += UnbindEditModePlayers;
+        }
+
+        private static void UnbindEditModePlayers()
+        {
+            foreach (GaussianTimelinePlayer player in new List<GaussianTimelinePlayer>(s_editModeBound))
+            {
+                if (player != null)
+                    player.Unbind();
+            }
+            s_editModeBound.Clear();
+        }
+#endif
 
         public event Action OnLooped;
 
@@ -103,6 +134,18 @@ namespace GaussianSplatting.Runtime
         {
             get => playbackSpeed;
             set => playbackSpeed = Mathf.Max(0f, value);
+        }
+
+        public bool DrivesSceneClock
+        {
+            get => drivesSceneClock;
+            set
+            {
+                if (drivesSceneClock == value)
+                    return;
+                drivesSceneClock = value;
+                Rebind();
+            }
         }
 
         public double CurrentTime => _time;
@@ -260,6 +303,10 @@ namespace GaussianSplatting.Runtime
             if (_bound || timeline == null)
                 return;
             _bound = true;
+#if UNITY_EDITOR
+            if (!Application.isPlaying)
+                s_editModeBound.Add(this);
+#endif
             foreach (GaussianTimelineTrack track in timeline.Tracks)
             {
                 if (track == null || track.Muted)
@@ -280,6 +327,9 @@ namespace GaussianSplatting.Runtime
             if (!_bound)
                 return;
             _bound = false;
+#if UNITY_EDITOR
+            s_editModeBound.Remove(this);
+#endif
             // Last bound first, so a target driven by several tracks ends on
             // the value the first one found
             for (int i = _instances.Count - 1; i >= 0; i--)
@@ -288,6 +338,7 @@ namespace GaussianSplatting.Runtime
             _phaseInstances.Clear();
             _phaseTable?.Release();
             _phaseTable = null;
+            GaussianSceneClock.Release(this);
         }
 
         /// <summary>Recreates the track instances after the timeline or a binding changed.</summary>
@@ -347,9 +398,11 @@ namespace GaussianSplatting.Runtime
 
         // ------------------------------------------------------------------ internals
 
-        // Tabulates the phases of the modifiers the tracks drive. Steps only
-        // the tracks that drive them; the evaluation after binding puts every
-        // target back on the current time.
+        // Tabulates the phases of the modifiers the tracks drive, and of
+        // every other modifier when this player drives the scene clock (their
+        // own rates hold throughout). Steps only the tracks that drive
+        // modifiers; the evaluation after binding puts every target back on
+        // the current time.
         private void BuildPhaseTable()
         {
             var modifiers = new List<GaussianAnimModifier>();
@@ -360,6 +413,8 @@ namespace GaussianSplatting.Runtime
                 if (modifiers.Count > before)
                     _phaseInstances.Add(instance);
             }
+            if (DrivesClock)
+                modifiers.AddRange(FindObjectsByType<GaussianAnimModifier>(FindObjectsInactive.Include, FindObjectsSortMode.None));
             modifiers = modifiers.Distinct().Where(m => m != null && m.PhaseCount > 0).ToList();
             if (modifiers.Count == 0)
                 return;
@@ -374,8 +429,13 @@ namespace GaussianSplatting.Runtime
             _phaseTable.Attach();
         }
 
+        // A sub-timeline follows its parent's time, which already drives the clock
+        private bool DrivesClock => drivesSceneClock && _driver == null;
+
         private void EvaluateAt(double time, double previousTime, bool continuous, bool wrapped)
         {
+            if (DrivesClock)
+                GaussianSceneClock.Drive(this, time);
             var evaluation = new GaussianTimelineEvaluation(time, previousTime, Duration, continuous, wrapped);
             for (int i = 0; i < _instances.Count; i++)
                 _instances[i].Evaluate(evaluation);

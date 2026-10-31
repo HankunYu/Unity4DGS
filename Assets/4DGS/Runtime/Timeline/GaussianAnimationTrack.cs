@@ -12,8 +12,10 @@ namespace GaussianSplatting.Runtime
     /// so a skinned model (and a GaussianMeshDriver's splats on it) moves in
     /// step with everything else, in edit mode too. Overlapping clips
     /// crossfade by their weights. While a clip plays it replaces the
-    /// Animator's own controller; between clips the controller takes over
-    /// again, and in edit mode the model goes back to its own pose.
+    /// Animator's own controller, which is taken off in play mode so it does
+    /// not pose the model again from its own clock; between clips the
+    /// controller takes over again, and in edit mode the model goes back to
+    /// its own pose.
     /// </summary>
     [Serializable]
     public class GaussianAnimationTrack : GaussianTimelineClipTrack
@@ -39,6 +41,9 @@ namespace GaussianSplatting.Runtime
             private readonly Quaternion[] _ownRotations;
             private readonly Vector3[] _ownScales;
             private PlayableGraph _graph;
+            // The Animator's controller, taken off while the track drives it
+            private RuntimeAnimatorController _ownController;
+            private bool _controllerRemoved;
             private AnimationMixerPlayable _mixer;
             private readonly List<AnimationClip> _graphClips = new();
 
@@ -77,6 +82,7 @@ namespace GaussianSplatting.Runtime
                 }
 
                 EnsureGraph();
+                RemoveController();
                 for (int i = 0; i < _mixer.GetInputCount(); i++)
                     _mixer.SetInputWeight(i, 0f);
                 // Weights are shared out among the clips playing, so an ease
@@ -138,11 +144,29 @@ namespace GaussianSplatting.Runtime
                 return true;
             }
 
+            // In play mode the controller runs alongside the track and would
+            // pose the model again from its own clock
+            private void RemoveController()
+            {
+                if (_controllerRemoved || !Application.isPlaying)
+                    return;
+                _ownController = _animator.runtimeAnimatorController;
+                _animator.runtimeAnimatorController = null;
+                _controllerRemoved = true;
+            }
+
             private void StopDriving()
             {
                 if (_graph.IsValid())
                     _graph.Destroy();
                 _graphClips.Clear();
+                if (_controllerRemoved)
+                {
+                    if (_animator != null)
+                        _animator.runtimeAnimatorController = _ownController;
+                    _ownController = null;
+                    _controllerRemoved = false;
+                }
                 if (Application.isPlaying)
                     return;
                 for (int i = 0; i < _transforms.Length; i++)

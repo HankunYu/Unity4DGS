@@ -230,18 +230,8 @@ namespace GaussianSplatting.Runtime
             _ramps.Apply(false, true);
         }
 
-        // Same clock as GaussianAnimator, so a capture under
-        // Time.captureFramerate is deterministic and edit mode still moves
-        private static float StyleClock
-        {
-            get
-            {
-#if UNITY_EDITOR
-                if (!Application.isPlaying)
-                    return (float)UnityEditor.EditorApplication.timeSinceStartup;
-#endif
-                return Time.time;
-            }
-        }
+        // Same clock as GaussianAnimator: the timeline's time while one
+        // drives the scene, so captures repeat, and edit mode still moves
+        private static float StyleClock => (float)GaussianSceneClock.Time;
     }
 }
