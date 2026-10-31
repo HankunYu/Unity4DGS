@@ -7,8 +7,9 @@ namespace GaussianSplatting.Runtime
 {
     /// <summary>
     /// A region (Box or Sphere) that weights splats by how far inside it they
-    /// are: 1 inside, easing to 0 over the falloff outside. The transform
-    /// places and sizes it. What the weight drives is up to the subclass.
+    /// are: 1 inside, easing to 0 over the falloff outside, or Unbounded,
+    /// weighting every splat fully. The transform places and sizes it. What
+    /// the weight drives is up to the subclass.
     /// </summary>
     public abstract class GaussianVolume : MonoBehaviour
     {
@@ -16,8 +17,13 @@ namespace GaussianSplatting.Runtime
         public GaussianVolumeShape shape = GaussianVolumeShape.Box;
 
         [Range(0f, 5f)]
-        [Tooltip("Falloff distance at the volume boundary, in the volume's local units. 0 = hard edge, higher = softer gradient.")]
+        [Tooltip("Falloff distance at the volume boundary, in the volume's local units. 0 = hard edge, higher = softer gradient. Unused by Unbounded.")]
         public float falloff = 0.5f;
+
+#if UNITY_EDITOR
+        // Half length in world units of the axes marking an Unbounded volume
+        private const float UnboundedGizmoSize = 0.15f;
+#endif
 
         private Vector3 _originalScale;
         private Coroutine _scaleCoroutine;
@@ -79,16 +85,25 @@ namespace GaussianSplatting.Runtime
                 color.a = 0.4f;
 
             Gizmos.color = color;
-            if (shape == GaussianVolumeShape.Box)
+            switch (shape)
             {
-                Gizmos.DrawWireCube(Vector3.zero, Vector3.one);
-                color.a *= 0.3f;
-                Gizmos.color = color;
-                Gizmos.DrawCube(Vector3.zero, Vector3.one);
-            }
-            else
-            {
-                Gizmos.DrawWireSphere(Vector3.zero, 0.5f);
+                case GaussianVolumeShape.Box:
+                    Gizmos.DrawWireCube(Vector3.zero, Vector3.one);
+                    color.a *= 0.3f;
+                    Gizmos.color = color;
+                    Gizmos.DrawCube(Vector3.zero, Vector3.one);
+                    break;
+                case GaussianVolumeShape.Sphere:
+                    Gizmos.DrawWireSphere(Vector3.zero, 0.5f);
+                    break;
+                default:
+                    // No extent to show: mark the placement with unscaled axes
+                    Gizmos.matrix = Matrix4x4.TRS(transform.position, transform.rotation, Vector3.one);
+                    Gizmos.DrawLine(Vector3.left * UnboundedGizmoSize, Vector3.right * UnboundedGizmoSize);
+                    Gizmos.DrawLine(Vector3.down * UnboundedGizmoSize, Vector3.up * UnboundedGizmoSize);
+                    Gizmos.DrawLine(Vector3.back * UnboundedGizmoSize, Vector3.forward * UnboundedGizmoSize);
+                    Gizmos.DrawWireSphere(Vector3.zero, UnboundedGizmoSize * 0.25f);
+                    break;
             }
         }
 #endif

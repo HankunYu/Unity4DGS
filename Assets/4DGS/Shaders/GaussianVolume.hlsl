@@ -6,10 +6,12 @@
 
 // 1 inside the volume, easing to 0 over the falloff distance outside it.
 // localPos is in the volume's local space, where the shape (GaussianVolumeShape:
-// 0 = box, 1 = sphere) is the unit cube or the unit-diameter sphere; the
-// falloff is in the same units.
+// 0 = box, 1 = sphere, 2 = unbounded) is the unit cube, the unit-diameter
+// sphere or everywhere; the falloff is in the same units.
 float GaussianVolumeWeight(float3 localPos, float shape, float falloff)
 {
+    if (shape > 1.5)
+        return 1;
     falloff = max(falloff, 0.001);
 
     // Signed distance to the surface: negative inside, positive outside

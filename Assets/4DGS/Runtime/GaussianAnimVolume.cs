@@ -44,7 +44,7 @@ namespace GaussianSplatting.Runtime
         {
             public Matrix4x4 worldToLocal;  // 64 bytes
             public Matrix4x4 localToWorld;  // 64 bytes
-            public Vector4 shapeParams;     // x: type(0=box,1=sphere), y: falloff, z: trail duration, w: reserved
+            public Vector4 shapeParams;     // x: type(0=box,1=sphere,2=unbounded), y: falloff, z: trail duration, w: reserved
             public Vector4 boundsSize;      // box half-extents from scale, or sphere radius
         }
 

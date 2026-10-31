@@ -41,7 +41,7 @@ struct AnimVolumeData
 {
     float4x4 worldToLocal;
     float4x4 localToWorld;
-    float4   shapeParams;   // x: type (0=box, 1=sphere), y: falloff, zw: reserved
+    float4   shapeParams;   // x: type (0=box, 1=sphere, 2=unbounded), y: falloff, zw: reserved
     float4   boundsSize;    // box half-extents or sphere radius
 };
 
