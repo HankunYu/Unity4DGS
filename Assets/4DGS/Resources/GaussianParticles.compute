@@ -1,0 +1,221 @@
+// SPDX-License-Identifier: MIT
+// Particles drifting off a splat renderer (GaussianParticleEmitter). Each
+// particle runs its own endless cycle of lives. At the start of a life it
+// takes the position and color of a random source splat, as the source is
+// drawn right now (mesh driver, morph and animation included), and the
+// velocity of that spot of the surface plus a push along its normal. During
+// the life it is simulated step by step: its velocity relaxes towards a flow
+// of wind plus curl noise, so particles leaving the body are swept along in
+// streams; it fades in and out, flickers and shrinks. The result is written
+// as the particle renderer's base pose and animation output, so sorting,
+// styles, ODS and depth of field treat the particles like any other splats.
+
+#pragma kernel CSUpdateParticles
+#pragma kernel CSStoreSource
+
+#define GROUP_SIZE 256
+
+#include "../Shaders/GaussianSplatting.hlsl"
+#include "../Shaders/GaussianNoise.hlsl"
+
+// The source, bound by GaussianSplatRenderer.SetAssetDataOnCS
+uint _SplatCount;
+uint _SrcSplatCount;
+StructuredBuffer<float4> _AnimOutputData;
+uint _AnimDataValid;
+StructuredBuffer<float4> _DeformedBase;
+uint _DeformedBaseValid;
+StructuredBuffer<float4> _MorphedData;
+uint _MorphDataValid;
+float4x4 _SourceObjectToWorld;
+
+// The source's world positions at the previous step, w = 1 once written
+RWStructuredBuffer<float4> _SourcePrev;
+
+uint _ParticleCount;
+uint _ParticleSeed;
+float _ParticleTime;        // seconds on the emitter's clock
+float _ParticleDeltaTime;   // seconds since the previous step
+float _ParticleLifetime;    // seconds, varied +-25% per particle
+float _ParticleEmission;    // fraction of lives that show
+float4 _ParticleBirth;      // source velocity scale (inherit / step), push along the normal, max inherited speed, 0
+float3 _ParticleWind;       // world units per second the flow carries particles
+float4 _ParticleFlow;       // drag (1/s), turbulence (world units/s), frequency (1/world), speed
+float4 _ParticleShape;      // size (world sigma), end size factor, fade in, fade out (fractions of a life)
+float4 _ParticleLook;       // opacity, brightness, size variation, flicker
+float4x4 _ParticleWorldToObject;
+float _ParticleObjectScale; // world size to particle object size
+
+// 3 float4s per particle: position (world), life index; velocity (world), 0; color, opacity
+RWStructuredBuffer<float4> _ParticleState;
+// The particle renderer's base pose: center (object), 0; rotation
+RWStructuredBuffer<float4> _ParticleBase;
+// The particle renderer's animation output: offset, opacity; scale, color blend; color
+RWStructuredBuffer<float4> _ParticleAnim;
+
+uint PcgHash(uint v)
+{
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float Hash01(uint v)
+{
+    return PcgHash(v) * (1.0 / 4294967296.0);
+}
+
+// The source splat as the view data pass sees it, in world space; normal is
+// the splat's local +Z, the surface normal for mesh splats
+void LoadSourceSplat(uint idx, out float3 worldPos, out float3 worldNormal, out float3 color, out float opacity)
+{
+    SplatData splat = LoadSplatData(idx, 0);
+    float3 pos = splat.pos;
+    float4 rot = splat.rot;
+    color = splat.sh.col;
+    opacity = splat.opacity;
+    if (_MorphDataValid != 0)
+    {
+        float4 md0 = _MorphedData[idx * 4];
+        pos = md0.xyz;
+        rot = _MorphedData[idx * 4 + 1];
+        opacity = md0.w;
+        color = _MorphedData[idx * 4 + 3].rgb;
+    }
+    else if (_DeformedBaseValid != 0)
+    {
+        pos = _DeformedBase[idx * 2].xyz;
+        rot = _DeformedBase[idx * 2 + 1];
+    }
+    if (_AnimDataValid != 0 && idx < _SrcSplatCount)
+    {
+        float4 posOpacity = _AnimOutputData[idx * 3];
+        float4 scaleBlend = _AnimOutputData[idx * 3 + 1];
+        float4 tint = _AnimOutputData[idx * 3 + 2];
+        pos += posOpacity.xyz;
+        opacity *= posOpacity.w;
+        color = lerp(color, tint.rgb, scaleBlend.y);
+    }
+    worldPos = mul(_SourceObjectToWorld, float4(pos, 1)).xyz;
+    float3 normal = mul((float3x3)_SourceObjectToWorld, QuatRotateVector(float3(0, 0, 1), rot));
+    worldNormal = dot(normal, normal) > 1e-12 ? normalize(normal) : float3(0, 1, 0);
+}
+
+// Just the world position of LoadSourceSplat
+float3 LoadSourcePos(uint idx)
+{
+    float3 pos;
+    if (_MorphDataValid != 0)
+        pos = _MorphedData[idx * 4].xyz;
+    else if (_DeformedBaseValid != 0)
+        pos = _DeformedBase[idx * 2].xyz;
+    else
+        pos = LoadSplatPos(idx);
+    if (_AnimDataValid != 0 && idx < _SrcSplatCount)
+        pos += _AnimOutputData[idx * 3].xyz;
+    return mul(_SourceObjectToWorld, float4(pos, 1)).xyz;
+}
+
+// Divergence-free flow (Bridson 2007): the curl of three noise potentials,
+// two octaves, about unit speed
+float3 CurlNoise(float3 p)
+{
+    static const float3 offY = float3(127.1, 311.7, 74.7);
+    static const float3 offZ = float3(269.5, 183.3, 246.1);
+    float3 curl = 0;
+    float scale = 1.0;
+    [unroll]
+    for (int octave = 0; octave < 2; octave++)
+    {
+        float3 q = p * scale;
+        float3 gx = ValueNoise3DGrad(q).yzw;
+        float3 gy = ValueNoise3DGrad(q + offY).yzw;
+        float3 gz = ValueNoise3DGrad(q + offZ).yzw;
+        // Gradients are per unit of q; halving the amplitude per doubling
+        // of the frequency keeps each octave's speed the same
+        curl += float3(gz.y - gy.z, gx.z - gz.x, gy.x - gx.y);
+        scale *= 2.0;
+    }
+    return curl * 0.5;
+}
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void CSUpdateParticles(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= _ParticleCount)
+        return;
+
+    // Lives of slightly different lengths and offsets, so the particles do
+    // not pulse together
+    uint key = PcgHash(i ^ PcgHash(_ParticleSeed));
+    float life = _ParticleLifetime * lerp(0.75, 1.25, Hash01(key));
+    float phase = max(_ParticleTime, 0.0) / life + Hash01(key + 1u);
+    float lifeIndex = floor(phase);
+    float age = phase - lifeIndex;
+    uint lifeKey = PcgHash(key ^ PcgHash((uint)lifeIndex));
+
+    float4 position = _ParticleState[i * 3];
+    float4 velocity = _ParticleState[i * 3 + 1];
+    float4 birthColor = _ParticleState[i * 3 + 2];
+    float dt = _ParticleDeltaTime;
+    if (position.w != lifeIndex && _SplatCount > 0)
+    {
+        // A new life (or a jump of the clock): start from the source as it
+        // is now, moving with it and pushed off its surface
+        uint src = PcgHash(lifeKey + 2u) % _SplatCount;
+        float3 worldPos, worldNormal, color;
+        float opacity;
+        LoadSourceSplat(src, worldPos, worldNormal, color, opacity);
+        float4 prev = _SourcePrev[src];
+        float3 inherited = prev.w > 0 ? (worldPos - prev.xyz) * _ParticleBirth.x : 0;
+        float inheritedSpeed = length(inherited);
+        if (inheritedSpeed > _ParticleBirth.z)
+            inherited *= _ParticleBirth.z / inheritedSpeed;
+        position = float4(worldPos, lifeIndex);
+        velocity = float4(inherited + worldNormal * _ParticleBirth.y * lerp(0.5, 1.0, Hash01(lifeKey + 3u)), 0);
+        birthColor = float4(color, opacity);
+        _ParticleState[i * 3 + 2] = birthColor;
+    }
+    else if (dt > 0)
+    {
+        // Relax towards the flow (exactly, so any drag and step is stable),
+        // then move
+        static const float3 flowDrift = float3(0.3, -1.0, 0.2);
+        float3 seedOffset = float3(Hash01(PcgHash(_ParticleSeed) + 1u), Hash01(PcgHash(_ParticleSeed) + 2u), Hash01(PcgHash(_ParticleSeed) + 3u)) * 64.0;
+        float3 q = position.xyz * _ParticleFlow.z + seedOffset + flowDrift * (_ParticleTime * _ParticleFlow.w);
+        float3 flow = _ParticleWind + CurlNoise(q) * _ParticleFlow.y;
+        velocity.xyz = lerp(flow, velocity.xyz, exp(-_ParticleFlow.x * dt));
+        position.xyz += velocity.xyz * dt;
+    }
+    _ParticleState[i * 3] = position;
+    _ParticleState[i * 3 + 1] = velocity;
+
+    float fadeIn = _ParticleShape.z > 0 ? smoothstep(0.0, _ParticleShape.z, age) : 1.0;
+    float fadeOut = _ParticleShape.w > 0 ? 1.0 - smoothstep(1.0 - _ParticleShape.w, 1.0, age) : 1.0;
+    float flickerRate = lerp(6.0, 20.0, Hash01(lifeKey + 4u));
+    float flicker = 1.0 - _ParticleLook.w * (0.5 + 0.5 * sin(_ParticleTime * flickerRate + Hash01(lifeKey + 5u) * 6.2831853));
+    bool shown = _SplatCount > 0 && Hash01(lifeKey + 6u) < _ParticleEmission;
+    float opacity = shown ? saturate(birthColor.a) * _ParticleLook.x * fadeIn * fadeOut * flicker : 0.0;
+
+    // Mostly small particles and a few large ones, averaging the set size
+    float sizeFactor = lerp(1.0, 0.5 + 2.5 * pow(Hash01(lifeKey + 7u), 4.0), _ParticleLook.z);
+    float size = _ParticleShape.x * sizeFactor * lerp(1.0, _ParticleShape.y, age) * _ParticleObjectScale;
+
+    _ParticleBase[i * 2] = float4(mul(_ParticleWorldToObject, float4(position.xyz, 1)).xyz, 0);
+    _ParticleBase[i * 2 + 1] = float4(0, 0, 0, 1);
+    _ParticleAnim[i * 3] = float4(0, 0, 0, opacity);
+    _ParticleAnim[i * 3 + 1] = float4(size, 1, 0, 0);
+    _ParticleAnim[i * 3 + 2] = float4(birthColor.rgb * _ParticleLook.y, 1);
+}
+
+// Keeps the source's world positions for the next step's births, which take
+// their velocity from the difference
+[numthreads(GROUP_SIZE, 1, 1)]
+void CSStoreSource(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+    _SourcePrev[idx] = float4(LoadSourcePos(idx), 1);
+}

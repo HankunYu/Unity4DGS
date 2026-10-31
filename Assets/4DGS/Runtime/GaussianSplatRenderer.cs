@@ -104,11 +104,17 @@ namespace GaussianSplatting.Runtime
         internal bool StyleOrderIndependent => StyleActive && styleWeight >= 1f && style.Additivity >= 1f &&
                                                CollectStyleVolumes() == 0;
 
-        // Gathers the active style volumes under this renderer, as many as
-        // the view-data pass takes
+        // Renderer whose style volumes limit this one's style too, instead of
+        // its own; set by GaussianParticleEmitter so particles take their
+        // source's look
+        [NonSerialized] internal GaussianSplatRenderer StyleVolumeSource;
+
+        // Gathers the active style volumes under this renderer (or under
+        // StyleVolumeSource), as many as the view-data pass takes
         private int CollectStyleVolumes()
         {
-            GetComponentsInChildren(_styleVolumes);
+            GaussianSplatRenderer owner = StyleVolumeSource != null ? StyleVolumeSource : this;
+            owner.GetComponentsInChildren(_styleVolumes);
             int count = 0;
             for (int i = 0; i < _styleVolumes.Count && count < GaussianStyleVolume.MaxPerRenderer; i++)
             {
@@ -816,7 +822,14 @@ namespace GaussianSplatting.Runtime
 
         internal void SetAssetDataOnCS(CommandBuffer cmb, int kernelIndex)
         {
-            ComputeShader cs = csSplatUtilities;
+            SetAssetDataOnCS(cmb, csSplatUtilities, kernelIndex);
+        }
+
+        // Binds the splats as the view data pass reads them (asset data plus
+        // morph, mesh driver and animation output) to another shader's kernel
+        // that includes GaussianSplatting.hlsl, e.g. GaussianParticles
+        internal void SetAssetDataOnCS(CommandBuffer cmb, ComputeShader cs, int kernelIndex)
+        {
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatPos, _gpuPosData);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatChunks, _gpuChunks);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatOther, _gpuOtherData);
