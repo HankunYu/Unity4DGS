@@ -46,6 +46,8 @@ namespace GaussianSplatting.Runtime
         private static readonly int PropAnimSplatChunks = Shader.PropertyToID("_AnimSplatChunks");
         private static readonly int PropAnimOutput = Shader.PropertyToID("_AnimOutput");
         private static readonly int PropAnimChunkBounds = Shader.PropertyToID("_AnimChunkBounds");
+        private static readonly int PropAnimDeformedBase = Shader.PropertyToID("_AnimDeformedBase");
+        private static readonly int PropAnimDeformedBaseValid = Shader.PropertyToID("_AnimDeformedBaseValid");
         private static readonly int PropAnimMatrixO2W = Shader.PropertyToID("_AnimMatrixObjectToWorld");
         private static readonly int PropAnimMatrixW2O = Shader.PropertyToID("_AnimMatrixWorldToObject");
         private static readonly int PropAnimActivation = Shader.PropertyToID("_AnimActivation");
@@ -324,6 +326,10 @@ namespace GaussianSplatting.Runtime
             // Set original pos buffer and chunk data
             cs.SetBuffer(kernel, PropAnimSplatPos, _renderer.GpuPosData);
             cs.SetBuffer(kernel, PropAnimSplatChunks, _renderer.GpuChunksBuffer);
+            // Mesh-driven splats animate from where the driver put them
+            GraphicsBuffer deformedBase = _renderer.DeformedBase;
+            cs.SetInt(PropAnimDeformedBaseValid, deformedBase != null ? 1 : 0);
+            cs.SetBuffer(kernel, PropAnimDeformedBase, deformedBase ?? _volumeBuffer);
 
             cs.SetMatrix(PropAnimMatrixO2W, transform.localToWorldMatrix);
             cs.SetMatrix(PropAnimMatrixW2O, transform.worldToLocalMatrix);

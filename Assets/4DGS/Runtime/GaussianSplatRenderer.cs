@@ -44,6 +44,10 @@ namespace GaussianSplatting.Runtime
         [Range(1,30)] [Tooltip("Sort splats only every N frames")]
         [FormerlySerializedAs("m_SortNthFrame")]
         public int sortNthFrame = 1;
+        [Tooltip("Hide splats facing away from the camera, like mesh backface culling. Needs splats whose local +Z is the outward surface normal, such as ones sampled from a mesh; trained splats have no such orientation")]
+        public bool backfaceCulling;
+        [Range(0.0f, 45.0f)] [Tooltip("Degrees before edge-on over which back-facing splats fade out instead of popping; 0 cuts them off hard")]
+        public float backfaceFadeAngle = 10.0f;
 
         public GaussianCutoutManager CutoutManager => GetComponent<GaussianCutoutManager>();
 
@@ -64,6 +68,10 @@ namespace GaussianSplatting.Runtime
         private GraphicsBuffer _animOutputBuffer;
         // Set by GaussianAnimator: animated chunk bounds (min, max float4 per chunk)
         private GraphicsBuffer _animChunkBounds;
+        // Set by GaussianMeshDriver: per-splat base pose replacing the asset's
+        // position and rotation (2 float4s per splat), and its chunk bounds
+        private GraphicsBuffer _deformedBase;
+        private GraphicsBuffer _deformedChunkBounds;
         // Set by GaussianMorph: pre-blended splat data (4 float4s per splat)
         private GraphicsBuffer _morphedDataBuffer;
         private GraphicsBuffer _morphSHBuffer;
@@ -132,6 +140,8 @@ namespace GaussianSplatting.Runtime
             public static readonly int SplatCount = Shader.PropertyToID("_SplatCount");
             public static readonly int SHOrder = Shader.PropertyToID("_SHOrder");
             public static readonly int SHOnly = Shader.PropertyToID("_SHOnly");
+            public static readonly int BackfaceCull = Shader.PropertyToID("_BackfaceCull");
+            public static readonly int BackfaceFadeWidth = Shader.PropertyToID("_BackfaceFadeWidth");
             public static readonly int DisplayIndex = Shader.PropertyToID("_DisplayIndex");
             public static readonly int DisplayChunks = Shader.PropertyToID("_DisplayChunks");
             public static readonly int GaussianSplatRT = Shader.PropertyToID("_GaussianSplatRT");
@@ -172,7 +182,10 @@ namespace GaussianSplatting.Runtime
             public static readonly int CopyWriteKeys = Shader.PropertyToID("_CopyWriteKeys");
             public static readonly int AnimOutputData = Shader.PropertyToID("_AnimOutputData");
             public static readonly int AnimDataValid = Shader.PropertyToID("_AnimDataValid");
-            public static readonly int AnimChunkBounds = Shader.PropertyToID("_AnimChunkBounds");
+            public static readonly int DynamicChunkBounds = Shader.PropertyToID("_DynamicChunkBounds");
+            public static readonly int DynamicChunkBoundsValid = Shader.PropertyToID("_DynamicChunkBoundsValid");
+            public static readonly int DeformedBase = Shader.PropertyToID("_DeformedBase");
+            public static readonly int DeformedBaseValid = Shader.PropertyToID("_DeformedBaseValid");
             public static readonly int MorphedData = Shader.PropertyToID("_MorphedData");
             public static readonly int MorphDataValid = Shader.PropertyToID("_MorphDataValid");
             public static readonly int MorphWeight = Shader.PropertyToID("_MorphWeight");
@@ -219,6 +232,7 @@ namespace GaussianSplatting.Runtime
         internal GraphicsBuffer GpuIndexBuffer => _gpuIndexBuffer;
         internal GraphicsBuffer GpuView => _gpuView;
         internal GraphicsBuffer AnimOutputBuffer => _animOutputBuffer;
+        internal GraphicsBuffer DeformedBase => _deformedBase;
         // Sorted keys are only valid for the camera and settings that sorted
         // them; sortNthFrame caps the refresh rate in real frames
         // (Time.frameCount), not per-camera renders. See GaussianSplatSortState.
@@ -241,7 +255,7 @@ namespace GaussianSplatting.Runtime
         // Animated or morphing splats move every frame, so their keys go stale
         // every frame: such content never qualifies for throttled sorting.
         internal bool HasAnimatedContent =>
-            _animOutputBuffer != null || (_morphedDataBuffer != null && _morphDataValid != 0);
+            _animOutputBuffer != null || _deformedBase != null || (_morphedDataBuffer != null && _morphDataValid != 0);
 
         // Bumped by anything that changes splat data outside of animation:
         // throttled keys are re-sorted the next time they are used.
@@ -268,6 +282,18 @@ namespace GaussianSplatting.Runtime
             {
                 InitSortBuffers(needed);
             }
+        }
+
+        internal void SetDeformedBase(GraphicsBuffer deformedBase, GraphicsBuffer chunkBounds)
+        {
+            _deformedBase = deformedBase;
+            _deformedChunkBounds = chunkBounds;
+        }
+
+        internal void ClearDeformedBase()
+        {
+            _deformedBase = null;
+            _deformedChunkBounds = null;
         }
 
         internal void SetAnimationOutput(GraphicsBuffer animBuffer, GraphicsBuffer chunkBounds)
@@ -660,7 +686,15 @@ namespace GaussianSplatting.Runtime
             bool hasAnim = _animOutputBuffer != null;
             cmb.SetComputeIntParam(cs, Props.AnimDataValid, hasAnim ? 1 : 0);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.AnimOutputData, hasAnim ? _animOutputBuffer : _gpuView);
-            cmb.SetComputeBufferParam(cs, kernelIndex, Props.AnimChunkBounds, hasAnim ? _animChunkBounds : _gpuView);
+
+            // Mesh driver base pose. The animation reads it too, so its
+            // bounds already cover it.
+            bool hasDeformed = _deformedBase != null;
+            cmb.SetComputeIntParam(cs, Props.DeformedBaseValid, hasDeformed ? 1 : 0);
+            cmb.SetComputeBufferParam(cs, kernelIndex, Props.DeformedBase, hasDeformed ? _deformedBase : _gpuView);
+            GraphicsBuffer chunkBounds = hasAnim ? _animChunkBounds : hasDeformed ? _deformedChunkBounds : null;
+            cmb.SetComputeIntParam(cs, Props.DynamicChunkBoundsValid, chunkBounds != null ? 1 : 0);
+            cmb.SetComputeBufferParam(cs, kernelIndex, Props.DynamicChunkBounds, chunkBounds ?? _gpuView);
 
             // Morph data binding
             bool hasMorph = _morphedDataBuffer != null && _morphDataValid != 0;
@@ -826,6 +860,8 @@ namespace GaussianSplatting.Runtime
             // skips every SH read.
             cmb.SetComputeIntParam(csSplatUtilities, Props.SHOrder, EffectiveSHOrder);
             cmb.SetComputeIntParam(csSplatUtilities, Props.SHOnly, shOnly ? 1 : 0);
+            cmb.SetComputeIntParam(csSplatUtilities, Props.BackfaceCull, backfaceCulling ? 1 : 0);
+            cmb.SetComputeFloatParam(csSplatUtilities, Props.BackfaceFadeWidth, Mathf.Sin(backfaceFadeAngle * Mathf.Deg2Rad));
 
             csSplatUtilities.GetKernelThreadGroupSizes(kernelIndex, out uint gsX, out _, out _);
             int dispatchCount = EffectiveSplatCount;
@@ -984,6 +1020,9 @@ namespace GaussianSplatting.Runtime
             bool hasAnim = _animOutputBuffer != null;
             cmd.SetComputeIntParam(csSplatUtilities, Props.AnimDataValid, hasAnim ? 1 : 0);
             cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.AnimOutputData, hasAnim ? _animOutputBuffer : _gpuSortDistances);
+            bool hasDeformed = _deformedBase != null;
+            cmd.SetComputeIntParam(csSplatUtilities, Props.DeformedBaseValid, hasDeformed ? 1 : 0);
+            cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.DeformedBase, hasDeformed ? _deformedBase : _gpuSortDistances);
 
             csSplatUtilities.GetKernelThreadGroupSizes(kernelIndex, out uint gsX, out _, out _);
             cmd.DispatchCompute(csSplatUtilities, kernelIndex, (EffectiveSplatCount + (int)gsX - 1)/(int)gsX, 1, 1);

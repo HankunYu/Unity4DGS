@@ -16,6 +16,9 @@ namespace GaussianSplatting.Editor.Import
         public NativeArray<byte> otherData;
         public NativeArray<byte> colorData;
         public NativeArray<byte> shData;
+        // For each splat of the asset, its index in the array passed to the
+        // builder: pruning, the budget and Morton ordering all move splats
+        public NativeArray<int> sourceIndices;
 
         public void Dispose()
         {
@@ -24,6 +27,9 @@ namespace GaussianSplatting.Editor.Import
             DisposeBlock(ref otherData);
             DisposeBlock(ref colorData);
             DisposeBlock(ref shData);
+            if (sourceIndices.IsCreated)
+                sourceIndices.Dispose();
+            sourceIndices = default;
         }
 
         static void DisposeBlock(ref NativeArray<byte> block)

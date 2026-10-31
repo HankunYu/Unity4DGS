@@ -1,0 +1,170 @@
+// SPDX-License-Identifier: MIT
+// Moves mesh-bound splats with their meshes (GaussianMeshDriver). Each
+// binding entry skins its triangle's three vertices (linear blend skinning,
+// four bones) and re-evaluates its spot on the triangle, then writes the
+// splat's pose: center, plus a rotation whose local +Z is the surface
+// normal and +X follows the triangle's first edge, the same frame the
+// importer baked. Everything else (color, size, opacity) stays in the asset.
+
+#pragma kernel CSDriveSplats
+#pragma kernel CSDriveChunkBounds
+
+#define GROUP_SIZE 256
+static const uint kChunkSize = 256;
+
+// Must match GaussianMeshBinding.Entry
+struct BindingEntry
+{
+    uint splat;
+    uint3 vertices;
+    float2 bary; // weights of vertices.x and .y; .z gets the rest
+};
+
+// Must match GaussianMeshBinding.Vertex
+struct BindingVertex
+{
+    float3 position;
+    float3 normal;
+    uint4 bones;
+    float4 weights;
+};
+
+StructuredBuffer<BindingEntry> _DriveEntries;
+StructuredBuffer<BindingVertex> _DriveVertices;
+// Per bone: bind pose -> splat object space, for every mesh's bones
+StructuredBuffer<float4x4> _DriveBoneMatrices;
+uint _DriveFirstEntry;
+uint _DriveEntryCount;
+uint _DriveFirstVertex;
+uint _DriveFirstBone;
+// -1 when splat object space is mirrored relative to the meshes (it is
+// for the usual y-down splats), so face normals still point outwards
+float _DriveHandedness;
+
+// 2 float4s per splat: center.xyz (object space), 0; rotation.xyzw
+RWStructuredBuffer<float4> _DeformedBase;
+uint _DriveSplatCount;
+// Per chunk of kChunkSize splats: min, max of the driven centers
+RWStructuredBuffer<float4> _DeformedChunkBounds;
+uint _DriveChunkCount;
+
+void SkinVertex(uint index, out float3 position, out float3 normal)
+{
+    BindingVertex v = _DriveVertices[_DriveFirstVertex + index];
+    position = 0;
+    normal = 0;
+    [unroll]
+    for (uint k = 0; k < 4; k++)
+    {
+        if (v.weights[k] <= 0)
+            continue;
+        float4x4 m = _DriveBoneMatrices[_DriveFirstBone + v.bones[k]];
+        position += v.weights[k] * mul(m, float4(v.position, 1)).xyz;
+        normal += v.weights[k] * mul((float3x3)m, v.normal);
+    }
+}
+
+// Rotation whose columns are the given orthonormal, right-handed axes
+float4 QuatFromAxes(float3 x, float3 y, float3 z)
+{
+    float trace = x.x + y.y + z.z;
+    float4 q;
+    if (trace > 0)
+    {
+        float s = sqrt(trace + 1.0) * 2.0;
+        q = float4((y.z - z.y) / s, (z.x - x.z) / s, (x.y - y.x) / s, 0.25 * s);
+    }
+    else if (x.x > y.y && x.x > z.z)
+    {
+        float s = sqrt(1.0 + x.x - y.y - z.z) * 2.0;
+        q = float4(0.25 * s, (y.x + x.y) / s, (z.x + x.z) / s, (y.z - z.y) / s);
+    }
+    else if (y.y > z.z)
+    {
+        float s = sqrt(1.0 + y.y - x.x - z.z) * 2.0;
+        q = float4((y.x + x.y) / s, 0.25 * s, (z.y + y.z) / s, (z.x - x.z) / s);
+    }
+    else
+    {
+        float s = sqrt(1.0 + z.z - x.x - y.y) * 2.0;
+        q = float4((z.x + x.z) / s, (z.y + y.z) / s, 0.25 * s, (x.y - y.x) / s);
+    }
+    return normalize(q);
+}
+
+[numthreads(GROUP_SIZE,1,1)]
+void CSDriveSplats(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _DriveEntryCount)
+        return;
+    BindingEntry e = _DriveEntries[_DriveFirstEntry + id.x];
+    float3 w = float3(e.bary, 1.0 - e.bary.x - e.bary.y);
+
+    float3 p0, p1, p2, n0, n1, n2;
+    SkinVertex(e.vertices.x, p0, n0);
+    SkinVertex(e.vertices.y, p1, n1);
+    SkinVertex(e.vertices.z, p2, n2);
+    float3 center = w.x * p0 + w.y * p1 + w.z * p2;
+
+    // Interpolated normals cancel out across sharp folds: fall back to the face
+    float3 normal = w.x * n0 + w.y * n1 + w.z * n2;
+    if (dot(normal, normal) < 1e-12)
+        normal = cross(p1 - p0, p2 - p0) * _DriveHandedness;
+    normal = normalize(normal);
+
+    float3 edge = p1 - p0;
+    float3 tangent = edge;
+    if (dot(cross(edge, normal), cross(edge, normal)) < 1e-12)
+        tangent = abs(normal.x) < 0.9 ? float3(1, 0, 0) : float3(0, 1, 0);
+    tangent = normalize(tangent - normal * dot(tangent, normal));
+
+    _DeformedBase[e.splat * 2] = float4(center, 0);
+    _DeformedBase[e.splat * 2 + 1] = QuatFromAxes(tangent, cross(normal, tangent), normal);
+}
+
+uint FloatToOrderedUint(float f)
+{
+    uint u = asuint(f);
+    return (u & 0x80000000u) != 0 ? ~u : u | 0x80000000u;
+}
+
+float OrderedUintToFloat(uint u)
+{
+    return asfloat((u & 0x80000000u) != 0 ? u & 0x7FFFFFFFu : ~u);
+}
+
+groupshared uint gs_boundsMin[3];
+groupshared uint gs_boundsMax[3];
+
+// One group per chunk: reduces the driven centers into the chunk's bounds
+[numthreads(kChunkSize,1,1)]
+void CSDriveChunkBounds(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
+{
+    if (gtid.x < 3)
+    {
+        gs_boundsMin[gtid.x] = 0xFFFFFFFFu;
+        gs_boundsMax[gtid.x] = 0;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (id.x < _DriveSplatCount)
+    {
+        float3 pos = _DeformedBase[id.x * 2].xyz;
+        [unroll]
+        for (uint c = 0; c < 3; c++)
+        {
+            uint ordered = FloatToOrderedUint(pos[c]);
+            InterlockedMin(gs_boundsMin[c], ordered);
+            InterlockedMax(gs_boundsMax[c], ordered);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (gtid.x == 0 && gid.x < _DriveChunkCount)
+    {
+        _DeformedChunkBounds[gid.x * 2] = float4(OrderedUintToFloat(gs_boundsMin[0]),
+            OrderedUintToFloat(gs_boundsMin[1]), OrderedUintToFloat(gs_boundsMin[2]), 0);
+        _DeformedChunkBounds[gid.x * 2 + 1] = float4(OrderedUintToFloat(gs_boundsMax[0]),
+            OrderedUintToFloat(gs_boundsMax[1]), OrderedUintToFloat(gs_boundsMax[2]), 0);
+    }
+}

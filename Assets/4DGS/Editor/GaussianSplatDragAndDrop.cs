@@ -10,7 +10,9 @@ namespace GaussianSplatting.Editor
     // Dragging splat assets (imported .ply/.spz files) or sequences into the
     // Scene view or the Hierarchy creates a GameObject with a
     // GaussianSplatRenderer for each (and a GaussianPlayer for a sequence),
-    // plus the scene's GaussianSplatConfig when there is none yet.
+    // plus the scene's GaussianSplatConfig when there is none yet. A splat
+    // asset sampled from a model (.meshsplat) also brings in that model, with
+    // the splats below it and a GaussianMeshDriver moving them with it.
     [InitializeOnLoad]
     internal static class GaussianSplatDragAndDrop
     {
@@ -77,6 +79,15 @@ namespace GaussianSplatting.Editor
             return assets;
         }
 
+        // The mesh binding imported along with a splat asset, if it has one
+        static GaussianMeshBinding FindBinding(GaussianSplatAsset asset)
+        {
+            string path = asset != null ? AssetDatabase.GetAssetPath(asset) : null;
+            return string.IsNullOrEmpty(path)
+                ? null
+                : AssetDatabase.LoadAllAssetsAtPath(path).OfType<GaussianMeshBinding>().FirstOrDefault();
+        }
+
         // worldPosition null keeps the local origin of the parent
         static void Create(List<Object> assets, Transform parent, int siblingIndex, Vector3? worldPosition)
         {
@@ -94,25 +105,42 @@ namespace GaussianSplatting.Editor
             var created = new List<Object>();
             foreach (Object asset in assets)
             {
-                // Inactive until the asset is assigned, so OnEnable loads it once
-                var go = new GameObject(asset.name);
-                go.SetActive(false);
-                if (parent != null)
-                    go.transform.SetParent(parent, false);
-                if (siblingIndex >= 0)
-                    go.transform.SetSiblingIndex(siblingIndex++);
-                if (worldPosition.HasValue)
-                    go.transform.position = worldPosition.Value;
-                go.transform.localScale = SourceToUnityScale;
-
                 var sequence = asset as GaussianSplatSequence;
                 // a sequence shows its first frame until it plays
                 GaussianSplatAsset shown = sequence != null ? sequence.frames?.FirstOrDefault() : (GaussianSplatAsset)asset;
+                GaussianMeshBinding binding = sequence == null ? FindBinding(shown) : null;
+
+                // Inactive until the asset is assigned, so OnEnable loads it once
+                var go = new GameObject(asset.name);
+                go.SetActive(false);
+                Transform placed = go.transform;
+                GameObject model = null;
+                if (binding != null && binding.model != null)
+                {
+                    model = (GameObject)PrefabUtility.InstantiatePrefab(binding.model);
+                    placed = model.transform;
+                    go.transform.SetParent(model.transform, false);
+                }
+                if (parent != null)
+                    placed.SetParent(parent, false);
+                if (siblingIndex >= 0)
+                    placed.SetSiblingIndex(siblingIndex++);
+                if (worldPosition.HasValue)
+                    placed.position = worldPosition.Value;
+                go.transform.localScale = SourceToUnityScale;
+
                 var renderer = go.AddComponent<GaussianSplatRenderer>();
                 renderer.splatAsset = shown;
                 renderer.nextAsset = shown;
                 if (sequence != null)
                     go.AddComponent<GaussianPlayer>().sequence = sequence;
+                if (model != null)
+                {
+                    var driver = go.AddComponent<GaussianMeshDriver>();
+                    driver.binding = binding;
+                    driver.source = model.transform;
+                    Undo.RegisterCreatedObjectUndo(model, UndoName);
+                }
                 go.SetActive(true);
 
                 GameObjectUtility.EnsureUniqueNameForSibling(go);

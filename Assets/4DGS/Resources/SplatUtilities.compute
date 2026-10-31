@@ -93,14 +93,38 @@ StructuredBuffer<float4> _MorphSHData;
 // no animation entry, so every read is guarded by HasAnimData.
 StructuredBuffer<float4> _AnimOutputData;
 uint _AnimDataValid; // 0 = no animation, 1 = animation active
-// Per-chunk bounds of the animated positions (object space, 2 float4s per
-// chunk: min, max), reduced by the animation kernel each frame so chunks stay
-// cullable while animated.
-StructuredBuffer<float4> _AnimChunkBounds;
+
+// Base pose from GaussianMeshDriver, 2 float4s per splat: center.xyz, 0;
+// rotation.xyzw. Replaces the asset's position and rotation, under morph
+// (which replaces everything) and animation (which offsets it).
+StructuredBuffer<float4> _DeformedBase;
+uint _DeformedBaseValid;
+
+// Per-chunk bounds of moving splats (object space, 2 float4s per chunk:
+// min, max), reduced each frame by the animation or mesh driver kernel so
+// chunks stay cullable while they move.
+StructuredBuffer<float4> _DynamicChunkBounds;
+uint _DynamicChunkBoundsValid;
 
 bool HasAnimData(uint idx)
 {
     return _AnimDataValid != 0 && idx < _SrcSplatCount;
+}
+
+float3 LoadBasePos(uint idx)
+{
+    return _DeformedBaseValid != 0 ? _DeformedBase[idx * 2].xyz : LoadSplatPos(idx);
+}
+
+SplatData LoadBaseSplat(uint idx, uint shOrder)
+{
+    SplatData splat = LoadSplatData(idx, shOrder);
+    if (_DeformedBaseValid != 0)
+    {
+        splat.pos = _DeformedBase[idx * 2].xyz;
+        splat.rot = _DeformedBase[idx * 2 + 1];
+    }
+    return splat;
 }
 
 // Sort metric: 0 = view-space depth, 1 = radial distance from the camera.
@@ -110,14 +134,15 @@ bool HasAnimData(uint idx)
 uint _SortRadial;
 
 // Object-space position the sort keys are computed from: morphed if a morph
-// is active, plus the animation offset, so sorting matches what is drawn.
+// is active, else the (mesh driven) base, plus the animation offset, so
+// sorting matches what is drawn.
 float3 LoadSortPos(uint idx)
 {
     float3 pos;
     if (_MorphDataValid != 0)
         pos = _MorphedData[idx * 4].xyz;
     else
-        pos = LoadSplatPos(idx);
+        pos = LoadBasePos(idx);
     if (HasAnimData(idx))
         pos += _AnimOutputData[idx * 3].xyz;
     return pos;
@@ -212,6 +237,9 @@ float _SplatScale;
 float _SplatOpacityScale;
 uint _SHOrder;
 uint _SHOnly;
+uint _BackfaceCull;
+// sin of the fade angle before edge-on; 0 cuts back-facing splats off hard
+float _BackfaceFadeWidth;
 
 uint _SplatCutoutsCount;
 
@@ -311,6 +339,23 @@ bool IsSplatCut(float3 pos)
     return finalCut;
 }
 
+// Opacity multiplier from backface culling. Splats sampled from a mesh
+// surface carry the outward surface normal as their local +Z; ones facing
+// away from the camera fade out over _BackfaceFadeWidth (in cosine) before
+// edge-on. Both eyes test against the camera position, so a stereo pair
+// never disagrees on which splats exist.
+float BackfaceVisibility(float4 rot, float3 centerWorldPos)
+{
+    if (_BackfaceCull == 0)
+        return 1.0;
+    float3 objNormal = QuatRotateVector(float3(0, 0, 1), rot);
+    // Normals transform by the inverse transpose, which also keeps them
+    // right under the mirrored scale imported splats carry
+    float3 worldNormal = normalize(mul(objNormal, (float3x3)_MatrixWorldToObject));
+    float facing = dot(worldNormal, normalize(_VecWorldSpaceCameraPos.xyz - centerWorldPos));
+    return _BackfaceFadeWidth > 0 ? saturate(facing / _BackfaceFadeWidth) : (facing > 0 ? 1.0 : 0.0);
+}
+
 // View-independent intermediate data computed once for both eyes.
 struct SplatSharedData
 {
@@ -332,7 +377,8 @@ SplatSharedData CalcSharedSplatData(
     ssd.worldPos = centerWorldPos;
     ssd.skip = isDeleted || isCut;
 
-    float finalOpacity = splat.opacity * opacityScale * animOpacityMul;
+    float finalOpacity = splat.opacity * opacityScale * animOpacityMul
+                       * BackfaceVisibility(splat.rot, centerWorldPos);
     if (finalOpacity < 5.0 / 255.0) { ssd.skip = true; return ssd; }
     if (ssd.skip) return ssd;
 
@@ -498,7 +544,8 @@ SplatViewData CalculateEyeViewData(
     view.pos = centerClipPos;
 
     // Early opacity culling: skip splats with negligible opacity
-    float finalOpacity = splat.opacity * opacityScale * animOpacityMul;
+    float finalOpacity = splat.opacity * opacityScale * animOpacityMul
+                       * BackfaceVisibility(splat.rot, centerWorldPos);
     if (finalOpacity < 5.0 / 255.0)
         return view;
 
@@ -603,10 +650,10 @@ bool ChunkOutsideFrustum(float4x4 mvp, float3 bmin, float3 bmax)
 
 void ChunkBounds(uint chunkIdx, out float3 bmin, out float3 bmax)
 {
-    if (_AnimDataValid != 0)
+    if (_DynamicChunkBoundsValid != 0)
     {
-        bmin = _AnimChunkBounds[chunkIdx * 2].xyz;
-        bmax = _AnimChunkBounds[chunkIdx * 2 + 1].xyz;
+        bmin = _DynamicChunkBounds[chunkIdx * 2].xyz;
+        bmax = _DynamicChunkBounds[chunkIdx * 2 + 1].xyz;
         return;
     }
     SplatChunkInfo chunk = _SplatChunks[chunkIdx];
@@ -624,7 +671,8 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
 
     // Phase 1: chunk frustum culling (first thread per 256-splat chunk)
     // Skip when morph is active (morphed positions leave the chunk AABB);
-    // animated chunks are tested against their animated bounds instead.
+    // moving chunks (animation, mesh driver) are tested against their
+    // current bounds instead.
     // Chunk culling tests AABB corners against the _MatrixVP frustum, which
     // does not exist under ODS — and nothing is off-screen there anyway.
     bool canCull = (_SplatChunkCount > 0) && (_MorphDataValid == 0) && (_OdsEnabled == 0);
@@ -715,7 +763,7 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
     }
     else
     {
-        splat = LoadSplatData(idx, _SHOrder);
+        splat = LoadBaseSplat(idx, _SHOrder);
     }
 
     // Apply animation position offset if available
@@ -889,7 +937,7 @@ void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_Group
     }
     else
     {
-        splat = LoadSplatData(idx, _SHOrder);
+        splat = LoadBaseSplat(idx, _SHOrder);
     }
 
     float3 centerWorldPos = mul(_MatrixObjectToWorld, float4(splat.pos, 1)).xyz;

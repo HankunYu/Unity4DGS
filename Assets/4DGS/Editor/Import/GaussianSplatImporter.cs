@@ -45,17 +45,7 @@ namespace GaussianSplatting.Editor.Import
             {
                 splats = SplatSourceReaders.ForFile(sourcePath).Read(sourcePath, out SplatSourceHeader header);
                 built = GaussianSplatAssetBuilder.Build(ref splats, header.shDegree, settings, cameras);
-
-                GaussianSplatAsset asset = built.asset;
-                asset.name = name;
-                asset.SetAssetFiles(
-                    AddBlock(ctx, name, "chk", built.chunkData),
-                    AddBlock(ctx, name, "pos", built.posData),
-                    AddBlock(ctx, name, "oth", built.otherData),
-                    AddBlock(ctx, name, "col", built.colorData),
-                    AddBlock(ctx, name, "shs", built.shData));
-                ctx.AddObjectToAsset("asset", asset);
-                ctx.SetMainObject(asset);
+                GaussianSplatImportOutput.AddAsMainObject(ctx, name, built);
             }
             catch (Exception e)
             {
@@ -67,15 +57,6 @@ namespace GaussianSplatting.Editor.Import
                     splats.Dispose();
                 built?.Dispose();
             }
-        }
-
-        static TextAsset AddBlock(AssetImportContext ctx, string name, string id, NativeArray<byte> data)
-        {
-            if (!data.IsCreated)
-                return null;
-            var block = new TextAsset(data.AsReadOnlySpan()) { name = $"{name}_{id}" };
-            ctx.AddObjectToAsset(id, block);
-            return block;
         }
     }
 }

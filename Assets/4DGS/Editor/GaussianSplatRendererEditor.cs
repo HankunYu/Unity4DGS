@@ -17,6 +17,8 @@ namespace GaussianSplatting.Editor
         SerializedProperty m_PropSHOrder;
         SerializedProperty m_PropSHOnly;
         SerializedProperty m_PropSortNthFrame;
+        SerializedProperty m_PropBackfaceCulling;
+        SerializedProperty m_PropBackfaceFadeAngle;
 
         int m_CameraIndex;
 
@@ -43,6 +45,8 @@ namespace GaussianSplatting.Editor
             m_PropSHOrder = serializedObject.FindProperty("shOrder");
             m_PropSHOnly = serializedObject.FindProperty("shOnly");
             m_PropSortNthFrame = serializedObject.FindProperty("sortNthFrame");
+            m_PropBackfaceCulling = serializedObject.FindProperty("backfaceCulling");
+            m_PropBackfaceFadeAngle = serializedObject.FindProperty("backfaceFadeAngle");
 
             s_AllEditors.Add(this);
         }
@@ -81,6 +85,9 @@ namespace GaussianSplatting.Editor
             EditorGUILayout.PropertyField(m_PropSHOrder);
             EditorGUILayout.PropertyField(m_PropSHOnly);
             EditorGUILayout.PropertyField(m_PropSortNthFrame);
+            EditorGUILayout.PropertyField(m_PropBackfaceCulling);
+            using (new EditorGUI.DisabledScope(!m_PropBackfaceCulling.boolValue && !m_PropBackfaceCulling.hasMultipleDifferentValues))
+                EditorGUILayout.PropertyField(m_PropBackfaceFadeAngle);
 
             // Validation
             bool validAndEnabled = gs && gs.enabled && gs.gameObject.activeInHierarchy && gs.HasValidAsset;

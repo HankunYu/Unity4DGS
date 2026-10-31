@@ -38,14 +38,27 @@ namespace GaussianSplatting.Editor.Import
             GaussianSplatFormats formats = settings.Formats.ForSHDegree(shDegree);
             int budget = settings.SplatBudgetFor(splats.Length);
 
+            var result = new GaussianSplatBuildResult
+            {
+                sourceIndices = new NativeArray<int>(splats.Length, Allocator.Persistent, NativeArrayOptions.UninitializedMemory),
+            };
+            for (int i = 0; i < splats.Length; ++i)
+                result.sourceIndices[i] = i;
+
             if (settings.pruneOpacity > 0f)
-                splats = PruneTransparentSplats(splats, settings.pruneOpacity);
+                splats = PruneTransparentSplats(splats, ref result.sourceIndices, settings.pruneOpacity);
             if (splats.Length == 0)
+            {
+                result.Dispose();
                 throw new InvalidOperationException("every splat is below the prune opacity");
+            }
             if (splats.Length > budget)
-                splats = KeepMostImportant(splats, budget);
+                splats = KeepMostImportant(splats, ref result.sourceIndices, budget);
             if (splats.Length > GaussianSplatAsset.MaxSplats)
+            {
+                result.Dispose();
                 throw new InvalidOperationException($"{splats.Length} splats; at most {GaussianSplatAsset.MaxSplats} are supported");
+            }
 
             float3 boundsMin, boundsMax;
             unsafe
@@ -59,9 +72,8 @@ namespace GaussianSplatting.Editor.Import
             }
 
             progress("Morton reordering", 0.05f);
-            ReorderMorton(splats, boundsMin, boundsMax);
+            ReorderMorton(splats, result.sourceIndices, boundsMin, boundsMax);
 
-            var result = new GaussianSplatBuildResult();
             NativeArray<int> splatSHIndices = default;
             NativeArray<float> clusteredSHs = default;
             try
@@ -111,8 +123,9 @@ namespace GaussianSplatting.Editor.Import
         }
 
         // Returns the splats at or above minOpacity, disposing the input when
-        // it had to be replaced.
-        static NativeArray<InputSplatData> PruneTransparentSplats(NativeArray<InputSplatData> splats, float minOpacity)
+        // it had to be replaced; sourceIndices is filtered the same way.
+        static NativeArray<InputSplatData> PruneTransparentSplats(NativeArray<InputSplatData> splats,
+            ref NativeArray<int> sourceIndices, float minOpacity)
         {
             int kept = 0;
             for (int i = 0; i < splats.Length; ++i)
@@ -121,13 +134,19 @@ namespace GaussianSplatting.Editor.Import
                 return splats;
 
             var result = new NativeArray<InputSplatData>(kept, Allocator.Persistent);
+            var resultIndices = new NativeArray<int>(kept, Allocator.Persistent);
             for (int i = 0, o = 0; i < splats.Length; ++i)
             {
                 if (splats[i].opacity >= minOpacity)
+                {
+                    resultIndices[o] = sourceIndices[i];
                     result[o++] = splats[i];
+                }
             }
             Debug.Log($"GS: pruned {splats.Length - kept:N0} of {splats.Length:N0} splats below opacity {minOpacity:0.###}");
             splats.Dispose();
+            sourceIndices.Dispose();
+            sourceIndices = resultIndices;
             return result;
         }
 
@@ -157,8 +176,9 @@ namespace GaussianSplatting.Editor.Import
         }
 
         // Returns the count most important splats in their original order,
-        // disposing the input.
-        static NativeArray<InputSplatData> KeepMostImportant(NativeArray<InputSplatData> splats, int count)
+        // disposing the input; sourceIndices is filtered the same way.
+        static NativeArray<InputSplatData> KeepMostImportant(NativeArray<InputSplatData> splats,
+            ref NativeArray<int> sourceIndices, int count)
         {
             var importance = new NativeArray<(float, int)>(splats.Length, Allocator.TempJob);
             new CalcImportanceJob { m_Splats = splats, m_Importance = importance }.Schedule(splats.Length, 8192).Complete();
@@ -169,9 +189,15 @@ namespace GaussianSplatting.Editor.Import
                 kept[i] = importance[i].Item2;
             kept.Sort();
             var result = new NativeArray<InputSplatData>(count, Allocator.Persistent);
+            var resultIndices = new NativeArray<int>(count, Allocator.Persistent);
             for (int i = 0; i < count; ++i)
+            {
                 result[i] = splats[kept[i]];
+                resultIndices[i] = sourceIndices[kept[i]];
+            }
             kept.Dispose();
+            sourceIndices.Dispose();
+            sourceIndices = resultIndices;
             importance.Dispose();
 
             Debug.Log($"GS: kept the {count:N0} most important of {splats.Length:N0} splats");
@@ -229,7 +255,8 @@ namespace GaussianSplatting.Editor.Import
             }
         }
 
-        static void ReorderMorton(NativeArray<InputSplatData> splatData, float3 boundsMin, float3 boundsMax)
+        // Reorders the splats and their source indices along a Morton curve
+        static void ReorderMorton(NativeArray<InputSplatData> splatData, NativeArray<int> sourceIndices, float3 boundsMin, float3 boundsMax)
         {
             ReorderMortonJob order = new ReorderMortonJob
             {
@@ -242,9 +269,14 @@ namespace GaussianSplatting.Editor.Import
             order.m_Order.Sort(new OrderComparer());
 
             NativeArray<InputSplatData> copy = new(order.m_SplatData, Allocator.TempJob);
+            NativeArray<int> indexCopy = new(sourceIndices, Allocator.TempJob);
             for (int i = 0; i < copy.Length; ++i)
+            {
                 order.m_SplatData[i] = copy[order.m_Order[i].Item2];
+                sourceIndices[i] = indexCopy[order.m_Order[i].Item2];
+            }
             copy.Dispose();
+            indexCopy.Dispose();
 
             order.m_Order.Dispose();
         }

@@ -74,6 +74,11 @@ uint _AnimChunkCount;
 ByteAddressBuffer _AnimSplatPos;
 StructuredBuffer<AnimSplatChunkInfo> _AnimSplatChunks;
 
+// GaussianMeshDriver's base pose (2 float4s per splat, center first), when
+// it drives the splats: modifiers then act on the moving surface
+StructuredBuffer<float4> _AnimDeformedBase;
+uint _AnimDeformedBaseValid;
+
 // Output: animated position offsets + property multipliers per splat
 // Layout: float4(posOffset.xyz, opacityMul), float4(scaleMul, colorBlend, 0, 0), float4(colorTint)
 RWStructuredBuffer<float4> _AnimOutput; // 3 float4s per splat
@@ -214,6 +219,9 @@ float3 AnimLoadAndDecodeVector(ByteAddressBuffer dataBuffer, uint addrU, uint fm
 
 float3 LoadAnimSplatPos(uint idx)
 {
+    if (_AnimDeformedBaseValid != 0)
+        return _AnimDeformedBase[idx * 2].xyz;
+
     uint fmt = _AnimSplatFormat & 0xFF;
     uint stride = 0;
     if (fmt == VECTOR_FMT_32F) stride = 12;
