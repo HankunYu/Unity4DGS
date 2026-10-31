@@ -10,17 +10,17 @@
 
 #include "RenderGaussianSplatsPass.hlsl"
 
-// Matches GaussianSplatStyleRange
+// Matches GaussianSplatStyleRange: per style slot (GaussianStyleSet), the
+// additivity at full weight, GaussianSplatStyleShape and streak tail power
 struct SplatStyleRange
 {
     uint start;
-    float additivity;
     uint baked;
-    uint shape;
-    float streakTailPower;
-    float pad0;
-    float pad1;
-    float pad2;
+    uint pad0;
+    uint pad1;
+    float4 additivity;
+    float4 shape;
+    float4 streakTailPower;
 };
 
 // One entry per renderer in the draw, ascending by start. A global draw
@@ -40,14 +40,15 @@ SplatStyleRange StyleRangeFor (uint splatIdx)
 #define STYLE_PLAIN_SHAPE -1.0
 
 // A baked quad's color (PackBakedViewColor), linear like SplatViewColor's,
-// and its splat's style weight
-half4 BakedViewColor (SplatViewData view, out float styleWeight)
+// and its splat's style weight and slot
+half4 BakedViewColor (SplatViewData view, out float styleWeight, out uint styleSlot)
 {
 	half4 col = half4(UnpackRGB9E5(view.color.x), ViewAlpha(view.color));
 	#if !defined(UNITY_COLORSPACE_GAMMA)
 	col.rgb = GammaToLinearSpace(col.rgb);
 	#endif
 	styleWeight = BakedViewStyleWeight(view.color);
+	styleSlot = BakedViewStyleSlot(view.color);
 	return col;
 }
 
@@ -82,7 +83,7 @@ v2fStylized StylizedVert (uint vtxID, uint instID)
 		o.col = s.col;
 		o.pos = s.pos;
 		o.vertex = s.vertex;
-		o.style = float4(range.additivity, 0, 1, STYLE_PLAIN_SHAPE);
+		o.style = float4(0, 0, 1, STYLE_PLAIN_SHAPE);
 	}
 	else
 	{
@@ -94,14 +95,15 @@ v2fStylized StylizedVert (uint vtxID, uint instID)
 		else
 		{
 			float styleWeight;
-			o.col = BakedViewColor(view, styleWeight);
+			uint slot;
+			o.col = BakedViewColor(view, styleWeight, slot);
 			// The view data holds the quad's half-axes in pixels as they are
 			float2 quadPos = float2(vtxID & 1, (vtxID >> 1) & 1) * 2.0 - 1.0;
 			o.pos = quadPos;
 			float2 deltaScreenPos = (quadPos.x * view.axis1 + quadPos.y * view.axis2) * 2 / _VecScreenParams.xy;
 			o.vertex = view.pos;
 			o.vertex.xy += deltaScreenPos * view.pos.w;
-			o.style = float4(range.additivity * styleWeight, styleWeight, range.streakTailPower, range.shape);
+			o.style = float4(range.additivity[slot] * styleWeight, styleWeight, range.streakTailPower[slot], range.shape[slot]);
 			o.viewDist = view.pos.w;
 		}
 		// SplatVert flips the plain branch itself

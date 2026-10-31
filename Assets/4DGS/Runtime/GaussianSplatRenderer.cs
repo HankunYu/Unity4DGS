@@ -60,12 +60,8 @@ namespace GaussianSplatting.Runtime
         // Screen pixels per occlusion grid cell
         const int OcclusionCellSize = 4;
 
-        [Tooltip("Stylized look blended over the splats by Style Weight. Child GaussianStyleVolumes limit it to their regions")]
-        public GaussianSplatStyle style;
-        [Range(0.0f, 1.0f)] [Tooltip("How far the style replaces the plain splat look; animate it for transitions")]
-        public float styleWeight = 1.0f;
-
-        // Timeline channels; the style itself is a GaussianStyleTrack's
+        // Timeline channels; styles have their own on GaussianStyler and its
+        // volumes
         private static readonly string[] TimelineChannels = { "Splat Scale", "Opacity Scale" };
 
         int IGaussianTimelineTarget.ChannelCount => TimelineChannels.Length;
@@ -84,13 +80,29 @@ namespace GaussianSplatting.Runtime
 
         float IGaussianTimelineTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
 
-        private readonly List<GaussianStyleVolume> _styleVolumes = new();
-        private readonly Matrix4x4[] _styleVolumeMatrices = new Matrix4x4[GaussianStyleVolume.MaxPerRenderer];
-        private readonly Vector4[] _styleVolumeParams = new Vector4[GaussianStyleVolume.MaxPerRenderer];
+        // The styles this renderer draws with, refreshed from its styler
+        // before each frame's view data (RefreshStyle)
+        private readonly GaussianStyleSet _styleSet = new();
+
+        // Styler whose volumes style this renderer instead of its own; set by
+        // GaussianParticleEmitter so particles take their source's look
+        [NonSerialized] internal GaussianStyler StylerOverride;
+
+        internal GaussianStyler Styler => StylerOverride != null ? StylerOverride : GetComponent<GaussianStyler>();
+
+        // Loads the styler's volumes and styles as they are now
+        internal void RefreshStyle()
+        {
+            GaussianStyler styler = Styler;
+            if (styler != null)
+                styler.FillStyleSet(_styleSet);
+            else
+                _styleSet.Begin(0f);
+        }
 
         // At zero weight the renderer draws the render mode's own look, which
         // the stylized one converges to as the weight goes to zero
-        internal bool StyleActive => style != null && styleWeight > 0f &&
+        internal bool StyleActive => _styleSet.Active &&
             GaussianSplatRenderSystem.instance.Config?.renderMode is GaussianSplatRenderMode.Splats or GaussianSplatRenderMode.PointCloud;
 
         private static bool PointCloudMode =>
@@ -102,45 +114,12 @@ namespace GaussianSplatting.Runtime
         internal bool QuadsBaked => StyleActive || PointCloudMode;
 
         // Fully additive splats blend the same in any order, so they skip the
-        // sort; a style volume leaves some of them less than fully styled
-        internal bool StyleOrderIndependent => StyleActive && styleWeight >= 1f && style.Additivity >= 1f &&
-                                               CollectStyleVolumes() == 0;
-
-        // Renderer whose style volumes limit this one's style too, instead of
-        // its own; set by GaussianParticleEmitter so particles take their
-        // source's look
-        [NonSerialized] internal GaussianSplatRenderer StyleVolumeSource;
-
-        // Gathers the active style volumes under this renderer (or under
-        // StyleVolumeSource), as many as the view-data pass takes
-        private int CollectStyleVolumes()
-        {
-            GaussianSplatRenderer owner = StyleVolumeSource != null ? StyleVolumeSource : this;
-            owner.GetComponentsInChildren(_styleVolumes);
-            int count = 0;
-            for (int i = 0; i < _styleVolumes.Count && count < GaussianStyleVolume.MaxPerRenderer; i++)
-            {
-                if (_styleVolumes[i].isActiveAndEnabled)
-                    _styleVolumes[count++] = _styleVolumes[i];
-            }
-            _styleVolumes.RemoveRange(count, _styleVolumes.Count - count);
-            return count;
-        }
+        // sort
+        internal bool StyleOrderIndependent => StyleActive && _styleSet.OrderIndependent;
 
         // This renderer's entry in a stylized draw starting at the given splat
-        internal GaussianSplatStyleRange StyleRange(int start)
-        {
-            if (!StyleActive)
-                return new GaussianSplatStyleRange { start = (uint)start, baked = QuadsBaked ? 1u : 0u };
-            return new GaussianSplatStyleRange
-            {
-                start = (uint)start,
-                additivity = style.Additivity,
-                baked = 1,
-                shape = (uint)style.Shape,
-                streakTailPower = style.StreakTailPower,
-            };
-        }
+        internal GaussianSplatStyleRange StyleRange(int start) =>
+            StyleActive ? _styleSet.StyleRange(start, true) : new GaussianSplatStyleRange { start = (uint)start, baked = QuadsBaked ? 1u : 0u };
 
         // Single-entry range table for this renderer's own stylized draw; the
         // global path keeps one per render order group instead
@@ -256,44 +235,12 @@ namespace GaussianSplatting.Runtime
             public static readonly int OcclusionCellSize = Shader.PropertyToID("_OcclusionCellSize");
             public static readonly int OcclusionFootprintScale = Shader.PropertyToID("_OcclusionFootprintScale");
             public static readonly int OcclusionTolerance = Shader.PropertyToID("_OcclusionTolerance");
-            public static readonly int StyleWeight = Shader.PropertyToID("_StyleWeight");
-            public static readonly int StyleColorSource = Shader.PropertyToID("_StyleColorSource");
-            public static readonly int StyleRampInput = Shader.PropertyToID("_StyleRampInput");
-            public static readonly int StyleRampTex = Shader.PropertyToID("_StyleRampTex");
-            public static readonly int StyleDepthNear = Shader.PropertyToID("_StyleDepthNear");
-            public static readonly int StyleDepthInvRange = Shader.PropertyToID("_StyleDepthInvRange");
-            public static readonly int StyleIntensity = Shader.PropertyToID("_StyleIntensity");
-            public static readonly int StyleAdditivity = Shader.PropertyToID("_StyleAdditivity");
-            public static readonly int StyleRimAmount = Shader.PropertyToID("_StyleRimAmount");
-            public static readonly int StyleRimPower = Shader.PropertyToID("_StyleRimPower");
-            public static readonly int StyleShape = Shader.PropertyToID("_StyleShape");
-            public static readonly int StyleDotRadius = Shader.PropertyToID("_StyleDotRadius");
-            public static readonly int StyleStreakAxis = Shader.PropertyToID("_StyleStreakAxis");
-            public static readonly int StyleStreakDir = Shader.PropertyToID("_StyleStreakDir");
-            public static readonly int StyleStreakLength = Shader.PropertyToID("_StyleStreakLength");
-            public static readonly int StyleStreakHalfWidth = Shader.PropertyToID("_StyleStreakHalfWidth");
-            public static readonly int StyleMinWorldSize = Shader.PropertyToID("_StyleMinWorldSize");
-            public static readonly int StyleReach = Shader.PropertyToID("_StyleReach");
-            public static readonly int StyleChunkExpand = Shader.PropertyToID("_StyleChunkExpand");
-            public static readonly int StyleGlintDensity = Shader.PropertyToID("_StyleGlintDensity");
-            public static readonly int StyleGlintRate = Shader.PropertyToID("_StyleGlintRate");
-            public static readonly int StyleGlintIntensity = Shader.PropertyToID("_StyleGlintIntensity");
-            public static readonly int StyleTime = Shader.PropertyToID("_StyleTime");
             public static readonly int SplatQuadExtent = Shader.PropertyToID("_SplatQuadExtent");
             public static readonly int SplatMaxPixelRadius = Shader.PropertyToID("_SplatMaxPixelRadius");
             public static readonly int BakeQuads = Shader.PropertyToID("_BakeQuads");
             public static readonly int QuadBaseShape = Shader.PropertyToID("_QuadBaseShape");
             public static readonly int QuadBakeDeferred = Shader.PropertyToID("_QuadBakeDeferred");
             public static readonly int MatrixRigToWorld = Shader.PropertyToID("_MatrixRigToWorld");
-            public static readonly int StyleQuantize = Shader.PropertyToID("_StyleQuantize");
-            public static readonly int StyleQuantizeSpacing = Shader.PropertyToID("_StyleQuantizeSpacing");
-            public static readonly int StyleQuantizeHalfBand = Shader.PropertyToID("_StyleQuantizeHalfBand");
-            public static readonly int StyleSliceNormal = Shader.PropertyToID("_StyleSliceNormal");
-            public static readonly int StyleSliceOffset = Shader.PropertyToID("_StyleSliceOffset");
-            public static readonly int StyleKeepFraction = Shader.PropertyToID("_StyleKeepFraction");
-            public static readonly int StyleVolumeCount = Shader.PropertyToID("_StyleVolumeCount");
-            public static readonly int StyleVolumeWorldToLocal = Shader.PropertyToID("_StyleVolumeWorldToLocal");
-            public static readonly int StyleVolumeParams = Shader.PropertyToID("_StyleVolumeParams");
             public static readonly int DofParams = Shader.PropertyToID("_DofParams");
             public static readonly int MatrixInvVP = Shader.PropertyToID("_MatrixInvVP");
             public static readonly int MatrixInvVPEye = Shader.PropertyToID("_MatrixInvVP_Eye");
@@ -925,6 +872,7 @@ namespace GaussianSplatting.Runtime
             DisposeBuffer(ref _gpuIndirectArgs);
             DisposeBuffer(ref _gpuOcclusionGrid);
             DisposeBuffer(ref _gpuStyleRange);
+            _styleSet.Dispose();
 
             _sorterArgs.resources.Dispose();
 
@@ -1190,22 +1138,10 @@ namespace GaussianSplatting.Runtime
         private void SetStyleOnCS(CommandBuffer cmb, int kernelIndex, float projectionScale, bool occlusion)
         {
             ComputeShader cs = csSplatUtilities;
-            bool active = StyleActive;
-            cmb.SetComputeFloatParam(cs, Props.StyleWeight, active ? styleWeight : 0f);
-            int volumeCount = active ? CollectStyleVolumes() : 0;
-            for (int i = 0; i < volumeCount; i++)
-            {
-                _styleVolumeMatrices[i] = _styleVolumes[i].transform.worldToLocalMatrix;
-                _styleVolumeParams[i] = _styleVolumes[i].ShaderParams;
-            }
-            cmb.SetComputeIntParam(cs, Props.StyleVolumeCount, volumeCount);
-            cmb.SetComputeMatrixArrayParam(cs, Props.StyleVolumeWorldToLocal, _styleVolumeMatrices);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleVolumeParams, _styleVolumeParams);
-            // The kernel samples the ramp whether or not a style is set
-            cmb.SetComputeTextureParam(cs, kernelIndex, Props.StyleRampTex, active ? style.RampTexture : Texture2D.whiteTexture);
-
-            // Occlusion culling reads it whether or not a style is set
-            cmb.SetComputeFloatParam(cs, Props.StyleAdditivity, active ? style.Additivity : 0f);
+            SetStyleColorOnCS(cmb, cs, kernelIndex);
+            // Read whether or not a style is set: the culling margins, and the
+            // additivity occlusion culling discounts
+            _styleSet.SetShapeOnCS(cmb, cs, StyleActive, transform.lossyScale);
 
             bool baked = QuadsBaked;
             cmb.SetComputeIntParam(cs, Props.BakeQuads, baked ? 1 : 0);
@@ -1225,64 +1161,14 @@ namespace GaussianSplatting.Runtime
                 cmb.SetComputeFloatParam(cs, Props.ProjectionScale, projectionScale);
                 cmb.SetComputeFloatParam(cs, Props.PointOpacityBoost, config.pointCloudOpacityBoost);
             }
-            if (!active)
-            {
-                // The culling margins are read whether or not a style is set
-                cmb.SetComputeFloatParam(cs, Props.StyleReach, 0f);
-                cmb.SetComputeFloatParam(cs, Props.StyleChunkExpand, 0f);
-                return;
-            }
-
-            cmb.SetComputeIntParam(cs, Props.StyleColorSource, (int)style.ColorSource);
-            cmb.SetComputeIntParam(cs, Props.StyleRampInput, (int)style.RampInput);
-            cmb.SetComputeFloatParam(cs, Props.StyleDepthNear, style.RampDepthNear);
-            cmb.SetComputeFloatParam(cs, Props.StyleDepthInvRange, 1f / Mathf.Max(style.RampDepthFar - style.RampDepthNear, 1e-4f));
-            cmb.SetComputeFloatParam(cs, Props.StyleIntensity, style.Intensity);
-            cmb.SetComputeFloatParam(cs, Props.StyleRimAmount, style.RimAmount);
-            cmb.SetComputeFloatParam(cs, Props.StyleRimPower, style.RimPower);
-
-            cmb.SetComputeIntParam(cs, Props.StyleShape, (int)style.Shape);
-            cmb.SetComputeFloatParam(cs, Props.StyleDotRadius, style.DotSize * 0.5f);
-            cmb.SetComputeIntParam(cs, Props.StyleStreakAxis, (int)style.StreakAxis);
-            cmb.SetComputeVectorParam(cs, Props.StyleStreakDir, style.StreakDirection);
-            cmb.SetComputeFloatParam(cs, Props.StyleStreakLength, style.StreakLength);
-            cmb.SetComputeFloatParam(cs, Props.StyleStreakHalfWidth, style.StreakWidth * 0.5f);
-            cmb.SetComputeFloatParam(cs, Props.StyleMinWorldSize, style.MinWorldSize);
-            cmb.SetComputeIntParam(cs, Props.StyleQuantize, (int)style.Quantize);
-            cmb.SetComputeFloatParam(cs, Props.StyleQuantizeSpacing, style.QuantizeSpacing);
-            cmb.SetComputeFloatParam(cs, Props.StyleQuantizeHalfBand,
-                style.Quantize == GaussianSplatStyleQuantize.None ? float.MaxValue : style.QuantizeBand * style.QuantizeSpacing * 0.5f);
-            cmb.SetComputeVectorParam(cs, Props.StyleSliceNormal, style.SliceNormal);
-            cmb.SetComputeFloatParam(cs, Props.StyleSliceOffset, style.SliceOffset);
-            cmb.SetComputeFloatParam(cs, Props.StyleKeepFraction, style.KeepFraction);
-
-            // The reach shrinks with the weight, like the snap and shape it bounds
-            float reach = style.Reach * styleWeight;
-            cmb.SetComputeFloatParam(cs, Props.StyleReach, reach);
-            // Object-space reach for the chunk bounds; the smallest axis scale
-            // stretches a world distance the most
-            Vector3 scale = transform.lossyScale;
-            float minScale = Mathf.Max(Mathf.Min(Mathf.Abs(scale.x), Mathf.Min(Mathf.Abs(scale.y), Mathf.Abs(scale.z))), 1e-6f);
-            cmb.SetComputeFloatParam(cs, Props.StyleChunkExpand, reach / minScale);
-            cmb.SetComputeFloatParam(cs, Props.StyleGlintDensity, style.GlintDensity);
-            cmb.SetComputeFloatParam(cs, Props.StyleGlintRate, style.GlintRate);
-            cmb.SetComputeFloatParam(cs, Props.StyleGlintIntensity, style.GlintIntensity);
-            cmb.SetComputeFloatParam(cs, Props.StyleTime, StyleClock);
         }
 
-        // Same clock as GaussianAnimator, so a capture under
-        // Time.captureFramerate is deterministic and edit mode still moves
-        private static float StyleClock
-        {
-            get
-            {
-#if UNITY_EDITOR
-                if (!Application.isPlaying)
-                    return (float)UnityEditor.EditorApplication.timeSinceStartup;
-#endif
-                return Time.time;
-            }
-        }
+        // The style color parameters (GaussianStyle.hlsl): for the view data,
+        // and for another compute shader that colors splats the way this
+        // renderer draws them. Styles only apply in the render modes that draw
+        // them (StyleActive).
+        internal void SetStyleColorOnCS(CommandBuffer cmb, ComputeShader cs, int kernelIndex) =>
+            _styleSet.SetColorOnCS(cmb, cs, kernelIndex, StyleActive);
 
         internal bool SupportsGlobalSortPath()
         {

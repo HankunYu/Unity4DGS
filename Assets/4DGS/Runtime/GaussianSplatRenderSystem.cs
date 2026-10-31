@@ -611,6 +611,7 @@ namespace GaussianSplatting.Runtime
                 var gs = kvp.Key;
                 if (gs == null || !gs.isActiveAndEnabled || !gs.visible || !gs.HasValidAsset || !gs.HasValidRenderSetup)
                     continue;
+                gs.RefreshStyle();
                 _activeSplats.Add((kvp.Key, kvp.Value));
             }
             if (_activeSplats.Count == 0)

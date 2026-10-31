@@ -3,13 +3,15 @@ using UnityEngine;
 
 namespace GaussianSplatting.Runtime
 {
-    // A stylized look for a GaussianSplatRenderer, blended in by the
-    // renderer's styleWeight. Applied per splat in the view-data pass, so it
-    // works on every draw path, in stereo and in Direct composite mode.
+    // A stylized look for splats, applied by a GaussianStyleVolume under a
+    // GaussianStyler and blended in by the volume's weight. Applied per splat
+    // in the view-data pass, so it works on every draw path, in stereo and in
+    // Direct composite mode. Styles draw in the Splats and PointCloud render
+    // modes.
     [CreateAssetMenu(menuName = "Gaussian Splats/Style", fileName = "SplatStyle", order = 2)]
     public class GaussianSplatStyle : ScriptableObject
     {
-        private const int RampResolution = 256;
+        internal const int RampResolution = 256;
 
         [Header("Color")]
         [SerializeField] private GaussianSplatStyleColorSource colorSource = GaussianSplatStyleColorSource.Original;

@@ -31,8 +31,6 @@ namespace GaussianSplatting.Editor
         {
             if (trackType == typeof(GaussianChannelTrack))
                 return new Color(0.27f, 0.62f, 0.60f);
-            if (trackType == typeof(GaussianStyleTrack))
-                return new Color(0.70f, 0.36f, 0.62f);
             if (trackType == typeof(GaussianActivationTrack))
                 return new Color(0.36f, 0.62f, 0.32f);
             if (trackType == typeof(GaussianTransformTrack))

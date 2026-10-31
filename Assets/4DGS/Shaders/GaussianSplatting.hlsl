@@ -599,17 +599,24 @@ uint2 PackViewColor(half4 col)
 }
 
 // View data color of a baked quad (RenderGaussianStylized.shader), which
-// also carries the splat's style weight: the quad shader morphs each quad's
-// profile by it. Color as shared-exponent 9:9:9:5, the weight as 16-bit unorm.
-uint2 PackBakedViewColor(half3 rgb, half alpha, float styleWeight)
+// also carries the splat's style: the quad shader morphs each quad's
+// profile by its weight into its slot's shape (GaussianStyleSet). Color as
+// shared-exponent 9:9:9:5; the slot in the top 2 bits of .y, the weight as
+// 14-bit unorm below it, the alpha as a half below that.
+uint2 PackBakedViewColor(half3 rgb, half alpha, float styleWeight, uint styleSlot)
 {
-    uint w = (uint)round(saturate(styleWeight) * 65535.0);
-    return uint2(PackRGB9E5(rgb), (w << 16) | f32tof16(alpha));
+    uint w = (uint)round(saturate(styleWeight) * 16383.0);
+    return uint2(PackRGB9E5(rgb), (styleSlot << 30) | (w << 16) | f32tof16(alpha));
 }
 
 float BakedViewStyleWeight(uint2 color)
 {
-    return (color.y >> 16) * (1.0 / 65535.0);
+    return ((color.y >> 16) & 0x3FFF) * (1.0 / 16383.0);
+}
+
+uint BakedViewStyleSlot(uint2 color)
+{
+    return color.y >> 30;
 }
 
 // Alpha is the low half of .y in both layouts

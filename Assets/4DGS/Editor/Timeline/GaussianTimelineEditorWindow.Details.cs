@@ -293,9 +293,6 @@ namespace GaussianSplatting.Editor
                         transformClip.FromRotation = transformClip.ToRotation = transform.localEulerAngles;
                         transformClip.FromScale = transformClip.ToScale = transform.localScale;
                         break;
-                    case GaussianStyleClip styleClip when binding is GaussianSplatRenderer renderer:
-                        styleClip.Style = renderer.style;
-                        break;
                     case GaussianModifierStateClip stateClip when binding is GaussianModifierStateMachine machine && machine.States.Count > 0:
                         stateClip.State = machine.States[0].name;
                         break;

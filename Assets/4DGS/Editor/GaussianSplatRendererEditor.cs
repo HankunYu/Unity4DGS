@@ -23,8 +23,6 @@ namespace GaussianSplatting.Editor
         SerializedProperty m_PropOcclusionCulling;
         SerializedProperty m_PropOcclusionTolerance;
         SerializedProperty m_PropOcclusionFootprintScale;
-        SerializedProperty m_PropStyle;
-        SerializedProperty m_PropStyleWeight;
 
         int m_CameraIndex;
 
@@ -57,8 +55,6 @@ namespace GaussianSplatting.Editor
             m_PropOcclusionCulling = serializedObject.FindProperty("occlusionCulling");
             m_PropOcclusionTolerance = serializedObject.FindProperty("occlusionTolerance");
             m_PropOcclusionFootprintScale = serializedObject.FindProperty("occlusionFootprintScale");
-            m_PropStyle = serializedObject.FindProperty("style");
-            m_PropStyleWeight = serializedObject.FindProperty("styleWeight");
 
             s_AllEditors.Add(this);
         }
@@ -107,16 +103,6 @@ namespace GaussianSplatting.Editor
                 EditorGUILayout.PropertyField(m_PropOcclusionTolerance);
                 EditorGUILayout.PropertyField(m_PropOcclusionFootprintScale);
             }
-
-            // Style
-            EditorGUILayout.Space();
-            GUILayout.Label("Style", EditorStyles.boldLabel);
-            EditorGUILayout.PropertyField(m_PropStyle);
-            using (new EditorGUI.DisabledScope(m_PropStyle.objectReferenceValue == null && !m_PropStyle.hasMultipleDifferentValues))
-                EditorGUILayout.PropertyField(m_PropStyleWeight);
-            var styleConfig = Object.FindFirstObjectByType<GaussianSplatConfig>();
-            if (gs.style != null && styleConfig != null && styleConfig.renderMode != GaussianSplatRenderMode.Splats)
-                EditorGUILayout.HelpBox($"Styles apply in the Splats render mode (currently {styleConfig.renderMode})", MessageType.Info);
 
             // Validation
             bool validAndEnabled = gs && gs.enabled && gs.gameObject.activeInHierarchy && gs.HasValidAsset;

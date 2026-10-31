@@ -14,8 +14,9 @@ namespace GaussianSplatting.Runtime
     // The particles are this GameObject's own splats: the emitter
     // gives its GaussianSplatRenderer a generated asset of `capacity` splats
     // and drives their pose, size, opacity and color on the GPU each frame,
-    // so sorting, styles (mirrored from the source), ODS capture and depth of
-    // field treat them like any other splats, and the source is untouched.
+    // so sorting, styles (the source's styler, or one of its own), ODS
+    // capture and depth of field treat them like any other splats, and the
+    // source is untouched.
     //
     // Runs after the source's mesh driver and animator in LateUpdate, and on
     // every render in edit mode.
@@ -63,7 +64,7 @@ namespace GaussianSplatting.Runtime
         [SerializeField, Min(1)] private int capacity = 8000;
         [Tooltip("Varies which splats the particles are born on")]
         [SerializeField] private int seed;
-        [Tooltip("Draw the particles with the source's style, style weight and style volumes")]
+        [Tooltip("Style the particles with the source's GaussianStyler and its volumes, instead of this object's own")]
         [SerializeField] private bool followSourceStyle = true;
 
         [Header("Life")]
@@ -194,12 +195,7 @@ namespace GaussianSplatting.Runtime
                 return;
             }
             EnsureResources();
-            if (followSourceStyle)
-            {
-                _renderer.style = source.style;
-                _renderer.styleWeight = source.styleWeight;
-            }
-            _renderer.StyleVolumeSource = followSourceStyle ? source : null;
+            _renderer.StylerOverride = followSourceStyle ? source.Styler : null;
 
             Transform t = transform;
             Vector3 scale = t.lossyScale;
@@ -251,7 +247,7 @@ namespace GaussianSplatting.Runtime
         {
             if (_renderer == null)
                 return;
-            _renderer.StyleVolumeSource = null;
+            _renderer.StylerOverride = null;
             _renderer.ClearDeformedBase();
             _renderer.ClearAnimationOutput();
         }

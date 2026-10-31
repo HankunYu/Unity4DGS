@@ -5,30 +5,26 @@ using UnityEngine;
 namespace GaussianSplatting.Runtime
 {
     /// <summary>
-    /// Limits a renderer's style to a region: placed under a
-    /// GaussianSplatRenderer, it makes the style weight vary per splat, the
-    /// renderer's Style Weight times this volume's weight where the splat is.
-    /// Several volumes combine by taking the strongest; with none the style
-    /// covers the whole renderer. To have the region follow the camera, give
-    /// the volume a Parent Constraint with the camera as its source; animate
-    /// its scale to sweep the style across the scene.
+    /// Applies a style within a region: placed under a GaussianStyler, it
+    /// styles the splats inside it, at this volume's weight where the splat is
+    /// times the styler's Weight. Where volumes overlap, the strongest decides
+    /// a splat's style. Unbounded covers the whole renderer. To have the
+    /// region follow the camera, give the volume a Parent Constraint with the
+    /// camera as its source; animate its scale to sweep the style across the
+    /// scene, or fade one volume out while another fades in to switch styles.
     /// Timelines drive Weight and Falloff as channels.
     /// </summary>
     public class GaussianStyleVolume : GaussianVolume, IGaussianTimelineTarget
     {
         private static readonly string[] ChannelNames = { "Weight", "Falloff" };
 
-        // Must match MAX_STYLE_VOLUMES in SplatUtilities.compute
-        public const int MaxPerRenderer = 4;
-
+        [Tooltip("Style applied inside the volume")]
+        public GaussianSplatStyle style;
         [Range(0f, 1f)]
-        [Tooltip("Style weight inside the volume, before the renderer's Style Weight scales it")]
+        [Tooltip("Style weight inside the volume, before the styler's Weight scales it")]
         public float weight = 1f;
 
         protected override Color GizmoColor => Color.magenta;
-
-        // Shape parameters for the view-data pass: x shape, y falloff, z weight
-        internal Vector4 ShaderParams => new((float)shape, falloff, weight, 0f);
 
         int IGaussianTimelineTarget.ChannelCount => ChannelNames.Length;
 
