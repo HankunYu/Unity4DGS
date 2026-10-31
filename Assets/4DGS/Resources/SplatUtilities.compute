@@ -427,6 +427,12 @@ float4 OdsProjectSplat(float3 worldPos, out float distOut)
     // No tangent line exists from inside the viewing circle; collapse to mono.
     float sinA = (rho > abs(r)) ? (r / rho) : 0.0;
     float theta = phi - asin(clamp(sinA, -1.0, 1.0));
+    // The eye offset can carry a splat behind the rig past +-pi; wrap it to
+    // the other side of the equirect instead of off the image
+    if (theta < -kOdsPi)
+        theta += 2.0 * kOdsPi;
+    else if (theta > kOdsPi)
+        theta -= 2.0 * kOdsPi;
 
     float3 eye = float3(r * cos(theta), 0.0, -r * sin(theta));
     float3 v = p - eye;
