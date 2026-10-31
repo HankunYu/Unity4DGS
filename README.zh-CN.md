@@ -66,8 +66,8 @@ git clone https://github.com/HankunYu/Unity4DGS.git
 2. 在场景中放置一个 `GaussianSplatConfig` 组件(保存全局渲染设置与 shader 引用)。场景里没有时，第 4 步会自动创建。
 3. 把 `.ply` / `.spz` 文件放进项目，它会原地导入为泼溅资产；质量、剪枝、splat 预算、SH 阶数等选项在其导入设置（Inspector）里调整，源文件保持不变，可继续给其他工具使用。
 4. 把文件拖进 Scene 视图或 Hierarchy，会自动创建一个挂好 `GaussianSplatRenderer` 的 GameObject；训练工具输出的数据 Y 轴朝下，所以它的 Y 缩放为 -1。也可以手动添加组件并指定资产。
-5. 对于 4D 序列，把逐帧文件放在一个文件夹里，右键该文件夹选 `Create > Gaussian Splats > Sequence from Folder`（帧按文件名自然顺序排列），再把生成的序列拖进场景，会自动挂上播放它的 `GaussianPlayer`。
-6. 想不经训练把模型转成 splat：选中模型（FBX 或预制体），选 `Create > Gaussian Splats > Mesh Splats`。生成的 `.meshsplat` 文件会导入成 splat 资产：对模型下所有网格采样（蒙皮网格取绑定姿态），splat 平贴在表面上。导入设置里可以选点的分布方式（均匀的泊松盘、纯随机、每顶点一个、在折边和开口边缘加密、由虚拟扫描仪打出的 LiDAR 式扫描线，或投影到表面上的规则晶格）和颜色来源（统一色、材质底色 × 贴图、顶点色；可以给个别材质单独指定来源，比如角色用贴图、道具保持统一色），也可以调烘焙光照和 splat 形状；模型改动后会自动重新导入。把它拖进场景时会连同模型一起放进来：splat 挂在模型下面，并带一个 `GaussianMeshDriver`，模型播放动画时让 splat 始终贴在表面上（它根据骨骼变换在 GPU 上自己做蒙皮，所以源网格会被隐藏、不需要渲染；不跟随 blend shape）。动画修改器作用在运动中的表面上。把 Output 改成 Sequence，则会把动画片段的一段烘成逐帧的 splat 资产，由 `GaussianPlayer` 播放：可以只采样一次、让点跟着表面走，也可以每帧重新采样，让扫描仪和采样固定不动、模型从中穿过。
+5. 对于 4D 序列，把逐帧文件放在一个文件夹里，右键该文件夹选 `Create > Gaussian Splatting > Sequence from Folder`（帧按文件名自然顺序排列），再把生成的序列拖进场景，会自动挂上播放它的 `GaussianPlayer`。
+6. 想不经训练把模型转成 splat：选中模型（FBX 或预制体），选 `Create > Gaussian Splatting > Mesh Splats`。生成的 `.meshsplat` 文件会导入成 splat 资产：对模型下所有网格采样（蒙皮网格取绑定姿态），splat 平贴在表面上。导入设置里可以选点的分布方式（均匀的泊松盘、纯随机、每顶点一个、在折边和开口边缘加密、由虚拟扫描仪打出的 LiDAR 式扫描线，或投影到表面上的规则晶格）和颜色来源（统一色、材质底色 × 贴图、顶点色；可以给个别材质单独指定来源，比如角色用贴图、道具保持统一色），也可以调烘焙光照和 splat 形状；模型改动后会自动重新导入。把它拖进场景时会连同模型一起放进来：splat 挂在模型下面，并带一个 `GaussianMeshDriver`，模型播放动画时让 splat 始终贴在表面上（它根据骨骼变换在 GPU 上自己做蒙皮，所以源网格会被隐藏、不需要渲染；不跟随 blend shape）。动画修改器作用在运动中的表面上。把 Output 改成 Sequence，则会把动画片段的一段烘成逐帧的 splat 资产，由 `GaussianPlayer` 播放：可以只采样一次、让点跟着表面走，也可以每帧重新采样，让扫描仪和采样固定不动、模型从中穿过。
 
 ## 示例资产
 
@@ -77,10 +77,25 @@ git clone https://github.com/HankunYu/Unity4DGS.git
 
 ```
 Assets/4DGS/
-├── Runtime/          # 渲染器、排序、动画系统、modifier、状态机
-├── Editor/           # PLY/SPZ 导入器、模型转 splat 导入器、编辑工具
+├── Runtime/
+│   ├── Rendering/    # 渲染器、渲染系统、配置、URP feature、景深
+│   ├── Sorting/      # GPU 排序
+│   ├── Volumes/      # 体积基类与形状
+│   ├── Animation/    # 动画器、动画体积、modifier、状态机、morph
+│   ├── Style/        # Styler、风格体积、风格资产
+│   ├── PostProcess/  # 风格化后处理 Volume 组件
+│   ├── Playback/     # 4D 序列播放
+│   ├── Mesh/         # Mesh driver(splat 跟随动画模型)
+│   ├── Particles/    # 粒子发射器
+│   ├── Cutout/       # 裁切区域
+│   ├── Capture/      # 双目 360 录制
+│   ├── Editing/      # splat 选择与编辑状态
+│   └── Timeline/     # 自带时间轴
+├── Editor/           # 同名文件夹下的 Inspector,以及 Import(PLY/SPZ)、
+│                     # MeshSplat(模型转 splat 导入器)和编辑工具
 ├── Shaders/          # 泼溅 / 点云 shader、排序与 morph compute
-├── Resources/        # Compute shader(动画、tile 渲染、工具)
+├── Resources/        # Compute shader(动画、粒子、tile 渲染、工具)
+├── Presets/          # 风格预设
 └── Settings/         # URP 管线资产
 ```
 

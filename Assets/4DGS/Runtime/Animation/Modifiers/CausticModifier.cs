@@ -6,6 +6,7 @@ namespace GaussianSplatting.Runtime
     /// Modulates splat color with a procedural caustic/water-ripple pattern
     /// based on world-space coordinates. Multiple algorithm choices available.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Animation/Modifiers/Caustic")]
     public class CausticModifier : GaussianAnimModifier
     {
         public enum CausticPattern

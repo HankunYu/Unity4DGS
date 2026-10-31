@@ -3,6 +3,7 @@ using UnityEngine.Rendering;
 
 namespace GaussianSplatting.Runtime
 {
+    [AddComponentMenu("Gaussian Splatting/Splat Config")]
     [ExecuteInEditMode]
     public class GaussianSplatConfig : MonoBehaviour
     {

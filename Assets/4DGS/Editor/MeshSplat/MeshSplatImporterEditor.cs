@@ -13,7 +13,7 @@ namespace GaussianSplatting.Editor.MeshSplat
     [CanEditMultipleObjects]
     public class MeshSplatImporterEditor : ScriptedImporterEditor
     {
-        private const string CreateMenu = "Assets/Create/Gaussian Splats/Mesh Splats";
+        private const string CreateMenu = "Assets/Create/Gaussian Splatting/Mesh Splats";
         private const string FileContent = "Mesh splat source: the model and settings are in the .meta file.\n";
 
         private static readonly GUIContent s_ModelLabel = new("Model",

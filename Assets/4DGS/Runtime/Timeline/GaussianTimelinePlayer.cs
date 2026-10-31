@@ -16,6 +16,7 @@ namespace GaussianSplatting.Runtime
     /// table built at binding (see <see cref="GaussianTimelinePhaseTable"/>).
     /// Runs before other scripts so effects see this frame's values.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Timeline/Timeline Player")]
     [DisallowMultipleComponent]
     [DefaultExecutionOrder(-200)]
     public class GaussianTimelinePlayer : MonoBehaviour

@@ -9,6 +9,7 @@ namespace GaussianSplatting.Runtime
     /// Axis and center are authored in volume local space so the swirl follows
     /// the volume transform instead of a fixed world-space pivot.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Animation/Modifiers/Swirl")]
     public class SwirlModifier : GaussianAnimModifier
     {
         [Tooltip("Rotation axis in volume local space (auto-normalized on GPU)")]

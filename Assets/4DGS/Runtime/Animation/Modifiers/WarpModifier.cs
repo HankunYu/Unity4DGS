@@ -8,6 +8,7 @@ namespace GaussianSplatting.Runtime
     /// Applies non-linear spatial distortion to splats within the volume.
     /// Supports twist, bend, spherize, and pinch deformations.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Animation/Modifiers/Warp")]
     public class WarpModifier : GaussianAnimModifier
     {
         public enum WarpType

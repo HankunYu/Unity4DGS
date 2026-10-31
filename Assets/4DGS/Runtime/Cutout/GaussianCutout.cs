@@ -3,6 +3,7 @@ using UnityEngine;
 
 namespace GaussianSplatting.Runtime
 {
+    [AddComponentMenu("Gaussian Splatting/Cutout/Cutout")]
     [ExecuteInEditMode]
     public class GaussianCutout : MonoBehaviour
     {

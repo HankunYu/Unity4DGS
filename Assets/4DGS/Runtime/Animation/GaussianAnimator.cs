@@ -10,6 +10,7 @@ namespace GaussianSplatting.Runtime
     /// GaussianAnimVolume objects, packs their data to GPU, and dispatches
     /// the animation compute shader each frame.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Animation/Animator")]
     [RequireComponent(typeof(GaussianSplatRenderer))]
     [ExecuteInEditMode]
     public class GaussianAnimator : MonoBehaviour

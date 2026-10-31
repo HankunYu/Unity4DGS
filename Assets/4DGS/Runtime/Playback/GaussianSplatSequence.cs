@@ -5,7 +5,7 @@ namespace GaussianSplatting.Runtime
     // An ordered set of splat assets played back as a 4D sequence by
     // GaussianPlayer. Frames are referenced directly, so only sequences in
     // use end up in a build.
-    [CreateAssetMenu(menuName = "Gaussian Splats/Sequence", fileName = "Sequence", order = 1)]
+    [CreateAssetMenu(menuName = "Gaussian Splatting/Sequence", fileName = "Sequence", order = 1)]
     public class GaussianSplatSequence : ScriptableObject
     {
         public GaussianSplatAsset[] frames = new GaussianSplatAsset[0];

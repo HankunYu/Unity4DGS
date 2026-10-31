@@ -13,6 +13,7 @@ namespace GaussianSplatting.Runtime
     /// their own eyes: meant for flat and 360 renders.
     /// Timelines drive the focus distance, aperture and blur cap as channels.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Depth of Field")]
     [RequireComponent(typeof(Camera))]
     [DisallowMultipleComponent]
     public class GaussianDepthOfField : MonoBehaviour, IGaussianTimelineTarget

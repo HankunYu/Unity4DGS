@@ -10,6 +10,7 @@ namespace GaussianSplatting.Runtime
     /// child GaussianCutout components each frame. Attach to the same
     /// GameObject as the Renderer.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Cutout/Cutout Manager")]
     [RequireComponent(typeof(GaussianSplatRenderer))]
     [ExecuteInEditMode]
     public class GaussianCutoutManager : MonoBehaviour

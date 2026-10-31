@@ -6,6 +6,7 @@ namespace GaussianSplatting.Runtime
     /// Applies fBm-based turbulent displacement to splats.
     /// Wind direction controls noise scrolling; zero wind falls back to pure temporal evolution.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Animation/Modifiers/Turbulence")]
     public class TurbulenceModifier : GaussianAnimModifier
     {
         [Range(0f, 5f)]

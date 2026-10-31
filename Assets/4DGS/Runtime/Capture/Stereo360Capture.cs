@@ -19,6 +19,7 @@ namespace GaussianSplatting.Runtime
     //
     // Cubemap projection needs the GaussianSplatURPFeature "Use Render Context
     // Matrices" toggle so splats re-sort for every face render.
+    [AddComponentMenu("Gaussian Splatting/Capture/Stereo 360 Capture")]
     public class Stereo360Capture : MonoBehaviour
     {
         [Tooltip("Camera to capture from. Defaults to the camera on this GameObject, then Camera.main.")]

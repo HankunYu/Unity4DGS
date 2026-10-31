@@ -13,6 +13,7 @@ namespace GaussianSplatting.Runtime
     /// styled. Weight scales every volume at once. Timelines drive it, and
     /// each volume's Weight and Falloff, as channels to fade and switch styles.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Style/Styler")]
     [RequireComponent(typeof(GaussianSplatRenderer))]
     [DisallowMultipleComponent]
     public class GaussianStyler : MonoBehaviour, IGaussianTimelineTarget

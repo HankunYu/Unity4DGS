@@ -10,7 +10,7 @@ namespace GaussianSplatting.Editor
     [CustomEditor(typeof(GaussianSplatSequence))]
     public class GaussianSplatSequenceEditor : UnityEditor.Editor
     {
-        const string CreateMenu = "Assets/Create/Gaussian Splats/Sequence from Folder";
+        const string CreateMenu = "Assets/Create/Gaussian Splatting/Sequence from Folder";
 
         static readonly GUIContent s_FolderLabel = new("Source Folder",
             "Folder the frames come from: every splat asset directly in it, in natural file name order. " +

@@ -9,6 +9,7 @@ namespace GaussianSplatting.Runtime
     /// or gathers them back. Useful for scene transitions, entity
     /// appearance/disappearance effects.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Animation/Modifiers/Dissolve")]
     public class DissolveModifier : GaussianAnimModifier
     {
         [Tooltip("Direction in which splats scatter (world space, auto-normalized on GPU)")]

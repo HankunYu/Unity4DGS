@@ -66,8 +66,8 @@ git clone https://github.com/HankunYu/Unity4DGS.git
 2. Put a `GaussianSplatConfig` component in the scene (holds global rendering settings and shader references). Step 4 adds one if the scene has none.
 3. Drop a `.ply` / `.spz` file into the project. It imports in place as a splat asset; quality, pruning, splat budget, SH degree and other options are in its import settings (Inspector), and the source file stays usable by other tools.
 4. Drag the file into the Scene view or Hierarchy: this creates a GameObject with a `GaussianSplatRenderer` for it, flipped on Y because training tools write splats y-down. You can also add the component yourself and assign the asset.
-5. For 4D sequences, put the per-frame files in a folder, right-click it and pick `Create > Gaussian Splats > Sequence from Folder` (frames sort by natural file name order), then drag the sequence into the scene: that adds a `GaussianPlayer` that plays it.
-6. To turn a model into splats without training, select the model (FBX or prefab) and pick `Create > Gaussian Splats > Mesh Splats`. The new `.meshsplat` file imports as a splat asset sampled from every mesh under the model (skinned meshes in their bind pose), with splats lying flat on the surface. The import settings pick how splats are placed (Poisson disk for even coverage, random, one per vertex, denser along creases and open borders, LiDAR-style scan lines from virtual scanners, or a regular lattice projected onto the surface), where their color comes from (one color, the material's base color and texture, or vertex colors; individual materials can override it, e.g. a textured character among uniformly colored props), baked lighting and splat shape; and it re-imports when the model changes. Dragging it into the scene also brings in the model, with the splats below it and a `GaussianMeshDriver` that keeps them on the surface as the model animates (it skins on the GPU from the bone transforms, so the source meshes are hidden and need not render; blend shapes are not followed). Animation modifiers then act on the moving surface. Set its Output to Sequence instead to bake a range of an animation clip into one splat asset per frame, played by a `GaussianPlayer`: either sampled once and carried along with the surface, or sampled anew every frame so scanners and sampling stay fixed while the model moves through them.
+5. For 4D sequences, put the per-frame files in a folder, right-click it and pick `Create > Gaussian Splatting > Sequence from Folder` (frames sort by natural file name order), then drag the sequence into the scene: that adds a `GaussianPlayer` that plays it.
+6. To turn a model into splats without training, select the model (FBX or prefab) and pick `Create > Gaussian Splatting > Mesh Splats`. The new `.meshsplat` file imports as a splat asset sampled from every mesh under the model (skinned meshes in their bind pose), with splats lying flat on the surface. The import settings pick how splats are placed (Poisson disk for even coverage, random, one per vertex, denser along creases and open borders, LiDAR-style scan lines from virtual scanners, or a regular lattice projected onto the surface), where their color comes from (one color, the material's base color and texture, or vertex colors; individual materials can override it, e.g. a textured character among uniformly colored props), baked lighting and splat shape; and it re-imports when the model changes. Dragging it into the scene also brings in the model, with the splats below it and a `GaussianMeshDriver` that keeps them on the surface as the model animates (it skins on the GPU from the bone transforms, so the source meshes are hidden and need not render; blend shapes are not followed). Animation modifiers then act on the moving surface. Set its Output to Sequence instead to bake a range of an animation clip into one splat asset per frame, played by a `GaussianPlayer`: either sampled once and carried along with the surface, or sampled anew every frame so scanners and sampling stay fixed while the model moves through them.
 
 ## Sample Assets
 
@@ -77,10 +77,25 @@ git clone https://github.com/HankunYu/Unity4DGS.git
 
 ```
 Assets/4DGS/
-├── Runtime/          # Renderer, sorting, animation system, modifiers, state machine
-├── Editor/           # PLY/SPZ importer, mesh-to-splat importer, editing tools
+├── Runtime/
+│   ├── Rendering/    # Renderer, render system, config, URP feature, depth of field
+│   ├── Sorting/      # GPU sorters
+│   ├── Volumes/      # Shared volume base and shapes
+│   ├── Animation/    # Animator, anim volumes, modifiers, state machine, morph
+│   ├── Style/        # Styler, style volumes, style assets
+│   ├── PostProcess/  # Stylize post-process volume component
+│   ├── Playback/     # 4D sequence player
+│   ├── Mesh/         # Mesh driver (splats on an animated model)
+│   ├── Particles/    # Particle emitter
+│   ├── Cutout/       # Cutout regions
+│   ├── Capture/      # Stereo 360 capture
+│   ├── Editing/      # Splat selection and editing state
+│   └── Timeline/     # Built-in timeline
+├── Editor/           # Inspectors in the same folders, plus Import (PLY/SPZ),
+│                     # MeshSplat (mesh-to-splat importer) and editing tools
 ├── Shaders/          # Splat / point cloud shaders, sorting & morph compute
-├── Resources/        # Compute shaders (animation, tile rendering, utilities)
+├── Resources/        # Compute shaders (animation, particles, tile rendering, utilities)
+├── Presets/          # Style presets
 └── Settings/         # URP pipeline assets
 ```
 

@@ -8,6 +8,7 @@ namespace GaussianSplatting.Runtime
     /// Applies periodic wave displacement to splats.
     /// Supports sine waves, radial waves, and noise-based oscillation.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Animation/Modifiers/Wave")]
     public class WaveModifier : GaussianAnimModifier
     {
         public enum WaveType

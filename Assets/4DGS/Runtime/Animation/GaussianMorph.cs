@@ -12,6 +12,7 @@ namespace GaussianSplatting.Runtime
     /// (position, rotation, scale, opacity, color, SH), and feeds the result to
     /// the renderer via SetMorphData.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Morph")]
     [RequireComponent(typeof(GaussianSplatRenderer))]
     [ExecuteInEditMode]
     [DefaultExecutionOrder(-50)]

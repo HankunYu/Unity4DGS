@@ -8,7 +8,7 @@ namespace GaussianSplatting.Runtime
     // in the view-data pass, so it works on every draw path, in stereo and in
     // Direct composite mode. Styles draw in the Splats and PointCloud render
     // modes.
-    [CreateAssetMenu(menuName = "Gaussian Splats/Style", fileName = "SplatStyle", order = 2)]
+    [CreateAssetMenu(menuName = "Gaussian Splatting/Style", fileName = "SplatStyle", order = 2)]
     public class GaussianSplatStyle : ScriptableObject
     {
         internal const int RampResolution = 256;

@@ -8,6 +8,7 @@ namespace GaussianSplatting.Runtime
     /// Animates splat visual properties: opacity, scale, and color tint.
     /// Does not move splats — only modifies their appearance.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Animation/Modifiers/Property")]
     public class PropertyModifier : GaussianAnimModifier
     {
         [Range(0f, 2f)]

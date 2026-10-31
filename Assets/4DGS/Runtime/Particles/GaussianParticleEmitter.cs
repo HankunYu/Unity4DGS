@@ -24,6 +24,7 @@ namespace GaussianSplatting.Runtime
     //
     // Runs after the source's mesh driver and animator in LateUpdate, and on
     // every render in edit mode.
+    [AddComponentMenu("Gaussian Splatting/Particle Emitter")]
     [ExecuteAlways]
     [DisallowMultipleComponent]
     [DefaultExecutionOrder(100)]

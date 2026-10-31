@@ -11,6 +11,7 @@ namespace GaussianSplatting.Runtime
     /// and add modifier components as siblings.
     /// Timelines drive Falloff and Trail Duration as channels.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Animation/Anim Volume")]
     public class GaussianAnimVolume : GaussianVolume, IGaussianTimelineTarget
     {
         private static readonly string[] ChannelNames = { "Falloff", "Trail Duration" };

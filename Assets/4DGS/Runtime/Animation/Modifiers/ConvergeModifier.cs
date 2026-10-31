@@ -8,6 +8,7 @@ namespace GaussianSplatting.Runtime
     /// Pulls splats toward the volume center along multiple twisted spiral arms,
     /// creating a multi-vortex convergence effect.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Animation/Modifiers/Converge")]
     public class ConvergeModifier : GaussianAnimModifier
     {
         [Range(0f, 5f)]

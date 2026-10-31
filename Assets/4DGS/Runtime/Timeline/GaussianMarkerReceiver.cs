@@ -10,6 +10,7 @@ namespace GaussianSplatting.Runtime
     /// events, by marker name. The timeline asset cannot reference the scene,
     /// so the reactions live here.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Timeline/Marker Receiver")]
     public class GaussianMarkerReceiver : MonoBehaviour
     {
         [Serializable]

@@ -13,6 +13,7 @@ using UnityEngine.XR;
 
 namespace GaussianSplatting.Runtime
 {
+    [AddComponentMenu("Gaussian Splatting/Splat Renderer")]
     [ExecuteInEditMode]
     public class GaussianSplatRenderer : MonoBehaviour, IGaussianTimelineTarget
     {

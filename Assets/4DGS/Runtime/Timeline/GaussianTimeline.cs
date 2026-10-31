@@ -10,7 +10,7 @@ namespace GaussianSplatting.Runtime
     /// in its scene. The asset holds no scene references, so one timeline can
     /// play in several places.
     /// </summary>
-    [CreateAssetMenu(fileName = "Timeline", menuName = "Gaussian Splatting/Timeline")]
+    [CreateAssetMenu(menuName = "Gaussian Splatting/Timeline", fileName = "Timeline", order = 3)]
     public class GaussianTimeline : ScriptableObject
     {
         [Tooltip("Length in seconds; where playback holds, loops or stops")]

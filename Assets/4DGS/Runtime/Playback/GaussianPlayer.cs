@@ -5,6 +5,7 @@ namespace GaussianSplatting.Runtime
     // Plays a GaussianSplatSequence on the renderer next to it, one asset per
     // frame. The renderer's buffers are sized once for the largest frame, so
     // switching frames only uploads data.
+    [AddComponentMenu("Gaussian Splatting/Player")]
     [RequireComponent(typeof(GaussianSplatRenderer))]
     public class GaussianPlayer : MonoBehaviour
     {

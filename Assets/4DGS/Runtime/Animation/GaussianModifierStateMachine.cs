@@ -9,6 +9,7 @@ namespace GaussianSplatting.Runtime
     /// Attach to the same GameObject as a GaussianAnimVolume.
     /// Define states with modifier parameter snapshots, then trigger transitions via code or auto-rules.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Animation/Modifier State Machine")]
     [RequireComponent(typeof(GaussianAnimVolume))]
     public class GaussianModifierStateMachine : MonoBehaviour
     {

@@ -45,7 +45,7 @@ namespace GaussianSplatting.Editor
             }
         }
 
-        [MenuItem("Tools/Gaussian Splats/Export Selected as PLY")]
+        [MenuItem("Tools/Gaussian Splatting/Export Selected as PLY")]
         private static void ExportSelectedMenuItem()
         {
             var go = Selection.activeGameObject;
@@ -66,7 +66,7 @@ namespace GaussianSplatting.Editor
             ExportPlyFile(gs, bake);
         }
 
-        [MenuItem("Tools/Gaussian Splats/Export Selected as PLY", true)]
+        [MenuItem("Tools/Gaussian Splatting/Export Selected as PLY", true)]
         private static bool ExportSelectedMenuItemValidate()
         {
             var go = Selection.activeGameObject;

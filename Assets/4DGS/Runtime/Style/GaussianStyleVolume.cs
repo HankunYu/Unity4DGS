@@ -14,6 +14,7 @@ namespace GaussianSplatting.Runtime
     /// scene, or fade one volume out while another fades in to switch styles.
     /// Timelines drive Weight and Falloff as channels.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Style/Style Volume")]
     public class GaussianStyleVolume : GaussianVolume, IGaussianTimelineTarget
     {
         private static readonly string[] ChannelNames = { "Weight", "Falloff" };

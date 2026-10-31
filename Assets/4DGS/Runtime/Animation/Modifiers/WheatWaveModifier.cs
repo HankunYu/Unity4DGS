@@ -8,6 +8,7 @@ namespace GaussianSplatting.Runtime
     /// onto a configurable wave direction, ensuring coherent motion across
     /// neighbouring splats.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Animation/Modifiers/Wheat Wave")]
     public class WheatWaveModifier : GaussianAnimModifier
     {
         [Tooltip("Wave propagation direction in the XZ plane (normalized internally)")]

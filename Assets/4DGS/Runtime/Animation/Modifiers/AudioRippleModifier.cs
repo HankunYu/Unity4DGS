@@ -14,6 +14,7 @@ namespace GaussianSplatting.Runtime
     /// expanding while newer rings form behind it. Optionally tints splats
     /// with a bass/treble color mix scaled by the local ripple energy.
     /// </summary>
+    [AddComponentMenu("Gaussian Splatting/Animation/Modifiers/Audio Ripple")]
     public class AudioRippleModifier : GaussianAnimModifier
     {
         public enum RippleMode

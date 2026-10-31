@@ -17,6 +17,7 @@ namespace GaussianSplatting.Runtime
     // Runs in LateUpdate ahead of GaussianAnimator, once animation and
     // constraints have posed the bones, and on every render in edit mode,
     // where LateUpdate does not tick (e.g. while scrubbing a Timeline).
+    [AddComponentMenu("Gaussian Splatting/Mesh Driver")]
     [ExecuteAlways]
     [DisallowMultipleComponent]
     [DefaultExecutionOrder(-100)]
