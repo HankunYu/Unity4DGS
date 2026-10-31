@@ -35,8 +35,7 @@ namespace GaussianSplatting.Runtime
 
         private void CollectCutouts()
         {
-            _cutouts.Clear();
-            GetComponentsInChildren(_cutouts);
+            GaussianHierarchy.GetOwnedComponents(this, _cutouts);
         }
 
         private void LateUpdate()

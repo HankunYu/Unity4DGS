@@ -94,8 +94,7 @@ namespace GaussianSplatting.Runtime
 
         private void CollectVolumes()
         {
-            _volumes.Clear();
-            GetComponentsInChildren(_volumes);
+            GaussianHierarchy.GetOwnedComponents(this, _volumes);
         }
 
         private void LateUpdate()

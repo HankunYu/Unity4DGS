@@ -40,7 +40,7 @@ namespace GaussianSplatting.Runtime
         internal void FillStyleSet(GaussianStyleSet set)
         {
             set.Begin(isActiveAndEnabled ? weight : 0f);
-            GetComponentsInChildren(_volumes);
+            GaussianHierarchy.GetOwnedComponents(this, _volumes);
             foreach (GaussianStyleVolume volume in _volumes)
             {
                 if (volume.isActiveAndEnabled)

@@ -5,7 +5,10 @@ using UnityEngine.Rendering;
 
 namespace GaussianSplatting.Runtime
 {
-    // Particles drifting off another splat renderer, the source. Each
+    // Particles drifting off a splat renderer, the source: the nearest one
+    // above this GameObject, so a renderer's emitters sit under it as
+    // children, each with its own particle renderer (GaussianHierarchy keeps
+    // the source's volumes and the particles' apart). Each
     // particle is born at a random splat of the source, as it is drawn right
     // now, with the color it is drawn in (style included) and the velocity of
     // that spot of the surface plus a push along its normal, so a moving body
@@ -65,8 +68,6 @@ namespace GaussianSplatting.Runtime
 
         private static readonly string[] TimelineChannels = { "Emission", "Opacity", "Turbulence" };
 
-        [Tooltip("Renderer the particles are born on")]
-        [SerializeField] private GaussianSplatRenderer source;
         [Tooltip("Number of particles, alive or between lives")]
         [SerializeField, Min(1)] private int capacity = 100000;
         [Tooltip("Varies which splats the particles are born on")]
@@ -131,6 +132,7 @@ namespace GaussianSplatting.Runtime
         [SerializeField, Range(0f, 1f)] private float sourceLift;
 
         private GaussianSplatRenderer _renderer;
+        private GaussianSplatRenderer _source;
         private ComputeShader _shader;
         private int _kernel = -1;
         private int _kernelStore = -1;
@@ -148,11 +150,9 @@ namespace GaussianSplatting.Runtime
         private double _time;
         private double _lastEditTime = -1.0;
 
-        public GaussianSplatRenderer Source
-        {
-            get => source;
-            set => source = value;
-        }
+        // The renderer the particles are born on: the nearest one above this
+        // GameObject (GaussianHierarchy)
+        public GaussianSplatRenderer Source => GaussianHierarchy.ParentRenderer(this);
 
         /// <summary>Seconds on the emitter's clock, which drives every life.</summary>
         public double Time
@@ -210,6 +210,7 @@ namespace GaussianSplatting.Runtime
         {
             deltaTime = Mathf.Max(0f, deltaTime);
             _time += deltaTime;
+            _source = Source;
             // Without the particle buffers the template would draw as is:
             // hand the renderer back empty instead
             if (!CanEmit())
@@ -218,7 +219,7 @@ namespace GaussianSplatting.Runtime
                 return;
             }
             EnsureResources();
-            _renderer.StylerOverride = followSourceStyle ? source.Styler : null;
+            _renderer.StylerOverride = followSourceStyle ? _source.Styler : null;
 
             Transform t = transform;
             Vector3 scale = t.lossyScale;
@@ -236,15 +237,15 @@ namespace GaussianSplatting.Runtime
             // The source's view-dependent style terms (rim, depth ramp) are
             // judged from the main camera
             Camera cam = Camera.main;
-            Vector3 cameraPos = cam != null ? cam.transform.position : source.transform.position;
+            Vector3 cameraPos = cam != null ? cam.transform.position : _source.transform.position;
 
             _cmd.Clear();
             // A hidden source is not drawn, so nothing else refreshes its style
-            source.RefreshStyle();
-            source.SetAssetDataOnCS(_cmd, _shader, _kernel);
-            source.SetStyleColorOnCS(_cmd, _shader, _kernel);
-            _cmd.SetComputeMatrixParam(_shader, PropSourceObjectToWorld, source.transform.localToWorldMatrix);
-            _cmd.SetComputeMatrixParam(_shader, PropMatrixWorldToObject, source.transform.worldToLocalMatrix);
+            _source.RefreshStyle();
+            _source.SetAssetDataOnCS(_cmd, _shader, _kernel);
+            _source.SetStyleColorOnCS(_cmd, _shader, _kernel);
+            _cmd.SetComputeMatrixParam(_shader, PropSourceObjectToWorld, _source.transform.localToWorldMatrix);
+            _cmd.SetComputeMatrixParam(_shader, PropMatrixWorldToObject, _source.transform.worldToLocalMatrix);
             _cmd.SetComputeVectorParam(_shader, PropCameraPos, cameraPos);
             _cmd.SetComputeIntParam(_shader, PropParticleCount, capacity);
             _cmd.SetComputeIntParam(_shader, PropParticleSeed, seed);
@@ -267,7 +268,7 @@ namespace GaussianSplatting.Runtime
             _cmd.SetComputeBufferParam(_shader, _kernel, PropParticleVelocity, _velocity);
             _cmd.DispatchCompute(_shader, _kernel, (capacity + GroupSize - 1) / GroupSize, 1, 1);
 
-            source.SetAssetDataOnCS(_cmd, _shader, _kernelStore);
+            _source.SetAssetDataOnCS(_cmd, _shader, _kernelStore);
             _cmd.SetComputeBufferParam(_shader, _kernelStore, PropSourcePrev, _sourcePrev);
             _cmd.DispatchCompute(_shader, _kernelStore, (_sourcePrev.count + GroupSize - 1) / GroupSize, 1, 1);
             Graphics.ExecuteCommandBuffer(_cmd);
@@ -280,9 +281,9 @@ namespace GaussianSplatting.Runtime
 
         private bool CanEmit()
         {
-            if (_shader == null || _kernel < 0 || _kernelStore < 0 || _renderer == null || source == null || source == _renderer)
+            if (_shader == null || _kernel < 0 || _kernelStore < 0 || _renderer == null || _source == null)
                 return false;
-            return source.isActiveAndEnabled && source.HasValidAsset && source.HasValidRenderSetup;
+            return _source.isActiveAndEnabled && _source.HasValidAsset && _source.HasValidRenderSetup;
         }
 
         private void Stop()
@@ -300,7 +301,7 @@ namespace GaussianSplatting.Runtime
             EnsureParticles();
             // The previous source pose starts unwritten (w = 0), so the first
             // births after a change inherit no velocity
-            int sourceCount = Mathf.Max(1, source.EffectiveSplatCount);
+            int sourceCount = Mathf.Max(1, _source.EffectiveSplatCount);
             if (_sourcePrev == null || _sourcePrev.count != sourceCount)
             {
                 _sourcePrev?.Dispose();

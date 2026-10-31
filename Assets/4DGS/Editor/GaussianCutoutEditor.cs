@@ -15,11 +15,11 @@ namespace GaussianSplatting.Editor
             if (!cutout)
                 return;
 
-            var mgr = cutout.GetComponentInParent<GaussianCutoutManager>();
-            if (mgr == null)
+            var owner = GaussianHierarchy.OwningRenderer(cutout);
+            if (owner == null || owner.GetComponent<GaussianCutoutManager>() == null)
             {
                 EditorGUILayout.HelpBox(
-                    "This cutout is not a child of a GaussianCutoutManager and will have no effect.",
+                    "The renderer this cutout belongs to (the nearest one above it) has no GaussianCutoutManager, so the cutout has no effect.",
                     MessageType.Warning);
             }
         }

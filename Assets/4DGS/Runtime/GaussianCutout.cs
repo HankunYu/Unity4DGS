@@ -49,7 +49,8 @@ namespace GaussianSplatting.Runtime
             else
             {
                 var activeGo = UnityEditor.Selection.activeGameObject;
-                var mgr = GetComponentInParent<GaussianCutoutManager>();
+                var owner = GaussianHierarchy.OwningRenderer(this);
+                var mgr = owner != null ? owner.GetComponent<GaussianCutoutManager>() : null;
                 if (activeGo != null && mgr != null && activeGo == mgr.gameObject)
                 {
                     if (mgr.Cutouts.Contains(this))
