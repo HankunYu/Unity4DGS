@@ -150,11 +150,28 @@ namespace GaussianSplatting.Runtime
         private static readonly int PropSplatQuadExtent = Shader.PropertyToID("_SplatQuadExtent");
         private static readonly int PropSplatAdaptiveExtent = Shader.PropertyToID("_SplatAdaptiveExtent");
         private static readonly int PropSplatMaxPixelRadius = Shader.PropertyToID("_SplatMaxPixelRadius");
+        private static readonly int PropQuadBaseShape = Shader.PropertyToID("_QuadBaseShape");
+        private static readonly int PropSplatAlphaCutoff = Shader.PropertyToID("_SplatAlphaCutoff");
 
-        // Per-render state shared by every splat draw: quad shaping, and the
-        // beauty/AOV switch of the point pass and the composite.
-        internal void ApplyOutputState(CommandBuffer cmb)
+        // Fragments contributing less than this are dropped, judged by the
+        // larger of the light they block and the light they add
+        // (SplatContribution; splats are culled at the default before any
+        // blur, SPLAT_CULL_ALPHA). Depth of field spreads a
+        // splat's light over its blur circle, and a blurred surface is many
+        // faint splats adding up: a small splat blurred 24 pixels wide keeps
+        // under a thousandth of its opacity, so it draws far fainter ones.
+        private const float DefaultAlphaCutoff = 5f / 255f;
+        private const float DepthOfFieldAlphaCutoff = 1f / 16384f;
+
+        private static float AlphaCutoff(GaussianDepthOfField dof) =>
+            dof != null ? DepthOfFieldAlphaCutoff : DefaultAlphaCutoff;
+
+        // Per-render state shared by every splat draw: quad shaping, the
+        // camera's alpha cutoff, and the beauty/AOV switch of the point pass
+        // and the composite.
+        internal void ApplyOutputState(CommandBuffer cmb, Camera cam)
         {
+            cmb.SetGlobalFloat(PropSplatAlphaCutoff, AlphaCutoff(GaussianDepthOfField.ActiveOn(cam)));
             if (_config != null)
             {
                 // The fragment falloff is exp(-dot(pos,pos)): one unit of quad
@@ -162,6 +179,7 @@ namespace GaussianSplatting.Runtime
                 cmb.SetGlobalFloat(PropSplatQuadExtent, _config.splatQuadSigma / Mathf.Sqrt(2f));
                 cmb.SetGlobalInteger(PropSplatAdaptiveExtent, _config.adaptiveSplatExtent ? 1 : 0);
                 cmb.SetGlobalFloat(PropSplatMaxPixelRadius, _config.maxSplatPixelRadius);
+                cmb.SetGlobalInteger(PropQuadBaseShape, _config.renderMode == GaussianSplatRenderMode.PointCloud ? 1 : 0);
             }
             ApplyAovState(cmb);
         }
@@ -193,11 +211,11 @@ namespace GaussianSplatting.Runtime
                 cmb.DisableShaderKeyword("GAUSSIAN_AOV");
             }
 
-            if (_matPointCloud != null)
+            if (_matStylized != null)
             {
-                _matPointCloud.SetFloat(PropSrcBlend, (float)(aov ? BlendMode.One : BlendMode.OneMinusDstAlpha));
-                _matPointCloud.SetFloat(PropDstBlend, (float)BlendMode.One);
-                _matPointCloud.SetFloat(PropBlendOp, (float)(aov ? BlendOp.Max : BlendOp.Add));
+                _matStylized.SetFloat(PropSrcBlend, (float)(aov ? BlendMode.One : BlendMode.OneMinusDstAlpha));
+                _matStylized.SetFloat(PropDstBlend, (float)BlendMode.One);
+                _matStylized.SetFloat(PropBlendOp, (float)(aov ? BlendOp.Max : BlendOp.Add));
             }
             if (_matComposite != null)
             {
@@ -208,32 +226,19 @@ namespace GaussianSplatting.Runtime
             }
         }
 
-        // Pixel scale the point shader uses to turn the world-space size floor
-        // into pixels. The perspective path passes cot(fovY/2) from the
-        // projection matrix; ODS has no projection matrix, and its equirect
-        // spreads 2*pi radians of azimuth across the width, which against a 2:1
-        // target reduces to the constant 2/pi.
-        private float PointProjectionScale(float perspectiveScale)
-        {
-            if (_config != null &&
-                _config.projectionMode == GaussianSplatProjectionMode.OmniDirectionalStereo)
-                return 2.0f / Mathf.PI;
-            return perspectiveScale;
-        }
-
         // ── Materials (created from Config shaders) ─────────────────────
         private Material _matSplats;
         private Material _matComposite;
         private Material _matDebugPoints;
         private Material _matDebugBoxes;
-        private Material _matPointCloud;
+        private Material _matStylized;
         private GaussianSplatConfig _materialSource;
 
         internal Material MatSplats => _matSplats;
         internal Material MatComposite => _matComposite;
         internal Material MatDebugPoints => _matDebugPoints;
         internal Material MatDebugBoxes => _matDebugBoxes;
-        internal Material MatPointCloud => _matPointCloud;
+        internal Material MatStylized => _matStylized;
 
         internal void EnsureMaterials()
         {
@@ -244,15 +249,70 @@ namespace GaussianSplatting.Runtime
             Object.DestroyImmediate(_matComposite);
             Object.DestroyImmediate(_matDebugPoints);
             Object.DestroyImmediate(_matDebugBoxes);
-            Object.DestroyImmediate(_matPointCloud);
+            Object.DestroyImmediate(_matStylized);
 
             _matSplats = new Material(_config.ShaderSplats) { name = "GaussianSplats" };
             _matComposite = new Material(_config.ShaderComposite) { name = "GaussianClearDstAlpha" };
             _matDebugPoints = new Material(_config.ShaderDebugPoints) { name = "GaussianDebugPoints" };
             _matDebugBoxes = new Material(_config.ShaderDebugBoxes) { name = "GaussianDebugBoxes" };
-            _matPointCloud = new Material(_config.ShaderPointCloud) { name = "GaussianPointCloud" };
+            _matStylized = new Material(_config.ShaderStylized) { name = "GaussianStylized" };
 
             _materialSource = _config;
+        }
+
+        // Points, and styled splats, draw their baked quads with the quad
+        // shader; every other mode is global
+        private Material DisplayMaterial(GaussianSplatRenderer gs)
+        {
+            return _config.renderMode switch
+            {
+                GaussianSplatRenderMode.DebugPoints => _matDebugPoints,
+                GaussianSplatRenderMode.DebugPointIndices => _matDebugPoints,
+                GaussianSplatRenderMode.DebugBoxes => _matDebugBoxes,
+                GaussianSplatRenderMode.DebugChunkBounds => _matDebugBoxes,
+                _ => gs.QuadsBaked ? _matStylized : _matSplats
+            };
+        }
+
+        // Draw-side style parameters of a per-object draw: a one-entry range
+        // table. The style color itself is computed with the view data.
+        private static readonly GaussianSplatStyleRange[] s_singleStyleRange = new GaussianSplatStyleRange[1];
+
+        private static void SetStyleOnMaterial(CommandBuffer cmb, GaussianSplatRenderer gs, MaterialPropertyBlock mpb)
+        {
+            if (!gs.QuadsBaked)
+                return;
+            s_singleStyleRange[0] = gs.StyleRange(0);
+            // Recorded into the command buffer, so it lands before this
+            // renderer's draw however the draws are batched
+            cmb.SetBufferData(gs.StyleRangeBuffer, s_singleStyleRange);
+            mpb.SetBuffer(GaussianSplatRenderer.Props.StyleRanges, gs.StyleRangeBuffer);
+            mpb.SetInteger(GaussianSplatRenderer.Props.StyleRangeCount, 1);
+        }
+
+        // Range table of the global group being built, one entry per member
+        private GaussianSplatStyleRange[] _styleRanges = new GaussianSplatStyleRange[4];
+        private int _styleRangeCount;
+
+        private void AddStyleRange(GaussianSplatStyleRange range)
+        {
+            if (_styleRangeCount == _styleRanges.Length)
+                System.Array.Resize(ref _styleRanges, _styleRanges.Length * 2);
+            _styleRanges[_styleRangeCount++] = range;
+        }
+
+        private void SetGroupStyleRanges(CommandBuffer cmb, GlobalOrderGroupCache cache, MaterialPropertyBlock mpb)
+        {
+            if (cache.styleRanges == null || cache.styleRanges.count < _styleRangeCount)
+            {
+                // Retire: a draw recorded earlier this frame may still bind it
+                cache.RetireBuffer(ref cache.styleRanges);
+                cache.styleRanges = new GraphicsBuffer(GraphicsBuffer.Target.Structured,
+                    _styleRanges.Length, GaussianSplatStyleRange.Stride) { name = "GaussianGlobalStyleRanges" };
+            }
+            cmb.SetBufferData(cache.styleRanges, _styleRanges, 0, 0, _styleRangeCount);
+            mpb.SetBuffer(GaussianSplatRenderer.Props.StyleRanges, cache.styleRanges);
+            mpb.SetInteger(GaussianSplatRenderer.Props.StyleRangeCount, _styleRangeCount);
         }
 
         // ── Cross-camera GPU synchronisation ─────────────────────────
@@ -402,6 +462,7 @@ namespace GaussianSplatting.Runtime
             public bool indirectArgsValid;          // args written for the current keys
             public GpuSortArgs sorterArgs;
             public int sorterCapacity;              // splats the sort scratch buffers fit
+            public GraphicsBuffer styleRanges;      // GaussianSplatStyleRange per member renderer
 
             // ── Tile-based rendering buffers ──────────────────────────────
             public const int MaxTilePairs = 16 * 1024 * 1024; // 16M (tile,splat) pairs
@@ -445,6 +506,7 @@ namespace GaussianSplatting.Runtime
                 DeferDispose(sortKeys);      sortKeys = null;
                 DeferDispose(visibleCounter); visibleCounter = null;
                 DeferDispose(indirectArgs);  indirectArgs = null;
+                DeferDispose(styleRanges);   styleRanges = null;
                 indirectArgsValid = false;
                 sorterArgs.resources.Dispose();
                 sorterCapacity = 0;
@@ -476,12 +538,12 @@ namespace GaussianSplatting.Runtime
             Object.DestroyImmediate(_matComposite);
             Object.DestroyImmediate(_matDebugPoints);
             Object.DestroyImmediate(_matDebugBoxes);
-            Object.DestroyImmediate(_matPointCloud);
+            Object.DestroyImmediate(_matStylized);
             _matSplats = null;
             _matComposite = null;
             _matDebugPoints = null;
             _matDebugBoxes = null;
-            _matPointCloud = null;
+            _matStylized = null;
             _materialSource = null;
         }
 
@@ -591,7 +653,7 @@ namespace GaussianSplatting.Runtime
             if (_hasRenderFence)
                 cmb.WaitOnAsyncGraphicsFence(_lastRenderFence);
 
-            ApplyOutputState(cmb);
+            ApplyOutputState(cmb, cam);
 
             Material result = CanUseGlobalSortPath()
                 ? SortAndRenderSplatsGlobal(cam, cmb)
@@ -614,7 +676,7 @@ namespace GaussianSplatting.Runtime
             if (_hasRenderFence && useFence)
                 cmb.WaitOnAsyncGraphicsFence(_lastRenderFence);
 
-            ApplyOutputState(cmb);
+            ApplyOutputState(cmb, cam);
 
             _preparedItems.Clear();
             Material matComposite = _matComposite;
@@ -628,15 +690,7 @@ namespace GaussianSplatting.Runtime
                 var matrix = gs.transform.localToWorldMatrix;
 
                 mpb.Clear();
-                Material displayMat = _config.renderMode switch
-                {
-                    GaussianSplatRenderMode.DebugPoints => _matDebugPoints,
-                    GaussianSplatRenderMode.DebugPointIndices => _matDebugPoints,
-                    GaussianSplatRenderMode.DebugBoxes => _matDebugBoxes,
-                    GaussianSplatRenderMode.DebugChunkBounds => _matDebugBoxes,
-                    GaussianSplatRenderMode.PointCloud => _matPointCloud,
-                    _ => _matSplats
-                };
+                Material displayMat = DisplayMaterial(gs);
                 if (displayMat == null)
                     continue;
 
@@ -651,19 +705,13 @@ namespace GaussianSplatting.Runtime
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatScale, gs.splatScale);
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatOpacityScale, gs.opacityScale);
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatSize, _config.pointDisplaySize);
-                mpb.SetFloat(GaussianSplatRenderer.Props.PointSizeScale, _config.pointCloudSizeScale);
-                mpb.SetFloat(GaussianSplatRenderer.Props.PointMinSize, _config.pointCloudMinDisplaySize);
-                mpb.SetFloat(GaussianSplatRenderer.Props.PointMinWorldSize, _config.pointCloudMinWorldSize);
-                mpb.SetFloat(GaussianSplatRenderer.Props.PointProjectionScale,
-                    PointProjectionScale(cam.projectionMatrix.m11));
-                mpb.SetFloat(GaussianSplatRenderer.Props.PointMaxSize, _config.pointCloudMaxDisplaySize);
-                mpb.SetFloat(GaussianSplatRenderer.Props.PointOpacityBoost, _config.pointCloudOpacityBoost);
                 mpb.SetInteger(GaussianSplatRenderer.Props.SHOrder, gs.EffectiveSHOrder);
                 mpb.SetInteger(GaussianSplatRenderer.Props.SHOnly, gs.shOnly ? 1 : 0);
                 mpb.SetInteger(GaussianSplatRenderer.Props.DisplayIndex,
                     _config.renderMode == GaussianSplatRenderMode.DebugPointIndices ? 1 : 0);
                 mpb.SetInteger(GaussianSplatRenderer.Props.DisplayChunks,
                     _config.renderMode == GaussianSplatRenderMode.DebugChunkBounds ? 1 : 0);
+                SetStyleOnMaterial(cmb, gs, mpb);
 
                 cmb.BeginSample(ProfCalcView);
                 bool calcSuccess = gs.CalcViewData(cmb, cam);
@@ -673,8 +721,11 @@ namespace GaussianSplatting.Runtime
 
                 // Sort after view data so distance keys can read visibility
                 // (invisible splats sink to the tail; indirect draw skips them).
+                // Order-independent splats keep whatever order the keys hold
+                // and draw them all: a culled splat is a degenerate quad.
+                bool sorted = !gs.StyleOrderIndependent;
                 var sortSettings = SortSettings(gs.HasAnimatedContent);
-                if (gs.NeedsSort(cam, sortSettings))
+                if (sorted && gs.NeedsSort(cam, sortSettings))
                 {
                     gs.SortPoints(cmb, cam, matrix, sortSettings);
                     gs.MarkSorted(cam, sortSettings);
@@ -692,7 +743,7 @@ namespace GaussianSplatting.Runtime
                 {
                     gs = gs, displayMat = displayMat, mpb = mpb,
                     indexCount = indexCount, instanceCount = instanceCount, topology = topology,
-                    indirectArgs = UsesSortedViewData && gs.IndirectDrawReady ? gs.GpuIndirectArgs : null,
+                    indirectArgs = UsesSortedViewData && sorted && gs.IndirectDrawReady ? gs.GpuIndirectArgs : null,
                     pass = UsesSortedViewData ? DisplayPass : 0,
                 });
             }
@@ -859,9 +910,7 @@ namespace GaussianSplatting.Runtime
             Material matComposite = null;
             bool hasRenderedAGroup = false;
             // PointCloud reads the same sorted view data as Splats, so it shares
-            // this path; only the display material and point params differ.
-            bool pointCloudMode = _config.renderMode == GaussianSplatRenderMode.PointCloud;
-            Material modeDisplayMat = pointCloudMode ? _matPointCloud : _matSplats;
+            // this path; its points are baked quads, drawn by the quad shader.
             int groupStart = 0;
             while (groupStart < _activeSplats.Count)
             {
@@ -890,9 +939,15 @@ namespace GaussianSplatting.Runtime
                 int contentKey = 17;
                 int minSortNth = int.MaxValue;
                 bool groupAnimated = false;
+                // Any baked member makes the group draw with the quad shader,
+                // which hands plain members back to the splat pass
+                bool groupBaked = false;
+                bool groupOrderIndependent = true;
                 for (int i = groupStart; i < groupEnd; ++i)
                 {
                     var gs = ActiveSplatInDrawOrder(i).Item1;
+                    groupBaked |= gs.QuadsBaked;
+                    groupOrderIndependent &= gs.StyleOrderIndependent;
                     groupSignature = groupSignature * 31 + gs.GetInstanceID();
                     groupSignature = groupSignature * 31 + gs.EffectiveSplatCount;
                     // Keys are sorted in world space: any member's data or
@@ -908,22 +963,30 @@ namespace GaussianSplatting.Runtime
                 // this frame (cubemap faces), so every render must re-sort.
                 var sortSettings = SortSettings(groupAnimated);
                 Vector3 camPos = cam.transform.position;
-                bool groupSortNeeded = MatrixOverride.HasValue ||
+                // A fully additive group blends the same in any order: it skips
+                // the sort and draws identity keys, rewritten every frame since
+                // membership can change. The keys no longer hold a sorted order
+                // for the next sorted frame.
+                bool groupSortNeeded = !groupOrderIndependent && (MatrixOverride.HasValue ||
                     groupCache.sortState.NeedsSort(cam.GetInstanceID(), sortSettings.Key, contentKey, camPos,
-                        minSortNth, sortSettings.Throttled, _config.sortMoveThreshold);
+                        minSortNth, sortSettings.Throttled, _config.sortMoveThreshold));
+                bool writeKeys = groupSortNeeded || groupOrderIndependent;
+                if (groupOrderIndependent)
+                    groupCache.sortState.Invalidate();
 
-                if (groupSortNeeded)
+                if (writeKeys)
                     cmb.SetBufferData(groupCache.visibleCounter, s_zeroCounter);
 
                 Material groupDisplayMat = null;
+                _styleRangeCount = 0;
                 int dstOffset = 0;
                 bool groupValid = true;
                 for (int i = groupStart; i < groupEnd; ++i)
                 {
                     var gs = ActiveSplatInDrawOrder(i).Item1;
                     matComposite = _matComposite;
-                    groupDisplayMat ??= modeDisplayMat;
-                    if (modeDisplayMat == null)
+                    groupDisplayMat ??= groupBaked ? _matStylized : _matSplats;
+                    if (groupDisplayMat == null)
                     {
                         groupValid = false;
                         break;
@@ -940,7 +1003,7 @@ namespace GaussianSplatting.Runtime
 
                     bool copySuccess = gs.CopyViewDataAndDistances(cmb, cam, gs.transform.localToWorldMatrix,
                         groupCache.viewData, groupCache.sortDistances, groupCache.sortKeys,
-                        groupCache.visibleCounter, 0, dstOffset, gs.EffectiveSplatCount, groupSortNeeded,
+                        groupCache.visibleCounter, 0, dstOffset, gs.EffectiveSplatCount, writeKeys,
                         sortSettings);
                     if (!copySuccess)
                     {
@@ -948,6 +1011,8 @@ namespace GaussianSplatting.Runtime
                         break;
                     }
 
+                    if (groupBaked)
+                        AddStyleRange(gs.StyleRange(dstOffset));
                     dstOffset += gs.EffectiveSplatCount;
                 }
 
@@ -973,7 +1038,9 @@ namespace GaussianSplatting.Runtime
                 // scale != 1 or dynamic resolution.
                 int tileW = _tileRenderer.TileRenderSize.x > 0 ? _tileRenderer.TileRenderSize.x : cam.pixelWidth;
                 int tileH = _tileRenderer.TileRenderSize.y > 0 ? _tileRenderer.TileRenderSize.y : cam.pixelHeight;
-                if (!pointCloudMode && !DirectToTarget && _config.useTileRenderer && _tileRenderer.HasOutputTarget &&
+                // The tile renderer composites the view data colors on its own
+                // and knows nothing of the draw-side style parameters
+                if (!groupBaked && !DirectToTarget && _config.useTileRenderer && _tileRenderer.HasOutputTarget &&
                     _tileRenderer.EnsureResources(_config, groupCache, tileW, tileH))
                 {
                     _tileRenderer.Dispatch(cmb, cam, groupCache, dstOffset, groupSortNeeded, tileW, tileH);
@@ -999,17 +1066,9 @@ namespace GaussianSplatting.Runtime
                     _globalMpb.SetBuffer(GaussianSplatRenderer.Props.SplatViewData, groupCache.viewData);
                     _globalMpb.SetBuffer(GaussianSplatRenderer.Props.OrderBuffer, groupCache.sortKeys);
                     _globalMpb.SetInteger(GaussianSplatRenderer.Props.IsStereo, 0);
-                    if (pointCloudMode)
-                    {
-                        _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointSizeScale, _config.pointCloudSizeScale);
-                        _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointMinSize, _config.pointCloudMinDisplaySize);
-                        _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointMinWorldSize, _config.pointCloudMinWorldSize);
-                        _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointProjectionScale,
-                            PointProjectionScale(MatrixOverride?.Proj.m11 ?? cam.projectionMatrix.m11));
-                        _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointMaxSize, _config.pointCloudMaxDisplaySize);
-                        _globalMpb.SetFloat(GaussianSplatRenderer.Props.PointOpacityBoost, _config.pointCloudOpacityBoost);
-                    }
-                    if (groupCache.indirectArgsValid)
+                    if (groupBaked)
+                        SetGroupStyleRanges(cmb, groupCache, _globalMpb);
+                    if (groupCache.indirectArgsValid && !groupOrderIndependent)
                         cmb.DrawProceduralIndirect(reference.GpuIndexBuffer, Matrix4x4.identity,
                             groupDisplayMat, DisplayPass, MeshTopology.Triangles, groupCache.indirectArgs, 0, _globalMpb);
                     else
@@ -1039,15 +1098,7 @@ namespace GaussianSplatting.Runtime
 
                 // cache view
                 kvp.Item2.Clear();
-                Material displayMat = _config.renderMode switch
-                {
-                    GaussianSplatRenderMode.DebugPoints => _matDebugPoints,
-                    GaussianSplatRenderMode.DebugPointIndices => _matDebugPoints,
-                    GaussianSplatRenderMode.DebugBoxes => _matDebugBoxes,
-                    GaussianSplatRenderMode.DebugChunkBounds => _matDebugBoxes,
-                    GaussianSplatRenderMode.PointCloud => _matPointCloud,
-                    _ => _matSplats
-                };
+                Material displayMat = DisplayMaterial(gs);
                 if (displayMat == null)
                     continue;
 
@@ -1063,18 +1114,12 @@ namespace GaussianSplatting.Runtime
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatScale, gs.splatScale);
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatOpacityScale, gs.opacityScale);
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatSize, _config.pointDisplaySize);
-                mpb.SetFloat(GaussianSplatRenderer.Props.PointSizeScale, _config.pointCloudSizeScale);
-                mpb.SetFloat(GaussianSplatRenderer.Props.PointMinSize, _config.pointCloudMinDisplaySize);
-                mpb.SetFloat(GaussianSplatRenderer.Props.PointMinWorldSize, _config.pointCloudMinWorldSize);
-                mpb.SetFloat(GaussianSplatRenderer.Props.PointProjectionScale,
-                    PointProjectionScale(MatrixOverride?.Proj.m11 ?? cam.projectionMatrix.m11));
-                mpb.SetFloat(GaussianSplatRenderer.Props.PointMaxSize, _config.pointCloudMaxDisplaySize);
-                mpb.SetFloat(GaussianSplatRenderer.Props.PointOpacityBoost, _config.pointCloudOpacityBoost);
                 mpb.SetInteger(GaussianSplatRenderer.Props.SHOrder, gs.EffectiveSHOrder);
                 mpb.SetInteger(GaussianSplatRenderer.Props.SHOnly, gs.shOnly ? 1 : 0);
                 mpb.SetInteger(GaussianSplatRenderer.Props.DisplayIndex, _config.renderMode == GaussianSplatRenderMode.DebugPointIndices ? 1 : 0);
                 mpb.SetInteger(GaussianSplatRenderer.Props.DisplayChunks, _config.renderMode == GaussianSplatRenderMode.DebugChunkBounds ? 1 : 0);
                 mpb.SetInteger(GaussianSplatRenderer.Props.IsStereo, 0);
+                SetStyleOnMaterial(cmb, gs, mpb);
 
                 cmb.BeginSample(ProfCalcView);
                 bool calcSuccess = gs.CalcViewData(cmb, cam);
@@ -1086,8 +1131,11 @@ namespace GaussianSplatting.Runtime
                 // (invisible splats sink to the tail; indirect draw skips them).
                 // A matrix override means the same camera renders multiple views
                 // this frame (cubemap faces), so every render must re-sort.
+                // Order-independent splats keep whatever order the keys hold
+                // and draw them all: a culled splat is a degenerate quad.
+                bool sorted = !gs.StyleOrderIndependent;
                 var sortSettings = SortSettings(gs.HasAnimatedContent);
-                if (MatrixOverride.HasValue || gs.NeedsSort(cam, sortSettings))
+                if (sorted && (MatrixOverride.HasValue || gs.NeedsSort(cam, sortSettings)))
                 {
                     gs.SortPoints(cmb, cam, matrix, sortSettings);
                     gs.MarkSorted(cam, sortSettings);
@@ -1104,7 +1152,7 @@ namespace GaussianSplatting.Runtime
 
                 cmb.BeginSample(ProfDraw);
                 int pass = UsesSortedViewData ? DisplayPass : 0;
-                if (UsesSortedViewData && gs.IndirectDrawReady)
+                if (UsesSortedViewData && sorted && gs.IndirectDrawReady)
                     cmb.DrawProceduralIndirect(gs.GpuIndexBuffer, matrix, displayMat, pass, topology,
                         gs.GpuIndirectArgs, 0, mpb);
                 else

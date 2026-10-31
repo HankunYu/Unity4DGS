@@ -567,8 +567,70 @@ struct SplatViewData
 {
     float4 pos;
     float2 axis1, axis2;
-    uint2 color; // 4xFP16
+    uint2 color; // see PackViewColor / PackBakedViewColor
 };
+
+// Shared-exponent 9:9:9:5 (DXGI R9G9B9E5_SHAREDEXP): three non-negative
+// values in 32 bits, 9 bits of mantissa relative to the largest
+uint PackRGB9E5(float3 rgb)
+{
+    rgb = clamp(rgb, 0, 65408.0);
+    float maxc = max(max(rgb.r, rgb.g), max(rgb.b, exp2(-16.0)));
+    int e = (int)floor(log2(maxc)) + 16;
+    float scale = exp2((float)(e - 24));
+    if (floor(maxc / scale + 0.5) >= 512)
+    {
+        e++;
+        scale *= 2;
+    }
+    uint3 m = (uint3)min(floor(rgb / scale + 0.5), 511);
+    return m.r | (m.g << 9) | (m.b << 18) | ((uint)e << 27);
+}
+
+float3 UnpackRGB9E5(uint v)
+{
+    return float3(v & 511, (v >> 9) & 511, (v >> 18) & 511) * exp2((float)(v >> 27) - 24);
+}
+
+// View data color of a plain splat: four halves
+uint2 PackViewColor(half4 col)
+{
+    return uint2((f32tof16(col.r) << 16) | f32tof16(col.g), (f32tof16(col.b) << 16) | f32tof16(col.a));
+}
+
+// View data color of a baked quad (RenderGaussianStylized.shader), which
+// also carries the splat's style weight: the quad shader morphs each quad's
+// profile by it. Color as shared-exponent 9:9:9:5, the weight as 16-bit unorm.
+uint2 PackBakedViewColor(half3 rgb, half alpha, float styleWeight)
+{
+    uint w = (uint)round(saturate(styleWeight) * 65535.0);
+    return uint2(PackRGB9E5(rgb), (w << 16) | f32tof16(alpha));
+}
+
+float BakedViewStyleWeight(uint2 color)
+{
+    return (color.y >> 16) * (1.0 / 65535.0);
+}
+
+// Alpha is the low half of .y in both layouts
+half ViewAlpha(uint2 color)
+{
+    return f16tof32(color.y);
+}
+
+void SetViewAlpha(inout uint2 color, half alpha)
+{
+    color.y = (color.y & 0xFFFF0000) | f32tof16(alpha);
+}
+
+// What a splat or fragment changes in the image, for the opacity culls: the
+// light it blocks (alpha) or the light it adds (alpha * colour), whichever is
+// more. Colours up to white leave just alpha; a style driving colour past
+// white keeps what is too faint to occlude but bright enough to see.
+float SplatContribution(float alpha, float3 rgb)
+{
+    return alpha * max(1.0, max(rgb.r, max(rgb.g, rgb.b)));
+}
 
 // If we are rendering into backbuffer directly (e.g. HDR off, no postprocessing),
 // the color target texture is a render target (so projection is upside down),

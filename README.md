@@ -27,6 +27,8 @@ Based on [aras-p/UnityGaussianSplatting](https://github.com/aras-p/UnityGaussian
 - **GaussianMorph** — GPU morph transition between two splat assets
 - **GaussianCutout** — box/ellipsoid cutout regions
 - **GaussianStylizeVolume** — stylization post-processing (stereo aware)
+- **GaussianSplatStyle + GaussianStyleVolume** — per-splat stylized looks (color ramps, rim light, dots, streaks, slices and grids, glints) blended in by weight; style volumes limit a style to a region, such as the space around the camera
+- **GaussianDepthOfField** — thin-lens depth of field on the camera, applied per splat: no depth buffer needed, works in Direct mode and 360 (ODS) capture
 
 ![Unity4DGS in action](Docs/media/demo.gif)
 

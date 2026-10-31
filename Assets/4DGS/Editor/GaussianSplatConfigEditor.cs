@@ -150,7 +150,7 @@ namespace GaussianSplatting.Editor
                 EditorGUILayout.ObjectField("Shader Composite", config.ShaderComposite, typeof(Shader), false);
                 EditorGUILayout.ObjectField("Shader Debug Points", config.ShaderDebugPoints, typeof(Shader), false);
                 EditorGUILayout.ObjectField("Shader Debug Boxes", config.ShaderDebugBoxes, typeof(Shader), false);
-                EditorGUILayout.ObjectField("Shader Point Cloud", config.ShaderPointCloud, typeof(Shader), false);
+                EditorGUILayout.ObjectField("Shader Stylized", config.ShaderStylized, typeof(Shader), false);
                 EditorGUILayout.ObjectField("CS Splat Utilities", config.CsSplatUtilities, typeof(ComputeShader), false);
                 EditorGUILayout.ObjectField("CS Tile Render", config.CsTileRender, typeof(ComputeShader), false);
             }

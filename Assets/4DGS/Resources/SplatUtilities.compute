@@ -34,6 +34,7 @@
 // NOTE: Do NOT add #pragma use_dxc here — it causes IsSupported()=false on visionOS Metal.
 
 #include "../Shaders/GaussianSplatting.hlsl"
+#include "../Shaders/GaussianVolume.hlsl"
 #include "UnityCG.cginc"
 
 float4x4 _MatrixObjectToWorld;
@@ -356,6 +357,273 @@ float BackfaceVisibility(float4 rot, float3 centerWorldPos)
     return _BackfaceFadeWidth > 0 ? saturate(facing / _BackfaceFadeWidth) : (facing > 0 ? 1.0 : 0.0);
 }
 
+// Per-renderer style (GaussianSplatStyle), blended in by _StyleWeight; zero
+// leaves the color untouched. View-dependent terms use the camera centre, so
+// both eyes of a stereo pair agree, like the SH evaluation.
+float _StyleWeight;
+uint _StyleColorSource;     // GaussianSplatStyleColorSource
+uint _StyleRampInput;       // GaussianSplatStyleRampInput
+float _StyleDepthNear;
+float _StyleDepthInvRange;
+float _StyleIntensity;
+float _StyleRimAmount;
+float _StyleRimPower;
+Texture2D _StyleRampTex;
+SamplerState sampler_StyleRampTex;
+// Must match GaussianSplatStyle.RampResolution
+#define STYLE_RAMP_RESOLUTION 256.0
+uint _StyleShape;           // GaussianSplatStyleShape
+float _StyleDotRadius;      // pixels
+uint _StyleStreakAxis;      // GaussianSplatStyleStreakAxis
+float3 _StyleStreakDir;     // world, normalized
+float _StyleStreakLength;   // world units
+float _StyleStreakHalfWidth; // pixels
+float _StyleMinWorldSize;   // dot diameter / streak width floor in world units, 0 = off
+// World distance what the style draws can lie from the splat (snap, streak
+// and size floor), for frustum culling,
+// and the same in object space for the chunk bounds
+float _StyleReach;
+float _StyleChunkExpand;
+float _StyleGlintDensity;
+float _StyleGlintRate;
+float _StyleGlintIntensity;
+float _StyleTime;
+uint _StyleQuantize;        // GaussianSplatStyleQuantize
+float _StyleQuantizeSpacing; // world units
+float _StyleQuantizeHalfBand; // world units around a slice or grid point that stay
+float3 _StyleSliceNormal;   // world, normalized
+float _StyleSliceOffset;
+float _StyleKeepFraction;
+// Same values the splat shader shapes its quads with (GaussianSplatConfig)
+float _SplatQuadExtent;
+float _SplatMaxPixelRadius;
+// Quads baked into the view data for RenderGaussianStylized.shader (see
+// BakeQuad): every renderer in PointCloud mode, styled ones in Splats mode
+uint _BakeQuads;
+uint _QuadBaseShape;        // 0 = Gaussian (Splats), 1 = point (PointCloud)
+// PointCloud point sizing (GaussianSplatConfig)
+float _PointSizeScale;
+float _PointMinSize;
+float _PointMaxSize;
+float _PointMinWorldSize;   // diameter in world units, 0 = off
+// Pixels per unit of size over distance: cot(fovY/2), or 2/pi under ODS.
+// Set whenever quads are baked (point cloud or style)
+float _ProjectionScale;
+// Pushes low-opacity points towards solid ones while still letting
+// opacity-driven effects (dissolve, cutouts) fade them out
+float _PointOpacityBoost;
+// GaussianStyleVolume regions limiting the style; none covers the renderer.
+// Params: x shape, y falloff, z weight.
+#define MAX_STYLE_VOLUMES 4
+uint _StyleVolumeCount;
+float4x4 _StyleVolumeWorldToLocal[MAX_STYLE_VOLUMES];
+float4 _StyleVolumeParams[MAX_STYLE_VOLUMES];
+// Depth of field (GaussianDepthOfField on the camera): x lens radius in world
+// units (0 = off), y reciprocal focus distance, z largest blur radius in pixels
+float4 _DofParams;
+// Splats contributing less than this are culled (see SplatContribution;
+// StyleBrightnessBound stands in for the colour, which is not known yet at
+// every cull). Tested before depth of field blurs them: a blurred splat keeps
+// its light, however faint it is spread.
+#define SPLAT_CULL_ALPHA (5.0 / 255.0)
+
+uint StyleHash(uint x)
+{
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+float StyleHash01(uint x)
+{
+    return (StyleHash(x) >> 8) * (1.0 / 16777216.0);
+}
+
+// Brightness boost of a glinting splat: a fraction of splats flash briefly,
+// each on its own clock so the flashes never line up
+float StyleGlint(uint idx)
+{
+    if (_StyleGlintDensity <= 0 || StyleHash01(idx) >= _StyleGlintDensity)
+        return 0;
+    float h = StyleHash01(idx ^ 0x68e31da4u);
+    float phase = frac(_StyleTime * _StyleGlintRate * (0.5 + h) + h * 7.31);
+    // A peak a sixth of the period wide, centred on half phase
+    float flash = saturate(1.0 - abs(phase * 2.0 - 1.0) * 6.0);
+    return flash * flash * _StyleGlintIntensity;
+}
+
+// How far past white the style can drive a splat's colour (ApplyStyle), for
+// the opacity culls to judge the splat by the light it may add
+float StyleBrightnessBound(float styleWeight)
+{
+    float glint = _StyleGlintDensity > 0 ? _StyleGlintIntensity : 0;
+    return max(1.0, lerp(1.0, _StyleIntensity * (1.0 + glint), styleWeight));
+}
+
+// Grazing-angle term. A flat splat's shortest axis is its surface normal; a
+// round one has no meaningful normal, so the term fades with flatness.
+float StyleRim(float4 rot, float3 scale, float3 centerWorldPos)
+{
+    float3 s = abs(scale);
+    float minScale = min(s.x, min(s.y, s.z));
+    float maxScale = max(s.x, max(s.y, s.z));
+    float midScale = s.x + s.y + s.z - minScale - maxScale;
+    float3 axis = s.x == minScale ? float3(1, 0, 0) : (s.y == minScale ? float3(0, 1, 0) : float3(0, 0, 1));
+    float3 objNormal = QuatRotateVector(axis, rot);
+    // Inverse transpose, as for the backface normal
+    float3 worldNormal = normalize(mul(objNormal, (float3x3)_MatrixWorldToObject));
+    float facing = abs(dot(worldNormal, normalize(_VecWorldSpaceCameraPos.xyz - centerWorldPos)));
+    float flatness = 1.0 - minScale / max(midScale, 1e-8);
+    return pow(1.0 - facing, _StyleRimPower) * flatness;
+}
+
+// The style weight of a splat at this position: the renderer's weight,
+// limited to its style volumes when it has any
+float StyleWeightAt(float3 worldPos)
+{
+    if (_StyleWeight <= 0 || _StyleVolumeCount == 0)
+        return _StyleWeight;
+    float mask = 0;
+    for (uint i = 0; i < _StyleVolumeCount; i++)
+    {
+        float4 p = _StyleVolumeParams[i];
+        float3 localPos = mul(_StyleVolumeWorldToLocal[i], float4(worldPos, 1)).xyz;
+        mask = max(mask, p.z * GaussianVolumeWeight(localPos, p.x, p.y));
+    }
+    return _StyleWeight * mask;
+}
+
+// Focal length in pixels: the screen distance a unit of size spans at unit
+// distance
+float DofFocalPx(float4x4 pMatrix)
+{
+    return _OdsEnabled != 0 ? _VecScreenParams.x / (2.0 * kOdsPi) : _VecScreenParams.y * abs(pMatrix._m11) * 0.5;
+}
+
+// Radius in pixels of the circle a point at this distance from the camera
+// blurs into, through a thin lens focused at the focus distance
+float DofBlurRadius(float dist, float focalPx)
+{
+    if (_DofParams.x <= 0 || dist <= 0)
+        return 0;
+    return min(_DofParams.x * abs(_DofParams.y - 1.0 / dist) * focalPx, _DofParams.z);
+}
+
+// Grows a Gaussian footprint by a blur circle and returns the factor its
+// opacity drops by to keep the splat's light. The half-axes are sqrt(2)
+// sigma; a disc of radius r spreads like a Gaussian of variance r^2/4, added
+// along every direction, so the axes keep their directions.
+float DofBlurAxes(inout float2 axis1, inout float2 axis2, float blurPx)
+{
+    if (blurPx <= 0)
+        return 1;
+    float add = 0.5 * blurPx * blurPx;
+    float l1 = max(dot(axis1, axis1), 1e-8);
+    float l2 = max(dot(axis2, axis2), 1e-8);
+    float s1 = sqrt((l1 + add) / l1);
+    float s2 = sqrt((l2 + add) / l2);
+    axis1 *= s1;
+    axis2 *= s2;
+    return 1.0 / (s1 * s2);
+}
+
+// Same for a round footprint of the given radius in pixels: a disc blurred
+// by a disc, kept a disc
+float DofBlurRadiusPx(inout float radius, float blurPx)
+{
+    if (blurPx <= 0)
+        return 1;
+    float r2 = max(radius * radius, 1e-8);
+    float blurred2 = r2 + blurPx * blurPx;
+    radius = sqrt(blurred2);
+    return r2 / blurred2;
+}
+
+// Half-width in pixels below which a baked quad is drawn wider instead. The
+// fragment's antialiased edge is a pixel wide, so a thinner quad misses pixel
+// centres and breaks into steps and dashes, which shimmer once the frame is
+// resampled (equirect playback) and which 4:2:0 video smears the colour out of.
+#define QUAD_MIN_HALF_WIDTH 1.0
+
+// Widens a half-extent in pixels to the minimum and returns the factor its
+// opacity drops by along that axis to keep its light
+float QuadMinHalfWidth(inout float halfWidth)
+{
+    if (halfWidth >= QUAD_MIN_HALF_WIDTH)
+        return 1;
+    float fade = max(halfWidth, 0) / QUAD_MIN_HALF_WIDTH;
+    halfWidth = QUAD_MIN_HALF_WIDTH;
+    return fade;
+}
+
+// Pixels a world size spans at clip w (the camera distance)
+float WorldSizeToPixels(float worldSize, float w)
+{
+    return worldSize * 0.5 * _ProjectionScale * _VecScreenParams.y / w;
+}
+
+// The fragment's antialiased rim covers the outermost pixel of a disc quad.
+// Padding the quad by half a pixel centres the rim on the disc's edge, so a
+// disc gives the light of its nominal area at any size; unpadded, a small
+// disc loses most of its light to the rim while a blurred one loses little.
+#define QUAD_DISC_EDGE_PAD 0.5
+
+// Snaps a styled splat toward its slice or grid point and fades the splats
+// the style drops (thinning, or too far from a slice or grid point) by
+// scaling their opacity, so at full weight the opacity cull removes them from
+// sorting and drawing. Runs before projection: the moved position feeds
+// everything downstream, in both eyes alike.
+void ApplyStyleQuantize(uint idx, float styleWeight, inout SplatData splat, inout float3 worldPos)
+{
+    if (styleWeight <= 0)
+        return;
+
+    float keep = (_StyleKeepFraction >= 1 || StyleHash01(idx ^ 0x2c1b3c6du) < _StyleKeepFraction) ? 1.0 : 0.0;
+    float3 snapped = worldPos;
+    float dist = 0;
+    if (_StyleQuantize == 1)
+    {
+        float d = (dot(worldPos, _StyleSliceNormal) - _StyleSliceOffset) / _StyleQuantizeSpacing;
+        float offset = (round(d) - d) * _StyleQuantizeSpacing;
+        snapped = worldPos + _StyleSliceNormal * offset;
+        dist = abs(offset);
+    }
+    else if (_StyleQuantize == 2)
+    {
+        snapped = round(worldPos / _StyleQuantizeSpacing) * _StyleQuantizeSpacing;
+        float3 offset = abs(snapped - worldPos);
+        dist = max(offset.x, max(offset.y, offset.z));
+    }
+    // A soft edge, so splats drifting across it (animation) fade rather than pop
+    keep *= 1.0 - smoothstep(_StyleQuantizeHalfBand * 0.7, _StyleQuantizeHalfBand, dist);
+
+    worldPos = lerp(worldPos, snapped, styleWeight);
+    splat.pos = mul(_MatrixWorldToObject, float4(worldPos, 1)).xyz;
+    splat.opacity *= (half)lerp(1.0, keep, styleWeight);
+}
+
+// Takes and returns gamma-space color, like the SH output it modifies
+half3 ApplyStyle(half3 color, float styleWeight, SplatData splat, float3 centerWorldPos, uint idx)
+{
+    if (styleWeight <= 0)
+        return color;
+
+    half3 styled = color;
+    if (_StyleColorSource == 1)
+    {
+        float t = _StyleRampInput == 0
+            ? dot(color, half3(0.2126, 0.7152, 0.0722))
+            : (distance(centerWorldPos, _VecWorldSpaceCameraPos.xyz) - _StyleDepthNear) * _StyleDepthInvRange;
+        // Texel centres, so both ends of the ramp are reached exactly
+        float u = (saturate(t) * (STYLE_RAMP_RESOLUTION - 1.0) + 0.5) / STYLE_RAMP_RESOLUTION;
+        styled = (half3)_StyleRampTex.SampleLevel(sampler_StyleRampTex, float2(u, 0.5), 0).rgb;
+    }
+    float rim = _StyleRimAmount > 0 ? StyleRim(splat.rot, splat.scale, centerWorldPos) : 1.0;
+    styled *= (half)(_StyleIntensity * lerp(1.0, rim, _StyleRimAmount) * (1.0 + StyleGlint(idx)));
+    return lerp(color, styled, (half)styleWeight);
+}
+
 // View-independent intermediate data computed once for both eyes.
 struct SplatSharedData
 {
@@ -364,22 +632,25 @@ struct SplatSharedData
     float3 cov3d1;
     half4 color;   // SH-evaluated color + opacity
     float maxScale; // largest world-space axis scale, for the frustum margin
+    float styleWeight;
     bool skip;     // deleted, cut, or zero opacity
 };
 
 // Compute view-independent data: 3D covariance, SH, opacity. Called once per splat.
 SplatSharedData CalcSharedSplatData(
-    SplatData splat, float3 centerWorldPos, bool isDeleted, bool isCut,
+    uint idx, SplatData splat, float3 centerWorldPos, bool isDeleted, bool isCut,
     float splatScale, half opacityScale,
-    float animOpacityMul, float animScaleMul, float animColorBlend, float3 animColorTint)
+    float animOpacityMul, float animScaleMul, float animColorBlend, float3 animColorTint,
+    float styleWeight)
 {
     SplatSharedData ssd = (SplatSharedData)0;
     ssd.worldPos = centerWorldPos;
+    ssd.styleWeight = styleWeight;
     ssd.skip = isDeleted || isCut;
 
     float finalOpacity = splat.opacity * opacityScale * animOpacityMul
                        * BackfaceVisibility(splat.rot, centerWorldPos);
-    if (finalOpacity < 5.0 / 255.0) { ssd.skip = true; return ssd; }
+    if (finalOpacity * StyleBrightnessBound(styleWeight) < SPLAT_CULL_ALPHA) { ssd.skip = true; return ssd; }
     if (ssd.skip) return ssd;
 
     float3x3 splatRotScaleMat = CalcMatrixFromRotationScale(splat.rot, splat.scale * animScaleMul);
@@ -396,6 +667,7 @@ SplatSharedData CalcSharedSplatData(
     ssd.color.rgb = ShadeSH(splat.sh, objViewDir, _SHOrder, _SHOnly != 0);
     if (animColorBlend > 0)
         ssd.color.rgb = lerp(ssd.color.rgb, (half3)animColorTint, (half)animColorBlend);
+    ssd.color.rgb = ApplyStyle(ssd.color.rgb, styleWeight, splat, centerWorldPos, idx);
     ssd.color.a = min(finalOpacity, 65000);
 
     return ssd;
@@ -415,7 +687,7 @@ SplatViewData CalcPerEyeViewData(
     // Conservative frustum cull
     if (clipPos.w > 0)
     {
-        float clipMargin = ssd.maxScale * abs(pMatrix._m00);
+        float clipMargin = (ssd.maxScale + _StyleReach) * abs(pMatrix._m00);
         float w = clipPos.w;
         if ((clipPos.x < -(w+clipMargin)) || (clipPos.x > (w+clipMargin)) ||
             (clipPos.y < -(w+clipMargin)) || (clipPos.y > (w+clipMargin)))
@@ -433,13 +705,21 @@ SplatViewData CalcPerEyeViewData(
         // gets culled once it has faded to invisible, so nothing pops at the
         // cull boundary. Axes stay zero -> degenerate quad, no fragments.
         half finalAlpha = ssd.color.a * (half)alphaScale;
-        if (finalAlpha < 5.0 / 255.0)
+        if (finalAlpha * StyleBrightnessBound(ssd.styleWeight) < SPLAT_CULL_ALPHA)
             return view;
 
         DecomposeCovariance(cov2d, view.axis1, view.axis2);
 
-        view.color.x = (f32tof16(ssd.color.r) << 16) | f32tof16(ssd.color.g);
-        view.color.y = (f32tof16(ssd.color.b) << 16) | f32tof16(finalAlpha);
+        // Baked quads take their blur in BakeQuad, with the shape they morph into
+        if (_BakeQuads != 0)
+        {
+            view.color = PackBakedViewColor(ssd.color.rgb, finalAlpha, ssd.styleWeight);
+        }
+        else
+        {
+            finalAlpha *= (half)DofBlurAxes(view.axis1, view.axis2, DofBlurRadius(clipPos.w, DofFocalPx(pMatrix)));
+            view.color = PackViewColor(half4(ssd.color.rgb, finalAlpha));
+        }
     }
     return view;
 }
@@ -496,11 +776,155 @@ float4 OdsProjectSplat(float3 worldPos, out float distOut)
     return float4(ndc * distOut, 0.5 * distOut, distOut);
 }
 
+// Bakes a splat's draw quad into its view data for the quad shader
+// (RenderGaussianStylized.shader): the axes become the quad's half-axes in
+// pixels, drawn as they are, and pos moves to the quad's centre. The base is
+// the render mode's own shape -- the Gaussian quad (extent and pixel cap
+// included) in Splats mode, the point in PointCloud mode -- and the style
+// weight (per splat, in the view color) morphs it into the style's shape.
+// Depth of field blurs both shapes, each keeping its own light, and shapes
+// thinner than QUAD_MIN_HALF_WIDTH are widened the same way.
+void BakeQuad(inout SplatViewData view, float3 worldPos, float4x4 vpMatrix, float focalPx)
+{
+    bool visible = view.pos.w > 0 && any(view.axis1 != 0 || view.axis2 != 0);
+    if (_BakeQuads == 0 || !visible)
+        return;
+
+    if (_QuadBaseShape == 1)
+    {
+        // Boost and clamp the point's opacity here, before the fades below:
+        // a fade applied ahead of the clamp mostly vanishes into the boost's
+        // headroom, so a blurred or widened point would gain light instead of
+        // spreading it. The sign is the editor's selection flag.
+        half a = ViewAlpha(view.color);
+        half boosted = saturate(abs(a) * (half)_PointOpacityBoost);
+        SetViewAlpha(view.color, a < 0 ? -boosted : boosted);
+    }
+
+    float styleWeight = BakedViewStyleWeight(view.color);
+    float blurPx = DofBlurRadius(view.pos.w, focalPx);
+    float2 g1, g2;
+    // Opacity factor the blur takes from the base shape
+    float baseFade;
+    if (_QuadBaseShape == 1)
+    {
+        // Follow the projected footprint (~1 sigma) so nearby points keep
+        // covering the surface, clamped to keep the point look. The world
+        // size floor stops points shrinking to dust up close, where grazing
+        // splats collapse, and overrides the max clamp.
+        float footprint = sqrt(length(view.axis1) * length(view.axis2));
+        float sizePx = clamp(footprint * _PointSizeScale, _PointMinSize, _PointMaxSize);
+        if (_PointMinWorldSize > 0)
+            sizePx = max(sizePx, WorldSizeToPixels(_PointMinWorldSize, view.pos.w));
+        float radius = sizePx * 0.5;
+        baseFade = DofBlurRadiusPx(radius, blurPx);
+        float widen = QuadMinHalfWidth(radius);
+        baseFade *= widen * widen;
+        radius += QUAD_DISC_EDGE_PAD;
+        g1 = float2(radius, 0);
+        g2 = float2(0, radius);
+    }
+    else
+    {
+        baseFade = DofBlurAxes(view.axis1, view.axis2, blurPx);
+        g1 = view.axis1 * _SplatQuadExtent;
+        g2 = view.axis2 * _SplatQuadExtent;
+        float r1 = length(g1), r2 = length(g2);
+        if (r1 > _SplatMaxPixelRadius) g1 *= _SplatMaxPixelRadius / r1;
+        if (r2 > _SplatMaxPixelRadius) g2 *= _SplatMaxPixelRadius / r2;
+    }
+    view.axis1 = g1;
+    view.axis2 = g2;
+    if (styleWeight <= 0)
+    {
+        SetViewAlpha(view.color, ViewAlpha(view.color) * (half)baseFade);
+        return;
+    }
+
+    float2 t1 = g1, t2 = g2;
+    float shapeFade = baseFade;
+    float2 centerNdc = view.pos.xy / view.pos.w;
+    // The world size floor grows the fixed pixel size up close, so the
+    // shapes keep their size against the scene instead of shrinking into it
+    float minHalfPx = _StyleMinWorldSize > 0 ? WorldSizeToPixels(_StyleMinWorldSize, view.pos.w) * 0.5 : 0;
+    if (_StyleShape == 1)
+    {
+        float radius = max(_StyleDotRadius, minHalfPx);
+        shapeFade = DofBlurRadiusPx(radius, blurPx);
+        float widen = QuadMinHalfWidth(radius);
+        shapeFade *= widen * widen;
+        radius += QUAD_DISC_EDGE_PAD;
+        t1 = float2(radius, 0);
+        t2 = float2(0, radius);
+    }
+    else if (_StyleShape == 2)
+    {
+        float3 dir = _StyleStreakAxis == 0
+            ? _StyleStreakDir
+            : normalize(worldPos - _VecWorldSpaceCameraPos.xyz);
+        float3 tailWorld = worldPos + dir * _StyleStreakLength;
+        float2 headNdc = view.pos.xy / view.pos.w;
+        float2 tailNdc;
+        if (_OdsEnabled != 0)
+        {
+            float tailDist;
+            float4 tailClip = OdsProjectSplat(tailWorld, tailDist);
+            tailNdc = tailClip.xy / tailClip.w;
+            // The equirect wraps at +-180 degrees: keep the tail on the
+            // head's side, past the image edge, so a streak crossing the
+            // seam is cut there instead of spanning the whole image
+            if (tailNdc.x - headNdc.x > 1)
+                tailNdc.x -= 2;
+            else if (tailNdc.x - headNdc.x < -1)
+                tailNdc.x += 2;
+        }
+        else
+        {
+            float4 tailClip = mul(vpMatrix, float4(tailWorld, 1));
+            // A tail behind the eye would wrap around: cut the segment where
+            // it nears the camera plane
+            float wMin = view.pos.w * 0.05;
+            if (tailClip.w < wMin)
+                tailClip = lerp(view.pos, tailClip, (view.pos.w - wMin) / (view.pos.w - tailClip.w));
+            tailNdc = tailClip.xy / tailClip.w;
+        }
+        // Half the segment, in pixels; the head sits at quad x = -1
+        float2 halfSeg = (tailNdc - headNdc) * 0.25 * _VecScreenParams.xy;
+        float len = length(halfSeg);
+        float2 along = len > 1e-4 ? halfSeg / len : float2(1, 0);
+        // Never shorter than wide: a streak seen end-on stays a dot
+        float halfWidth = max(_StyleStreakHalfWidth, minHalfPx);
+        float halfLength = max(len, halfWidth);
+        // A line blurs across and along on its own: each keeps its light
+        // over its own extent
+        shapeFade = sqrt(DofBlurRadiusPx(halfLength, blurPx) * DofBlurRadiusPx(halfWidth, blurPx));
+        shapeFade *= QuadMinHalfWidth(halfLength) * QuadMinHalfWidth(halfWidth);
+        t1 = along * halfLength;
+        t2 = float2(-along.y, along.x) * halfWidth;
+        centerNdc = headNdc + t1 * 2.0 / _VecScreenParams.xy;
+    }
+
+    // The base's axes have arbitrary signs and order; match them to the
+    // target's so the morph does not twist
+    if (abs(dot(g1, t2)) + abs(dot(g2, t1)) > abs(dot(g1, t1)) + abs(dot(g2, t2)))
+    {
+        float2 tmp = g1; g1 = g2; g2 = tmp;
+    }
+    if (dot(g1, t1) < 0) g1 = -g1;
+    if (dot(g2, t2) < 0) g2 = -g2;
+
+    view.axis1 = lerp(g1, t1, styleWeight);
+    view.axis2 = lerp(g2, t2, styleWeight);
+    view.pos.xy = lerp(view.pos.xy, centerNdc * view.pos.w, styleWeight);
+    SetViewAlpha(view.color, ViewAlpha(view.color) * (half)lerp(baseFade, shapeFade, styleWeight));
+}
+
 // Per-eye view data calculation helper (original single-eye path).
 // Computes clip-space position, covariance, SH shading, and packs into SplatViewData.
 // Shared data (world pos, splat loading, animation) is computed once in the kernel;
 // this function handles the VP-dependent steps for each eye.
 SplatViewData CalculateEyeViewData(
+    uint idx,
     SplatData splat,
     float3 centerWorldPos,
     float4x4 viewProjMatrix,
@@ -511,7 +935,8 @@ SplatViewData CalculateEyeViewData(
     float animOpacityMul,
     float animScaleMul,
     float animColorBlend,
-    float3 animColorTint)
+    float3 animColorTint,
+    float styleWeight)
 {
     SplatViewData view = (SplatViewData)0;
 
@@ -531,7 +956,7 @@ SplatViewData CalculateEyeViewData(
     {
         float maxScale = max(max(abs(splat.scale.x), abs(splat.scale.y)), abs(splat.scale.z))
                        * splatScale * animScaleMul;
-        float clipMargin = maxScale * abs(_MatrixP._m00);
+        float clipMargin = (maxScale + _StyleReach) * abs(_MatrixP._m00);
         float w = centerClipPos.w;
         bool outsideFrustum = (centerClipPos.x < -(w + clipMargin)) ||
                               (centerClipPos.x >  (w + clipMargin)) ||
@@ -546,7 +971,7 @@ SplatViewData CalculateEyeViewData(
     // Early opacity culling: skip splats with negligible opacity
     float finalOpacity = splat.opacity * opacityScale * animOpacityMul
                        * BackfaceVisibility(splat.rot, centerWorldPos);
-    if (finalOpacity < 5.0 / 255.0)
+    if (finalOpacity * StyleBrightnessBound(styleWeight) < SPLAT_CULL_ALPHA)
         return view;
 
     bool behindCam = centerClipPos.w <= 0;
@@ -571,7 +996,7 @@ SplatViewData CalculateEyeViewData(
         // gets culled once it has faded to invisible, so nothing pops at the
         // cull boundary. Axes stay zero -> degenerate quad, no fragments.
         float finalAlpha = min(finalOpacity, 65000) * alphaScale;
-        if (finalAlpha < 5.0 / 255.0)
+        if (finalAlpha * StyleBrightnessBound(styleWeight) < SPLAT_CULL_ALPHA)
             return view;
 
         if (_OdsEnabled != 0)
@@ -606,11 +1031,20 @@ SplatViewData CalculateEyeViewData(
         // Apply animation color tint
         if (animColorBlend > 0)
             col.rgb = lerp(col.rgb, (half3)animColorTint, (half)animColorBlend);
+        col.rgb = ApplyStyle(col.rgb, styleWeight, splat, centerWorldPos, idx);
 
-        col.a = (half)finalAlpha;
-
-        view.color.x = (f32tof16(col.r) << 16) | f32tof16(col.g);
-        view.color.y = (f32tof16(col.b) << 16) | f32tof16(col.a);
+        // Baked quads take their blur in BakeQuad, with the shape they morph into
+        if (_BakeQuads != 0)
+        {
+            view.color = PackBakedViewColor(col.rgb, (half)finalAlpha, styleWeight);
+        }
+        else
+        {
+            float dist = _OdsEnabled != 0 ? odsDist : centerClipPos.w;
+            finalAlpha *= DofBlurAxes(view.axis1, view.axis2, DofBlurRadius(dist, DofFocalPx(_MatrixP)));
+            col.a = (half)finalAlpha;
+            view.color = PackViewColor(col);
+        }
     }
 
     return view;
@@ -687,6 +1121,8 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
             {
                 float3 bmin, bmax;
                 ChunkBounds(globalChunkIdx, bmin, bmax);
+                bmin -= _StyleChunkExpand;
+                bmax += _StyleChunkExpand;
                 if (ChunkOutsideFrustum(mul(_MatrixVP, _MatrixObjectToWorld), bmin, bmax))
                     _chunkVisible[chunkSlot] = 0;
             }
@@ -801,6 +1237,8 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
 
     // Cutout check (uses object-space position)
     bool isCut = IsSplatCut(splat.pos);
+    float styleWeight = StyleWeightAt(centerWorldPos);
+    ApplyStyleQuantize(idx, styleWeight, splat, centerWorldPos);
 
     // Selection highlight: apply to the final view data after helper returns
     // (only relevant for non-stereo / editor usage, but keep consistent)
@@ -816,24 +1254,17 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
     // Use explicit _MatrixVP (not UNITY_MATRIX_VP) for clip position.
     // SetViewProjectionMatrices does NOT update UNITY_MATRIX_VP for
     // compute dispatches on Metal/visionOS — confirmed via diagnostics.
-    SplatViewData view = CalculateEyeViewData(splat, centerWorldPos,
+    SplatViewData view = CalculateEyeViewData(idx, splat, centerWorldPos,
         _MatrixVP, isDeleted, isCut, splatScale, opacityScale,
-        animOpacityMul, animScaleMul, animColorBlend, animColorTint);
+        animOpacityMul, animScaleMul, animColorBlend, animColorTint, styleWeight);
+    BakeQuad(view, centerWorldPos, _MatrixVP, DofFocalPx(_MatrixP));
 
     // Apply selection highlight (negate alpha to signal selected state)
     if (isSelected)
     {
-        half4 col;
-        col.r = f16tof32(view.color.x >> 16);
-        col.g = f16tof32(view.color.x);
-        col.b = f16tof32(view.color.y >> 16);
-        col.a = f16tof32(view.color.y);
-        if (col.a > 0)
-        {
-            col.a = -max(col.a, 1.0 / 255.0);
-            view.color.x = (f32tof16(col.r) << 16) | f32tof16(col.g);
-            view.color.y = (f32tof16(col.b) << 16) | f32tof16(col.a);
-        }
+        half alpha = ViewAlpha(view.color);
+        if (alpha > 0)
+            SetViewAlpha(view.color, -max(alpha, 1.0 / 255.0));
     }
 
     if (_IsStereo)
@@ -868,6 +1299,8 @@ void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_Group
             {
                 float3 bmin, bmax;
                 ChunkBounds(globalChunkIdx, bmin, bmax);
+                bmin -= _StyleChunkExpand;
+                bmax += _StyleChunkExpand;
                 if (ChunkOutsideFrustum(mul(_MatrixVP_Eye[0], _MatrixObjectToWorld), bmin, bmax) &&
                     ChunkOutsideFrustum(mul(_MatrixVP_Eye[1], _MatrixObjectToWorld), bmin, bmax))
                     _chunkVisible[chunkSlot] = 0;
@@ -969,6 +1402,8 @@ void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_Group
         isDeleted = (wordVal & (1 << (idx & 31))) != 0;
     }
     bool isCut = IsSplatCut(splat.pos);
+    float styleWeight = StyleWeightAt(centerWorldPos);
+    ApplyStyleQuantize(idx, styleWeight, splat, centerWorldPos);
     bool isSelected = false;
     if (_SplatBitsValid)
     {
@@ -978,9 +1413,9 @@ void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_Group
 
     // Compute view-independent data ONCE
     SplatSharedData ssd = CalcSharedSplatData(
-        splat, centerWorldPos, isDeleted, isCut,
+        idx, splat, centerWorldPos, isDeleted, isCut,
         _SplatScale, _SplatOpacityScale,
-        animOpacityMul, animScaleMul, animColorBlend, animColorTint);
+        animOpacityMul, animScaleMul, animColorBlend, animColorTint, styleWeight);
 
     // Compute per-eye data (lightweight)
     [unroll]
@@ -990,20 +1425,13 @@ void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_Group
             splat, ssd,
             _MatrixVP_Eye[eye], _MatrixP_Eye[eye], _MatrixMV_Eye[eye],
             _SplatScale);
+        BakeQuad(view, ssd.worldPos, _MatrixVP_Eye[eye], DofFocalPx(_MatrixP_Eye[eye]));
 
         if (isSelected && view.pos.w > 0)
         {
-            half4 col;
-            col.r = f16tof32(view.color.x >> 16);
-            col.g = f16tof32(view.color.x);
-            col.b = f16tof32(view.color.y >> 16);
-            col.a = f16tof32(view.color.y);
-            if (col.a > 0)
-            {
-                col.a = -max(col.a, 1.0 / 255.0);
-                view.color.x = (f32tof16(col.r) << 16) | f32tof16(col.g);
-                view.color.y = (f32tof16(col.b) << 16) | f32tof16(col.a);
-            }
+            half alpha = ViewAlpha(view.color);
+            if (alpha > 0)
+                SetViewAlpha(view.color, -max(alpha, 1.0 / 255.0));
         }
 
         _SplatViewData[idx * 2 + eye] = view;

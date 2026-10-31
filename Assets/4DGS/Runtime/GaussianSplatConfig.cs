@@ -13,7 +13,8 @@ namespace GaussianSplatting.Runtime
         // PointCloud mode, applied to the footprint before the clamp below.
         [Range(0.1f, 4.0f)] public float pointCloudSizeScale = 1.0f;
         // Lower bound for footprint-following point size in PointCloud mode:
-        // directly controls how big the smallest points render.
+        // directly controls how big the smallest points render. Points under
+        // 2 pixels are drawn 2 pixels wide and dimmer, so they do not alias.
         [Range(0.1f, 15.0f)] public float pointCloudMinDisplaySize = 3.0f;
         // World-space size floor (point diameter in meters) for PointCloud
         // mode. Suppresses points shrinking as the camera moves close
@@ -92,14 +93,14 @@ namespace GaussianSplatting.Runtime
         [SerializeField] private Shader _shaderCompositeRef;
         [SerializeField] private Shader _shaderDebugPointsRef;
         [SerializeField] private Shader _shaderDebugBoxesRef;
-        [SerializeField] private Shader _shaderPointCloudRef;
+        [SerializeField] private Shader _shaderStylizedRef;
 
         // Resolved at runtime (from serialized ref or Shader.Find fallback)
         private Shader _shaderSplats;
         private Shader _shaderComposite;
         private Shader _shaderDebugPoints;
         private Shader _shaderDebugBoxes;
-        private Shader _shaderPointCloud;
+        private Shader _shaderStylized;
         private ComputeShader _csSplatUtilities;
         private ComputeShader _csSplatSort;
         private ComputeShader _csPortableSort;
@@ -109,7 +110,7 @@ namespace GaussianSplatting.Runtime
         public Shader ShaderComposite => _shaderComposite;
         public Shader ShaderDebugPoints => _shaderDebugPoints;
         public Shader ShaderDebugBoxes => _shaderDebugBoxes;
-        public Shader ShaderPointCloud => _shaderPointCloud;
+        public Shader ShaderStylized => _shaderStylized;
         public ComputeShader CsSplatUtilities => _csSplatUtilities;
         public ComputeShader CsSplatSort => _csSplatSort;
         public ComputeShader CsPortableSort => _csPortableSort;
@@ -118,7 +119,7 @@ namespace GaussianSplatting.Runtime
         public bool ResourcesValid =>
             _shaderSplats != null && _shaderComposite != null &&
             _shaderDebugPoints != null && _shaderDebugBoxes != null &&
-            _shaderPointCloud != null &&
+            _shaderStylized != null &&
             _csSplatUtilities != null && SystemInfo.supportsComputeShaders;
 
         private void OnEnable()
@@ -142,9 +143,9 @@ namespace GaussianSplatting.Runtime
             _shaderDebugBoxes = _shaderDebugBoxesRef != null
                 ? _shaderDebugBoxesRef
                 : Shader.Find("Gaussian Splatting/Debug/Render Boxes");
-            _shaderPointCloud = _shaderPointCloudRef != null
-                ? _shaderPointCloudRef
-                : Shader.Find("Gaussian Splatting/Render Point Cloud");
+            _shaderStylized = _shaderStylizedRef != null
+                ? _shaderStylizedRef
+                : Shader.Find("Gaussian Splatting/Render Stylized");
             _csSplatUtilities = Resources.Load<ComputeShader>("SplatUtilities");
             _csSplatSort = Resources.Load<ComputeShader>("SplatSort");
             _csPortableSort = Resources.Load<ComputeShader>("SplatPortableSort");
@@ -156,7 +157,7 @@ namespace GaussianSplatting.Runtime
                       $"composite={(_shaderComposite != null ? "OK" : "MISSING")}, " +
                       $"debugPts={(_shaderDebugPoints != null ? "OK" : "MISSING")}, " +
                       $"debugBox={(_shaderDebugBoxes != null ? "OK" : "MISSING")}, " +
-                      $"pointCloud={(_shaderPointCloud != null ? "OK" : "MISSING")}, " +
+                      $"stylized={(_shaderStylized != null ? "OK" : "MISSING")}, " +
                       $"compute={(_csSplatUtilities != null ? "OK" : "MISSING")}, " +
                       $"sort={(_csSplatSort != null ? "OK" : "MISSING")}, " +
                       $"tileRender={(_csTileRender != null ? "OK" : "MISSING")}, " +
@@ -173,7 +174,7 @@ namespace GaussianSplatting.Runtime
 
         private void OnValidate()
         {
-            if (_shaderSplatsRef == null || _shaderPointCloudRef == null)
+            if (_shaderSplatsRef == null || _shaderStylizedRef == null)
                 AutoAssignShaders();
         }
 
@@ -183,7 +184,7 @@ namespace GaussianSplatting.Runtime
             _shaderCompositeRef = Shader.Find("Hidden/Gaussian Splatting/Composite");
             _shaderDebugPointsRef = Shader.Find("Gaussian Splatting/Debug/Render Points");
             _shaderDebugBoxesRef = Shader.Find("Gaussian Splatting/Debug/Render Boxes");
-            _shaderPointCloudRef = Shader.Find("Gaussian Splatting/Render Point Cloud");
+            _shaderStylizedRef = Shader.Find("Gaussian Splatting/Render Stylized");
             if (_shaderSplatsRef != null)
                 UnityEditor.EditorUtility.SetDirty(this);
         }

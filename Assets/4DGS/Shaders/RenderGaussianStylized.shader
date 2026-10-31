@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
-// Lightweight point cloud render mode. Reads the same sorted view data as the
-// splat shader (_OrderBuffer -> _SplatViewData), so all animation, morph,
-// modifier and cutout effects baked by CSCalcViewData are preserved. Draws
-// round points sized by each splat's projected footprint (clamped + scaled).
-Shader "Gaussian Splatting/Render Point Cloud"
+// Quad shader: draws the quads CSCalcViewData baked into the view data. Every
+// splat in PointCloud mode goes through it, styled or not, and so do styled
+// splats in Splats mode; plain splats sharing a global draw with them fall
+// back to the splat pass.
+Shader "Gaussian Splatting/Render Stylized"
 {
     // Blend state is material-driven so the AOV variant can switch to BlendOp Max
     // without a second pass — which would mean threading a pass index through
@@ -19,7 +19,8 @@ Shader "Gaussian Splatting/Render Point Cloud"
     {
         Tags { "RenderType"="Transparent" "Queue"="Transparent" }
 
-        // Pass 0: offscreen under-blend into the splat RT (and the AOV variants).
+        // Pass 0: offscreen. Front-to-back linear under-blend into the splat
+        // RT, as in RenderGaussianSplats.shader, or the AOV resolve.
         Pass
         {
             ZWrite Off
@@ -43,17 +44,22 @@ CGPROGRAM
 // Enable foveated rendering (VRR) support on visionOS Metal.
 #include_with_pragmas "Packages/com.unity.render-pipelines.core/ShaderLibrary/FoveatedRenderingKeywords.hlsl"
 
-#include "RenderGaussianPointCloudPass.hlsl"
+#include "RenderGaussianStylizedPass.hlsl"
 
-half4 frag (v2f i) : SV_Target
+v2fStylized vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
 {
-	return PointColor(i);
+	return StylizedVert(vtxID, instID);
+}
+
+half4 frag (v2fStylized i) : SV_Target
+{
+	return StylizedColor(i);
 }
 ENDCG
         }
 
         // Pass 1: direct. Back-to-front premultiplied over-blend straight into
-        // the camera target, depth-tested against the scene. Never used for
+        // the camera target, as in RenderGaussianSplats.shader. Never used for
         // AOVs, which need the offscreen max-blend resolve.
         Pass
         {
@@ -75,11 +81,16 @@ CGPROGRAM
 // Enable foveated rendering (VRR) support on visionOS Metal.
 #include_with_pragmas "Packages/com.unity.render-pipelines.core/ShaderLibrary/FoveatedRenderingKeywords.hlsl"
 
-#include "RenderGaussianPointCloudPass.hlsl"
+#include "RenderGaussianStylizedPass.hlsl"
 
-half4 frag (v2f i) : SV_Target
+v2fStylized vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
 {
-	return PointColor(i);
+	return StylizedVert(vtxID, instID);
+}
+
+half4 frag (v2fStylized i) : SV_Target
+{
+	return StylizedColor(i);
 }
 ENDCG
         }

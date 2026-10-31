@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
-// Shared vertex/fragment code for the passes of RenderGaussianSplats.shader.
-// Each pass declares its own pragmas and includes the foveated-rendering
-// keywords before this file, which GaussianSplatting.hlsl depends on.
+// Shared vertex/fragment code for the passes of RenderGaussianSplats.shader
+// and RenderGaussianStylized.shader. Each pass declares its own pragmas and
+// entry points, and includes the foveated-rendering keywords before this
+// file, which GaussianSplatting.hlsl depends on.
 #ifndef RENDER_GAUSSIAN_SPLATS_PASS_HLSL
 #define RENDER_GAUSSIAN_SPLATS_PASS_HLSL
 
@@ -32,6 +33,10 @@ uint _SplatAdaptiveExtent;
 // Largest on-screen radius, in pixels, a splat may grow to. Larger ones
 // are scaled down rather than cut, so they keep their soft edge.
 float _SplatMaxPixelRadius;
+// Fragments contributing less than this are discarded (SplatContribution).
+// Set per camera, lower under depth of field (GaussianDepthOfField), where
+// faint blurred splats add up.
+float _SplatAlphaCutoff;
 
 // Depth texture for manual mesh occlusion when VRR is active.
 // Hardware depth test fails under VRR because the depth buffer uses a
@@ -40,9 +45,41 @@ float _SplatMaxPixelRadius;
 Texture2DArray _GaussianDepthTex;
 #endif
 
-#define ALPHA_DISCARD (5.0 / 255.0)
+// The splat's color as the fragment stage wants it: linear, since every pass
+// blends in linear space. Alpha stays as stored.
+half4 SplatViewColor (SplatViewData view)
+{
+	half4 col;
+	col.r = f16tof32(view.color.x >> 16);
+	col.g = f16tof32(view.color.x);
+	col.b = f16tof32(view.color.y >> 16);
+	col.a = f16tof32(view.color.y);
+	#if !defined(UNITY_COLORSPACE_GAMMA)
+	// The color is constant across the quad, so converting it once per
+	// vertex matches converting the un-premultiplied color per fragment.
+	col.rgb = GammaToLinearSpace(col.rgb);
+	#endif
+	return col;
+}
 
-v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
+// Manual depth test for mesh occlusion under VRR.
+// The depth buffer uses the camera's VRR rate map, but our splat RT may
+// not. Remap our linear fragment coords to non-uniform to sample depth.
+void SplatManualDepthTest (float4 vertex)
+{
+	#if defined(GAUSSIAN_STEREO_DEPTH)
+	float2 uv = vertex.xy / _VecScreenParams.xy;
+	float2 depthUV = GaussianRemapLinearToNonUniform(uv, _EyeIndex);
+	int2 depthCoord = int2(depthUV * _VecScreenParams.xy);
+	float meshDepth = _GaussianDepthTex.Load(int4(depthCoord, _EyeIndex, 0)).r;
+	// Reversed-Z on Metal: near=1, far=0. Fragment behind mesh → discard.
+	float splatDepth = vertex.z;
+	if (splatDepth < meshDepth)
+		discard;
+	#endif
+}
+
+v2f SplatVert (uint vtxID, uint instID)
 {
     v2f o = (v2f)0;
     instID = _OrderBuffer[instID];
@@ -56,24 +93,15 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
 	}
 	else
 	{
-		o.col.r = f16tof32(view.color.x >> 16);
-		o.col.g = f16tof32(view.color.x);
-		o.col.b = f16tof32(view.color.y >> 16);
-		o.col.a = f16tof32(view.color.y);
-		// Every pass blends in linear space
-		#if !defined(UNITY_COLORSPACE_GAMMA)
-		// The color is constant across the quad, so converting it once per
-		// vertex matches converting the un-premultiplied color per fragment.
-		o.col.rgb = GammaToLinearSpace(o.col.rgb);
-		#endif
+		o.col = SplatViewColor(view);
 
 		float extent = _SplatQuadExtent;
-		// alpha * exp(-r^2) drops below the discard threshold at
-		// r^2 = ln(alpha / threshold); nothing beyond that is ever drawn.
+		// The contribution c * exp(-r^2) drops below the discard threshold
+		// at r^2 = ln(c / threshold); nothing beyond that is ever drawn.
 		// Selected splats (negative alpha) draw an outline past it, so they
 		// keep the full quad.
 		if (_SplatAdaptiveExtent != 0 && o.col.a >= 0)
-			extent = min(extent, sqrt(max(log(o.col.a / ALPHA_DISCARD), 0)));
+			extent = min(extent, sqrt(max(log(SplatContribution(o.col.a, o.col.rgb) / _SplatAlphaCutoff), 0)));
 
 		float2 axis1 = view.axis1;
 		float2 axis2 = view.axis2;
@@ -104,21 +132,7 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
 // Premultiplied linear splat color.
 half4 SplatColor (v2f i)
 {
-	// Manual depth test for mesh occlusion under VRR.
-	// The depth buffer uses the camera's VRR rate map, but our splat RT may
-	// not. Remap our linear fragment coords to non-uniform to sample depth.
-	#if defined(GAUSSIAN_STEREO_DEPTH)
-	{
-		float2 uv = i.vertex.xy / _VecScreenParams.xy;
-		float2 depthUV = GaussianRemapLinearToNonUniform(uv, _EyeIndex);
-		int2 depthCoord = int2(depthUV * _VecScreenParams.xy);
-		float meshDepth = _GaussianDepthTex.Load(int4(depthCoord, _EyeIndex, 0)).r;
-		// Reversed-Z on Metal: near=1, far=0. Fragment behind mesh → discard.
-		float splatDepth = i.vertex.z;
-		if (splatDepth < meshDepth)
-			discard;
-	}
-	#endif
+	SplatManualDepthTest(i.vertex);
 
 	half power = -dot(i.pos, i.pos);
 	half alpha = exp(power);
@@ -142,7 +156,7 @@ half4 SplatColor (v2f i)
 		i.col.rgb = lerp(i.col.rgb, selectedColor, 0.5);
 	}
 
-    if (alpha < ALPHA_DISCARD)
+    if (SplatContribution(alpha, i.col.rgb) < _SplatAlphaCutoff)
         discard;
 
     return half4(i.col.rgb * alpha, alpha);

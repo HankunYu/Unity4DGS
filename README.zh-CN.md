@@ -27,6 +27,8 @@
 - **GaussianMorph** — 两个泼溅资产之间的 GPU 变形过渡
 - **GaussianCutout** — box / 椭球裁剪区域
 - **GaussianStylizeVolume** — 风格化后处理(立体感知)
+- **GaussianSplatStyle + GaussianStyleVolume** — 逐 splat 风格化(颜色渐变、轮廓光、圆点、拉线、切片与网格、闪烁),按权重混入;风格体积把风格限制在某个区域内,比如相机周围
+- **GaussianDepthOfField** — 挂在相机上的薄透镜景深,逐 splat 计算:不需要深度缓冲,Direct 模式和 360(ODS)录制都能用
 
 ![Unity4DGS 演示](Docs/media/demo.gif)
 

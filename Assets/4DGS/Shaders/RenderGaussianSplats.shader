@@ -29,6 +29,11 @@ CGPROGRAM
 
 #include "RenderGaussianSplatsPass.hlsl"
 
+v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
+{
+	return SplatVert(vtxID, instID);
+}
+
 half4 frag (v2f i) : SV_Target
 {
 	return SplatColor(i);
@@ -60,6 +65,11 @@ CGPROGRAM
 #include_with_pragmas "Packages/com.unity.render-pipelines.core/ShaderLibrary/FoveatedRenderingKeywords.hlsl"
 
 #include "RenderGaussianSplatsPass.hlsl"
+
+v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
+{
+	return SplatVert(vtxID, instID);
+}
 
 half4 frag (v2f i) : SV_Target
 {
