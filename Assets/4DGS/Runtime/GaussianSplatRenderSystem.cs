@@ -609,7 +609,7 @@ namespace GaussianSplatting.Runtime
             foreach (var kvp in _splats)
             {
                 var gs = kvp.Key;
-                if (gs == null || !gs.isActiveAndEnabled || !gs.HasValidAsset || !gs.HasValidRenderSetup)
+                if (gs == null || !gs.isActiveAndEnabled || !gs.visible || !gs.HasValidAsset || !gs.HasValidRenderSetup)
                     continue;
                 _activeSplats.Add((kvp.Key, kvp.Value));
             }

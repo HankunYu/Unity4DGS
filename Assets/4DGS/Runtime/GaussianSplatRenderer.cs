@@ -21,6 +21,8 @@ namespace GaussianSplatting.Runtime
         [FormerlySerializedAs("m_NextAsset")]
         public GaussianSplatAsset nextAsset;
 
+        [Tooltip("Draw the splats. Off, everything else keeps running (mesh driver, animation), so the renderer can still feed a particle emitter that shows it only through its particles")]
+        public bool visible = true;
         [Tooltip("Rendering order compared to other splats. Within same order splats are sorted by distance. Higher order splats render 'on top of' lower order splats.")]
         [FormerlySerializedAs("m_RenderOrder")]
         public int renderOrder;

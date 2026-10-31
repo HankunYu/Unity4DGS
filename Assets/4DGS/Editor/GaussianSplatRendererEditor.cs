@@ -11,6 +11,7 @@ namespace GaussianSplatting.Editor
     public class GaussianSplatRendererEditor : UnityEditor.Editor
     {
         SerializedProperty m_PropAsset;
+        SerializedProperty m_PropVisible;
         SerializedProperty m_PropRenderOrder;
         SerializedProperty m_PropSplatScale;
         SerializedProperty m_PropOpacityScale;
@@ -44,6 +45,7 @@ namespace GaussianSplatting.Editor
         {
             if (target == null) return;
             m_PropAsset = serializedObject.FindProperty("splatAsset");
+            m_PropVisible = serializedObject.FindProperty("visible");
             m_PropRenderOrder = serializedObject.FindProperty("renderOrder");
             m_PropSplatScale = serializedObject.FindProperty("splatScale");
             m_PropOpacityScale = serializedObject.FindProperty("opacityScale");
@@ -89,6 +91,7 @@ namespace GaussianSplatting.Editor
             // Render Options
             EditorGUILayout.Space();
             GUILayout.Label("Render Options", EditorStyles.boldLabel);
+            EditorGUILayout.PropertyField(m_PropVisible);
             EditorGUILayout.PropertyField(m_PropRenderOrder);
             EditorGUILayout.PropertyField(m_PropSplatScale);
             EditorGUILayout.PropertyField(m_PropOpacityScale);
