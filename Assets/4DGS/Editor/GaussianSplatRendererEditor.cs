@@ -19,6 +19,9 @@ namespace GaussianSplatting.Editor
         SerializedProperty m_PropSortNthFrame;
         SerializedProperty m_PropBackfaceCulling;
         SerializedProperty m_PropBackfaceFadeAngle;
+        SerializedProperty m_PropOcclusionCulling;
+        SerializedProperty m_PropOcclusionTolerance;
+        SerializedProperty m_PropOcclusionFootprintScale;
         SerializedProperty m_PropStyle;
         SerializedProperty m_PropStyleWeight;
 
@@ -49,6 +52,9 @@ namespace GaussianSplatting.Editor
             m_PropSortNthFrame = serializedObject.FindProperty("sortNthFrame");
             m_PropBackfaceCulling = serializedObject.FindProperty("backfaceCulling");
             m_PropBackfaceFadeAngle = serializedObject.FindProperty("backfaceFadeAngle");
+            m_PropOcclusionCulling = serializedObject.FindProperty("occlusionCulling");
+            m_PropOcclusionTolerance = serializedObject.FindProperty("occlusionTolerance");
+            m_PropOcclusionFootprintScale = serializedObject.FindProperty("occlusionFootprintScale");
             m_PropStyle = serializedObject.FindProperty("style");
             m_PropStyleWeight = serializedObject.FindProperty("styleWeight");
 
@@ -92,6 +98,12 @@ namespace GaussianSplatting.Editor
             EditorGUILayout.PropertyField(m_PropBackfaceCulling);
             using (new EditorGUI.DisabledScope(!m_PropBackfaceCulling.boolValue && !m_PropBackfaceCulling.hasMultipleDifferentValues))
                 EditorGUILayout.PropertyField(m_PropBackfaceFadeAngle);
+            EditorGUILayout.PropertyField(m_PropOcclusionCulling);
+            using (new EditorGUI.DisabledScope(!m_PropOcclusionCulling.boolValue && !m_PropOcclusionCulling.hasMultipleDifferentValues))
+            {
+                EditorGUILayout.PropertyField(m_PropOcclusionTolerance);
+                EditorGUILayout.PropertyField(m_PropOcclusionFootprintScale);
+            }
 
             // Style
             EditorGUILayout.Space();

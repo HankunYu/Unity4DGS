@@ -48,6 +48,15 @@ namespace GaussianSplatting.Runtime
         public bool backfaceCulling;
         [Range(0.0f, 45.0f)] [Tooltip("Degrees before edge-on over which back-facing splats fade out instead of popping; 0 cuts them off hard")]
         public float backfaceFadeAngle = 10.0f;
+        [Tooltip("Hide splats lying behind a nearer surface of this model, such as a far leg showing through a near one between sparse points. Splats a style makes additive do not count as a surface. Off under depth of field, whose blurred splats do not hide what is behind them")]
+        public bool occlusionCulling;
+        [Range(0.005f, 0.5f)] [Tooltip("Depth behind the nearest surface that a splat may sit and still be kept (scene units). Larger than the surface's own depth jitter, smaller than the gap to the surface it should hide")]
+        public float occlusionTolerance = 0.03f;
+        [Range(0.5f, 8.0f)] [Tooltip("Widens each splat's footprint when building the nearest-surface depth, so sparse samples still form a closed surface")]
+        public float occlusionFootprintScale = 2.0f;
+
+        // Screen pixels per occlusion grid cell
+        const int OcclusionCellSize = 4;
 
         [Tooltip("Stylized look blended over the splats by Style Weight. Child GaussianStyleVolumes limit it to their regions")]
         public GaussianSplatStyle style;
@@ -129,6 +138,9 @@ namespace GaussianSplatting.Runtime
         private GraphicsBuffer _gpuSortKeys;
         private GraphicsBuffer _gpuVisibleCounter;
         private GraphicsBuffer _gpuIndirectArgs;
+        // Nearest depth per screen cell for occlusion culling; grows to the
+        // largest camera that has rendered this splat
+        private GraphicsBuffer _gpuOcclusionGrid;
         private GraphicsBuffer _gpuStyleRange;
         internal GraphicsBuffer _gpuPosData;
         internal GraphicsBuffer _gpuOtherData;
@@ -212,6 +224,11 @@ namespace GaussianSplatting.Runtime
             public static readonly int SHOnly = Shader.PropertyToID("_SHOnly");
             public static readonly int BackfaceCull = Shader.PropertyToID("_BackfaceCull");
             public static readonly int BackfaceFadeWidth = Shader.PropertyToID("_BackfaceFadeWidth");
+            public static readonly int OcclusionGrid = Shader.PropertyToID("_OcclusionGrid");
+            public static readonly int OcclusionGridSize = Shader.PropertyToID("_OcclusionGridSize");
+            public static readonly int OcclusionCellSize = Shader.PropertyToID("_OcclusionCellSize");
+            public static readonly int OcclusionFootprintScale = Shader.PropertyToID("_OcclusionFootprintScale");
+            public static readonly int OcclusionTolerance = Shader.PropertyToID("_OcclusionTolerance");
             public static readonly int StyleWeight = Shader.PropertyToID("_StyleWeight");
             public static readonly int StyleColorSource = Shader.PropertyToID("_StyleColorSource");
             public static readonly int StyleRampInput = Shader.PropertyToID("_StyleRampInput");
@@ -219,6 +236,7 @@ namespace GaussianSplatting.Runtime
             public static readonly int StyleDepthNear = Shader.PropertyToID("_StyleDepthNear");
             public static readonly int StyleDepthInvRange = Shader.PropertyToID("_StyleDepthInvRange");
             public static readonly int StyleIntensity = Shader.PropertyToID("_StyleIntensity");
+            public static readonly int StyleAdditivity = Shader.PropertyToID("_StyleAdditivity");
             public static readonly int StyleRimAmount = Shader.PropertyToID("_StyleRimAmount");
             public static readonly int StyleRimPower = Shader.PropertyToID("_StyleRimPower");
             public static readonly int StyleShape = Shader.PropertyToID("_StyleShape");
@@ -238,6 +256,8 @@ namespace GaussianSplatting.Runtime
             public static readonly int SplatMaxPixelRadius = Shader.PropertyToID("_SplatMaxPixelRadius");
             public static readonly int BakeQuads = Shader.PropertyToID("_BakeQuads");
             public static readonly int QuadBaseShape = Shader.PropertyToID("_QuadBaseShape");
+            public static readonly int QuadBakeDeferred = Shader.PropertyToID("_QuadBakeDeferred");
+            public static readonly int MatrixRigToWorld = Shader.PropertyToID("_MatrixRigToWorld");
             public static readonly int StyleQuantize = Shader.PropertyToID("_StyleQuantize");
             public static readonly int StyleQuantizeSpacing = Shader.PropertyToID("_StyleQuantizeSpacing");
             public static readonly int StyleQuantizeHalfBand = Shader.PropertyToID("_StyleQuantizeHalfBand");
@@ -248,6 +268,8 @@ namespace GaussianSplatting.Runtime
             public static readonly int StyleVolumeWorldToLocal = Shader.PropertyToID("_StyleVolumeWorldToLocal");
             public static readonly int StyleVolumeParams = Shader.PropertyToID("_StyleVolumeParams");
             public static readonly int DofParams = Shader.PropertyToID("_DofParams");
+            public static readonly int MatrixInvVP = Shader.PropertyToID("_MatrixInvVP");
+            public static readonly int MatrixInvVPEye = Shader.PropertyToID("_MatrixInvVP_Eye");
             public static readonly int StyleRanges = Shader.PropertyToID("_StyleRanges");
             public static readonly int StyleRangeCount = Shader.PropertyToID("_StyleRangeCount");
             public static readonly int DisplayIndex = Shader.PropertyToID("_DisplayIndex");
@@ -446,6 +468,10 @@ namespace GaussianSplatting.Runtime
             ExportData,
             CopySplats,
             WriteIndirectArgs,
+            OcclusionClear,
+            OcclusionSplat,
+            OcclusionCull,
+            BakeQuads,
         }
 
         internal static readonly string[] KernelNames =
@@ -466,6 +492,10 @@ namespace GaussianSplatting.Runtime
             "CSExportData",
             "CSCopySplats",
             "CSWriteIndirectArgs",
+            "CSOcclusionClear",
+            "CSOcclusionSplat",
+            "CSOcclusionCull",
+            "CSBakeQuads",
         };
 
         const string CopyViewDataAndDistancesKernelName = "CSCopyViewDataAndDistances";
@@ -859,6 +889,7 @@ namespace GaussianSplatting.Runtime
             DisposeBuffer(ref _gpuSortKeys);
             DisposeBuffer(ref _gpuVisibleCounter);
             DisposeBuffer(ref _gpuIndirectArgs);
+            DisposeBuffer(ref _gpuOcclusionGrid);
             DisposeBuffer(ref _gpuStyleRange);
 
             _sorterArgs.resources.Dispose();
@@ -921,7 +952,8 @@ namespace GaussianSplatting.Runtime
             // stereo rendering state (which caused mesh left/right eye swap).
             Matrix4x4 gpuProj = GL.GetGPUProjectionMatrix(matrixOverride?.Proj ?? cam.projectionMatrix, true);
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixMV, matView * matO2W);
-            cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixVP, gpuProj * matView);
+            Matrix4x4 matVP = gpuProj * matView;
+            cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixVP, matVP);
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixP, gpuProj);
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixObjectToWorld, matO2W);
             cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixWorldToObject, matW2O);
@@ -941,6 +973,7 @@ namespace GaussianSplatting.Runtime
                 Transform camTr = cam.transform;
                 Matrix4x4 rigToWorld = Matrix4x4.TRS(camTr.position, camTr.rotation, Vector3.one);
                 cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixWorldToRig, rigToWorld.inverse);
+                cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixRigToWorld, rigToWorld);
 
                 // smoothstep needs edge0 < edge1, and gpuProj.m11's sign is the
                 // render-target Y flip that a projection matrix would normally
@@ -976,12 +1009,16 @@ namespace GaussianSplatting.Runtime
             float projectionScale = useOds ? 2f / Mathf.PI : (matrixOverride?.Proj ?? cam.projectionMatrix).m11;
             GaussianDepthOfField dof = GaussianDepthOfField.ActiveOn(cam);
             cmb.SetComputeVectorParam(csSplatUtilities, Props.DofParams, dof != null ? dof.ShaderParams : Vector4.zero);
-            SetStyleOnCS(cmb, kernelIndex, projectionScale);
+            // The occlusion grid takes blurred splats for solid surfaces
+            bool occlusion = occlusionCulling && dof == null;
+            SetStyleOnCS(cmb, kernelIndex, projectionScale, occlusion);
 
             csSplatUtilities.GetKernelThreadGroupSizes(kernelIndex, out uint gsX, out _, out _);
             int dispatchCount = EffectiveSplatCount;
             int groupCount = (dispatchCount + (int)gsX - 1) / (int)gsX;
 
+            // Per-eye view-projections, for a deferred style shape pass
+            Matrix4x4[] eyeVP = null;
             if (isStereo)
             {
                 // Single-dispatch stereo: pass both eyes' matrices and dispatch once.
@@ -998,15 +1035,15 @@ namespace GaussianSplatting.Runtime
                     Matrix4x4 rightGpu = GL.GetGPUProjectionMatrix(
                         cam.GetStereoProjectionMatrix(Camera.StereoscopicEye.Right), true);
 
-                    cmb.SetComputeMatrixArrayParam(csSplatUtilities, Props.MatrixVPEye,
-                        new[] { leftGpu * leftView, rightGpu * rightView });
+                    eyeVP = new[] { leftGpu * leftView, rightGpu * rightView };
+                    cmb.SetComputeMatrixArrayParam(csSplatUtilities, Props.MatrixVPEye, eyeVP);
                     cmb.SetComputeMatrixArrayParam(csSplatUtilities, Props.MatrixPEye,
                         new[] { leftGpu, rightGpu });
                     cmb.SetComputeMatrixArrayParam(csSplatUtilities, Props.MatrixMVEye,
                         new[] { leftView * matO2W, rightView * matO2W });
 
                     SetAssetDataOnCS(cmb, stereoKernel);
-                    SetStyleOnCS(cmb, stereoKernel, projectionScale);
+                    SetStyleOnCS(cmb, stereoKernel, projectionScale, occlusion);
                     csSplatUtilities.GetKernelThreadGroupSizes(stereoKernel, out uint gsX2, out _, out _);
                     int stereoGroupCount = (dispatchCount + (int)gsX2 - 1) / (int)gsX2;
                     cmb.DispatchCompute(csSplatUtilities, stereoKernel, stereoGroupCount, 1, 1);
@@ -1023,7 +1060,9 @@ namespace GaussianSplatting.Runtime
                         Matrix4x4 stereoGpuProj = GL.GetGPUProjectionMatrix(
                             cam.GetStereoProjectionMatrix(stereoEye), true);
 
-                        cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixVP, stereoGpuProj * stereoView);
+                        eyeVP ??= new Matrix4x4[2];
+                        eyeVP[eye] = stereoGpuProj * stereoView;
+                        cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixVP, eyeVP[eye]);
                         cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixP, stereoGpuProj);
                         cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixMV, stereoView * matO2W);
                         cmb.SetComputeIntParam(csSplatUtilities, Props.StereoEyeIndex, eye);
@@ -1037,12 +1076,84 @@ namespace GaussianSplatting.Runtime
                 cmb.SetComputeIntParam(csSplatUtilities, Props.IsStereo, 0);
                 cmb.DispatchCompute(csSplatUtilities, kernelIndex, groupCount, 1, 1);
             }
+
+            if (occlusion)
+                CullOccludedSplats(cmb, screenPar, isStereo);
+            if (QuadsBaked && occlusion)
+                BakeDeferredQuads(cmb, matVP, eyeVP);
             return true;
+        }
+
+        // Quads held back while occlusion culling reads the Gaussian footprints
+        // they replace (see _QuadBakeDeferred). Stereo when eyeVP is set.
+        private void BakeDeferredQuads(CommandBuffer cmb, Matrix4x4 vp, Matrix4x4[] eyeVP)
+        {
+            if (!TryFindSupportedKernel(KernelIndices.BakeQuads, out int kernel))
+                return;
+
+            ComputeShader cs = csSplatUtilities;
+            bool stereo = eyeVP != null;
+            cmb.SetComputeIntParam(cs, Props.IsStereo, stereo ? 1 : 0);
+            if (stereo)
+            {
+                cmb.SetComputeMatrixArrayParam(cs, Props.MatrixVPEye, eyeVP);
+                cmb.SetComputeMatrixArrayParam(cs, Props.MatrixInvVPEye, new[] { eyeVP[0].inverse, eyeVP[1].inverse });
+            }
+            else
+            {
+                cmb.SetComputeMatrixParam(cs, Props.MatrixVP, vp);
+                cmb.SetComputeMatrixParam(cs, Props.MatrixInvVP, vp.inverse);
+            }
+            cmb.SetComputeBufferParam(cs, kernel, Props.SplatViewData, _gpuView);
+            cs.GetKernelThreadGroupSizes(kernel, out uint group, out _, out _);
+            cmb.DispatchCompute(cs, kernel, (EffectiveSplatCount + (int)group - 1) / (int)group, 1, 1);
+        }
+
+        // Runs on the view data CalcViewData just wrote, with its screen
+        // parameters and stereo flag still bound
+        private void CullOccludedSplats(CommandBuffer cmb, Vector4 screenPar, bool isStereo)
+        {
+            if (!TryFindSupportedKernel(KernelIndices.OcclusionClear, out int clearKernel) ||
+                !TryFindSupportedKernel(KernelIndices.OcclusionSplat, out int splatKernel) ||
+                !TryFindSupportedKernel(KernelIndices.OcclusionCull, out int cullKernel))
+                return;
+
+            int gridW = Mathf.CeilToInt(screenPar.x / OcclusionCellSize);
+            int gridH = Mathf.CeilToInt(screenPar.y / OcclusionCellSize);
+            int cellCount = gridW * gridH * (isStereo ? 2 : 1);
+            if (cellCount <= 0)
+                return;
+            if (_gpuOcclusionGrid == null || _gpuOcclusionGrid.count < cellCount)
+            {
+                DisposeBuffer(ref _gpuOcclusionGrid);
+                _gpuOcclusionGrid = new GraphicsBuffer(GraphicsBuffer.Target.Raw, cellCount, 4) { name = "GaussianOcclusionGrid" };
+            }
+
+            ComputeShader cs = csSplatUtilities;
+            cmb.SetComputeIntParams(cs, Props.OcclusionGridSize, gridW, gridH);
+            cmb.SetComputeFloatParam(cs, Props.OcclusionCellSize, OcclusionCellSize);
+            cmb.SetComputeFloatParam(cs, Props.OcclusionFootprintScale, occlusionFootprintScale);
+            cmb.SetComputeFloatParam(cs, Props.OcclusionTolerance, occlusionTolerance);
+
+            cmb.SetComputeBufferParam(cs, clearKernel, Props.OcclusionGrid, _gpuOcclusionGrid);
+            cs.GetKernelThreadGroupSizes(clearKernel, out uint clearGroup, out _, out _);
+            cmb.DispatchCompute(cs, clearKernel, (cellCount + (int)clearGroup - 1) / (int)clearGroup, 1, 1);
+
+            DispatchPerSplat(splatKernel);
+            DispatchPerSplat(cullKernel);
+
+            void DispatchPerSplat(int kernel)
+            {
+                cmb.SetComputeBufferParam(cs, kernel, Props.OcclusionGrid, _gpuOcclusionGrid);
+                cmb.SetComputeBufferParam(cs, kernel, Props.SplatViewData, _gpuView);
+                cs.GetKernelThreadGroupSizes(kernel, out uint group, out _, out _);
+                cmb.DispatchCompute(cs, kernel, (EffectiveSplatCount + (int)group - 1) / (int)group, 1, 1);
+            }
         }
 
         // Style color and baked quads are computed with the view data; the
         // draw-side parameters live in GaussianSplatRenderSystem
-        private void SetStyleOnCS(CommandBuffer cmb, int kernelIndex, float projectionScale)
+        private void SetStyleOnCS(CommandBuffer cmb, int kernelIndex, float projectionScale, bool occlusion)
         {
             ComputeShader cs = csSplatUtilities;
             bool active = StyleActive;
@@ -1059,8 +1170,12 @@ namespace GaussianSplatting.Runtime
             // The kernel samples the ramp whether or not a style is set
             cmb.SetComputeTextureParam(cs, kernelIndex, Props.StyleRampTex, active ? style.RampTexture : Texture2D.whiteTexture);
 
+            // Occlusion culling reads it whether or not a style is set
+            cmb.SetComputeFloatParam(cs, Props.StyleAdditivity, active ? style.Additivity : 0f);
+
             bool baked = QuadsBaked;
             cmb.SetComputeIntParam(cs, Props.BakeQuads, baked ? 1 : 0);
+            cmb.SetComputeIntParam(cs, Props.QuadBakeDeferred, baked && occlusion ? 1 : 0);
             if (baked)
             {
                 // The baked quads reproduce the shaping the render mode's own

@@ -15,6 +15,7 @@ Based on [aras-p/UnityGaussianSplatting](https://github.com/aras-p/UnityGaussian
 - Global cross-model sorting: overlapping splat models blend and occlude correctly
 - GPU frustum + opacity culling with indirect draw
 - Optional per-renderer backface culling for splats sampled from a mesh surface: a splat's local +Z is read as its outward surface normal, and splats facing away from the camera fade out near edge-on
+- Optional per-renderer occlusion culling: splats lying behind a nearer surface of the same model are dropped using a coarse nearest-depth grid built from the splats themselves, so sparse point clouds stop showing what is behind them
 - Optional tile-based rendering path
 - Render modes: full splats, point cloud, and debug views (points, indices, boxes, chunk bounds)
 - URP Render Feature (primary target); HDRP pass and built-in pipeline paths exist but are less exercised

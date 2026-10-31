@@ -28,6 +28,10 @@
 #pragma kernel CSScaleSelection
 #pragma kernel CSExportData
 #pragma kernel CSCopySplats
+#pragma kernel CSOcclusionClear
+#pragma kernel CSOcclusionSplat
+#pragma kernel CSOcclusionCull
+#pragma kernel CSBakeQuads
 
 // Sort kernels (InitDeviceRadixSort, Upsweep, Scan, Downsweep) moved to SplatSort.compute
 // to keep wave-ops pragmas out of this file — required for visionOS Metal compatibility.
@@ -58,6 +62,7 @@ float4 _VecWorldSpaceCameraPos;
 // because the eye position rotates with the view azimuth.
 uint _OdsEnabled;
 float4x4 _MatrixWorldToRig;
+float4x4 _MatrixRigToWorld;
 // x = signed eye offset (m), y = pole merge start (rad), z = pole merge end (rad)
 float4 _OdsParams;
 #define kOdsPi 3.14159265358979
@@ -366,6 +371,8 @@ uint _StyleRampInput;       // GaussianSplatStyleRampInput
 float _StyleDepthNear;
 float _StyleDepthInvRange;
 float _StyleIntensity;
+// Style additivity at full weight; scaled per splat by its style weight
+float _StyleAdditivity;
 float _StyleRimAmount;
 float _StyleRimPower;
 Texture2D _StyleRampTex;
@@ -401,6 +408,11 @@ float _SplatMaxPixelRadius;
 // BakeQuad): every renderer in PointCloud mode, styled ones in Splats mode
 uint _BakeQuads;
 uint _QuadBaseShape;        // 0 = Gaussian (Splats), 1 = point (PointCloud)
+// Non-zero: the view-data kernels leave the quads to CSBakeQuads, because a
+// pass in between (occlusion culling) reads the Gaussian footprints
+uint _QuadBakeDeferred;
+float4x4 _MatrixInvVP;
+float4x4 _MatrixInvVP_Eye[2];
 // PointCloud point sizing (GaussianSplatConfig)
 float _PointSizeScale;
 float _PointMinSize;
@@ -774,6 +786,22 @@ float4 OdsProjectSplat(float3 worldPos, out float distOut)
     // cloud pass resolves occlusion through the sort order instead.
     float2 ndc = float2(theta / kOdsPi, elev / (0.5 * kOdsPi) * _OdsParams.w);
     return float4(ndc * distOut, 0.5 * distOut, distOut);
+}
+
+// Inverse of OdsProjectSplat, for passes that only have the view data. The
+// eye circle radius is taken at the final elevation rather than the
+// rig-centre one the projection uses; they differ by a sliver of the eye
+// offset over the distance.
+float3 OdsUnproject(float4 clip)
+{
+    float2 ndc = clip.xy / clip.w;
+    float theta = ndc.x * kOdsPi;
+    float elev = ndc.y * _OdsParams.w * (0.5 * kOdsPi);
+    float merge = 1.0 - smoothstep(_OdsParams.y, _OdsParams.z, abs(elev));
+    float r = _OdsParams.x * merge;
+    float3 eye = float3(r * cos(theta), 0.0, -r * sin(theta));
+    float3 v = clip.w * float3(cos(elev) * sin(theta), sin(elev), cos(elev) * cos(theta));
+    return mul(_MatrixRigToWorld, float4(eye + v, 1)).xyz;
 }
 
 // Bakes a splat's draw quad into its view data for the quad shader
@@ -1257,7 +1285,8 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
     SplatViewData view = CalculateEyeViewData(idx, splat, centerWorldPos,
         _MatrixVP, isDeleted, isCut, splatScale, opacityScale,
         animOpacityMul, animScaleMul, animColorBlend, animColorTint, styleWeight);
-    BakeQuad(view, centerWorldPos, _MatrixVP, DofFocalPx(_MatrixP));
+    if (_QuadBakeDeferred == 0)
+        BakeQuad(view, centerWorldPos, _MatrixVP, DofFocalPx(_MatrixP));
 
     // Apply selection highlight (negate alpha to signal selected state)
     if (isSelected)
@@ -1425,7 +1454,8 @@ void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_Group
             splat, ssd,
             _MatrixVP_Eye[eye], _MatrixP_Eye[eye], _MatrixMV_Eye[eye],
             _SplatScale);
-        BakeQuad(view, ssd.worldPos, _MatrixVP_Eye[eye], DofFocalPx(_MatrixP_Eye[eye]));
+        if (_QuadBakeDeferred == 0)
+            BakeQuad(view, ssd.worldPos, _MatrixVP_Eye[eye], DofFocalPx(_MatrixP_Eye[eye]));
 
         if (isSelected && view.pos.w > 0)
         {
@@ -1479,6 +1509,153 @@ void CSWriteIndirectArgs (uint3 id : SV_DispatchThreadID)
     _IndirectArgs[2] = 0;                    // start index
     _IndirectArgs[3] = 0;                    // base vertex
     _IndirectArgs[4] = 0;                    // start instance
+}
+
+// Occlusion culling: drops splats hidden behind a nearer surface of the same
+// model. Every visible splat that blocks light writes its view depth over its
+// footprint into a coarse screen grid that keeps the nearest; a second pass
+// culls splats lying more than _OcclusionTolerance behind the nearest depth
+// of their cell. It works on the view data, so every draw path, stereo and
+// ODS inherit it.
+RWByteAddressBuffer _OcclusionGrid;
+uint2 _OcclusionGridSize;       // cells per eye
+float _OcclusionCellSize;       // pixels per cell
+float _OcclusionFootprintScale; // widens footprints to close the gaps between samples
+float _OcclusionTolerance;      // depth behind the nearest surface still kept
+// Bounds the per-splat write cost for footprints that fill the screen
+#define OCCLUSION_MAX_RADIUS 4
+
+uint OcclusionEyeCount() { return _IsStereo != 0 ? 2 : 1; }
+uint OcclusionViewIndex(uint idx, uint eye) { return _IsStereo != 0 ? idx * 2 + eye : idx; }
+
+bool OcclusionCell(SplatViewData view, out int2 cell)
+{
+    // Clip w is view depth in perspective and eye distance under ODS; both
+    // divide back to NDC the same way
+    float2 ndc = view.pos.xy / view.pos.w;
+    cell = int2(floor((ndc * 0.5 + 0.5) * _VecScreenParams.xy / _OcclusionCellSize));
+    return all(cell >= 0) && all(cell < (int2)_OcclusionGridSize);
+}
+
+uint OcclusionAddress(int2 cell, uint eye)
+{
+    return ((eye * _OcclusionGridSize.y + cell.y) * _OcclusionGridSize.x + cell.x) * 4;
+}
+
+// Opacity with which a splat hides what is behind it, as it will be drawn:
+// with the point boost and clamp BakeQuad applies after this pass, less the
+// share the style turns into added light. A fully additive splat hides
+// nothing, so it must not occlude, however bright it is.
+float OcclusionBlockedOpacity(SplatViewData view)
+{
+    float opacity = abs(ViewAlpha(view.color));
+    if (_BakeQuads == 0)
+        return opacity;
+    if (_QuadBaseShape == 1)
+        opacity = saturate(opacity * _PointOpacityBoost);
+    return opacity * (1.0 - _StyleAdditivity * BakedViewStyleWeight(view.color));
+}
+
+[numthreads(GROUP_SIZE,1,1)]
+void CSOcclusionClear (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x < _OcclusionGridSize.x * _OcclusionGridSize.y * OcclusionEyeCount())
+        _OcclusionGrid.Store(id.x * 4, 0xFFFFFFFF);
+}
+
+[numthreads(GROUP_SIZE,1,1)]
+void CSOcclusionSplat (uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+
+    for (uint eye = 0; eye < OcclusionEyeCount(); eye++)
+    {
+        SplatViewData view = _SplatViewData[OcclusionViewIndex(idx, eye)];
+        int2 cell;
+        if (!IsSplatViewVisible(view) || !OcclusionCell(view, cell))
+            continue;
+        // Only what blocks light forms a surface; the splat itself may
+        // still be hidden behind one in the cull pass
+        if (OcclusionBlockedOpacity(view) < SPLAT_CULL_ALPHA)
+            continue;
+
+        // Positive floats order the same as their bit patterns
+        uint depth = asuint(view.pos.w);
+        float footprintPx = sqrt(length(view.axis1) * length(view.axis2)) * _OcclusionFootprintScale;
+        int radius = min((int)(footprintPx / _OcclusionCellSize + 0.5), OCCLUSION_MAX_RADIUS);
+        for (int y = -radius; y <= radius; y++)
+        {
+            for (int x = -radius; x <= radius; x++)
+            {
+                int2 c = cell + int2(x, y);
+                if (x * x + y * y > radius * radius || any(c < 0) || any(c >= (int2)_OcclusionGridSize))
+                    continue;
+                _OcclusionGrid.InterlockedMin(OcclusionAddress(c, eye), depth);
+            }
+        }
+    }
+}
+
+[numthreads(GROUP_SIZE,1,1)]
+void CSOcclusionCull (uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+
+    for (uint eye = 0; eye < OcclusionEyeCount(); eye++)
+    {
+        uint viewIdx = OcclusionViewIndex(idx, eye);
+        SplatViewData view = _SplatViewData[viewIdx];
+        int2 cell;
+        if (!IsSplatViewVisible(view) || !OcclusionCell(view, cell))
+            continue;
+
+        float nearest = asfloat(_OcclusionGrid.Load(OcclusionAddress(cell, eye)));
+        if (view.pos.w > nearest + _OcclusionTolerance)
+        {
+            // Same marker as the frustum cull: the draw discards it and the
+            // sort leaves it out
+            view.pos.w = 0;
+            _SplatViewData[viewIdx] = view;
+        }
+    }
+}
+
+// Deferred quads (_QuadBakeDeferred): bakes them into view data a pass after
+// the view-data kernels has finished with. Reads nothing but the view data;
+// the splat's world position comes back from its clip position.
+[numthreads(GROUP_SIZE,1,1)]
+void CSBakeQuads (uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+
+    uint eyeCount = _IsStereo != 0 ? 2 : 1;
+    for (uint eye = 0; eye < eyeCount; eye++)
+    {
+        uint viewIdx = _IsStereo != 0 ? idx * 2 + eye : idx;
+        SplatViewData view = _SplatViewData[viewIdx];
+        if (view.pos.w <= 0)
+            continue;
+        float4x4 vp = _IsStereo != 0 ? _MatrixVP_Eye[eye] : _MatrixVP;
+        float4x4 p = _IsStereo != 0 ? _MatrixP_Eye[eye] : _MatrixP;
+        float3 worldPos;
+        if (_OdsEnabled != 0)
+        {
+            worldPos = OdsUnproject(view.pos);
+        }
+        else
+        {
+            float4 world = mul(_IsStereo != 0 ? _MatrixInvVP_Eye[eye] : _MatrixInvVP, view.pos);
+            worldPos = world.xyz / world.w;
+        }
+        BakeQuad(view, worldPos, vp, DofFocalPx(p));
+        _SplatViewData[viewIdx] = view;
+    }
 }
 
 
