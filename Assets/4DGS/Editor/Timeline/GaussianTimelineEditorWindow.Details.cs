@@ -259,6 +259,15 @@ namespace GaussianSplatting.Editor
                             Math.Max(1, sequence.FrameCount - sequenceClip.StartFrame) / (sequence.frameRate * sequenceClip.Speed));
                     }
                     break;
+                case GaussianAnimationClip animationClip when animationClip.Animation != null:
+                    AnimationClip animation = animationClip.Animation;
+                    EditorGUILayout.LabelField("Animation", $"{animation.length:0.##} s at {animation.frameRate:0.##} fps");
+                    if (GUILayout.Button("Fit To Animation") && animationClip.Speed > 0f)
+                    {
+                        EditTimeline("Fit Clip", () => animationClip.Duration =
+                            Math.Max(GaussianTimelineClip.MinDuration, (animation.length - animationClip.ClipIn) / animationClip.Speed));
+                    }
+                    break;
                 case GaussianSubTimelineClip subClip when binding is GaussianTimelinePlayer child:
                     using (new EditorGUILayout.HorizontalScope())
                     {

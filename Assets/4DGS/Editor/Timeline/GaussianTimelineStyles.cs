@@ -39,6 +39,8 @@ namespace GaussianSplatting.Editor
                 return new Color(0.30f, 0.55f, 0.80f);
             if (trackType == typeof(GaussianSequenceTrack))
                 return new Color(0.42f, 0.42f, 0.80f);
+            if (trackType == typeof(GaussianAnimationTrack))
+                return new Color(0.80f, 0.40f, 0.45f);
             if (trackType == typeof(GaussianSubTimelineTrack))
                 return new Color(0.58f, 0.42f, 0.78f);
             if (trackType == typeof(GaussianAudioTrack))

@@ -30,7 +30,7 @@
 - **GaussianStylizePostProcess** — 风格化后处理(立体感知)
 - **GaussianStyler + GaussianStyleVolume + GaussianSplatStyle** — 逐 splat 风格化(颜色渐变、轮廓光、圆点、拉线、切片与网格、闪烁),按权重混入。和动画器及其体积一样,renderer 上的 Styler 收集它下面的风格体积,每个体积在自己的区域里应用自己的风格(Unbounded 覆盖整个物体,也可以是相机周围);重叠处由权重最大的体积决定,所以一个物体可以同时有多种风格。在时间轴上淡入淡出体积权重即可切换风格
 - **GaussianDepthOfField** — 挂在相机上的薄透镜景深,逐 splat 计算:不需要深度缓冲,Direct 模式和 360(ODS)录制都能用
-- **GaussianTimeline + GaussianTimelinePlayer** — 自带的时间轴(不依赖 Unity Timeline 包):片段带淡入淡出和交叉淡化,轨道有通道(修改器、体积、Styler、景深参数)、修改器状态、变换、激活、4D 序列、音频、标记和嵌套子时间轴。每一帧只由时间决定(修改器相位也是),所以跳转和拖动与播放一致;时钟可以跟随 AudioSource。在 *Window > Gaussian Splatting > Timeline* 里编辑,不进 Play 模式就能在场景里预览
+- **GaussianTimeline + GaussianTimelinePlayer** — 自带的时间轴(不依赖 Unity Timeline 包):片段带淡入淡出和交叉淡化,轨道有通道(修改器、体积、Styler、景深参数)、修改器状态、变换、激活、4D 序列、模型动画(Animator 片段,可交叉淡化,编辑模式下也能预览)、音频、标记和嵌套子时间轴。每一帧只由时间决定(修改器相位也是),所以跳转和拖动与播放一致;时钟可以跟随 AudioSource。在 *Window > Gaussian Splatting > Timeline* 里编辑,不进 Play 模式就能在场景里预览
 
 ![Unity4DGS 演示](Docs/media/demo.gif)
 
