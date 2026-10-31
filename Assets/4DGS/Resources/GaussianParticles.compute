@@ -2,18 +2,27 @@
 // Particles drifting off a splat renderer (GaussianParticleEmitter). Each
 // particle runs its own endless cycle of lives. At the start of a life it
 // takes the position and color of a random source splat, as the source is
-// drawn right now (mesh driver, morph, animation and style included), and the
-// velocity of that spot of the surface plus a push along its normal. During
-// the life it is simulated step by step: its velocity relaxes towards a flow
-// of wind plus curl noise, so particles leaving the body are swept along in
-// streams; its color and opacity follow a curve over the life, and it
-// shrinks. The result is written as the particle renderer's base pose,
-// animation output and velocity, so sorting, styles (velocity streaks
-// included), ODS and depth of field treat the particles like any other
-// splats.
+// drawn right now (mesh driver, morph, animation and style included); birth
+// volumes limit which splats can be picked. It may stay attached to that
+// splat for part of its life, following the moving surface, until its attach
+// time is over or a release volume reaches it. Released, it leaves with the
+// velocity of that spot of the surface plus a push along its normal, and is
+// simulated step by step: its velocity relaxes towards a flow of wind plus
+// curl noise, so particles leaving the body are swept along in streams. Its
+// color, opacity and size follow curves over the life. The result is
+// written as the particle renderer's base pose, animation output and
+// velocity, so sorting, styles (velocity streaks included), ODS and depth of
+// field treat the particles like any other splats.
+//
+// Every step depends only on the step's time, the particle's state and the
+// source, so stepping the same times gives the same particles (see
+// GaussianParticleEmitter for the fixed time grid).
 
 #pragma kernel CSUpdateParticles
 #pragma kernel CSStoreSource
+#pragma kernel CSEmitCount
+#pragma kernel CSEmitScan
+#pragma kernel CSEmitWrite
 
 #define GROUP_SIZE 256
 
@@ -38,28 +47,47 @@ StructuredBuffer<float4> _MorphedData;
 uint _MorphDataValid;
 float4x4 _SourceObjectToWorld;
 
-// The source's world positions at the previous step, w = 1 once written
+// The source's world positions at the previous store, w = 1 once written
 RWStructuredBuffer<float4> _SourcePrev;
+
+// Emit volumes (GaussianEmitVolume, must match MaxEmitVolumes): world to
+// local, and shape, falloff, weight, role (0 = birth, 1 = release)
+#define MAX_EMIT_VOLUMES 8
+uint _EmitVolumeCount;
+float4x4 _EmitVolumeWorldToLocal[MAX_EMIT_VOLUMES];
+float4 _EmitVolumeParams[MAX_EMIT_VOLUMES];
+// Non-zero when birth volumes limit the births to the candidates below
+uint _EmitFiltered;
+// The source splats birth volumes reach, in source order: index, weight
+// (as uint). Built each frame by CSEmitCount, CSEmitScan and CSEmitWrite,
+// which keep the order fixed so births stay repeatable.
+RWStructuredBuffer<uint2> _EmitCandidates;
+RWStructuredBuffer<uint> _EmitBlockCounts;
+RWStructuredBuffer<uint> _EmitBlockOffsets;
+RWStructuredBuffer<uint> _EmitTotal;
+uint _EmitBlockCount;
 
 uint _ParticleCount;
 uint _ParticleSeed;
-float _ParticleTime;        // seconds on the emitter's clock
-float _ParticleDeltaTime;   // seconds since the previous step
+float _ParticleTime;        // seconds on the emitter's clock at the end of this step, may be negative
+float _ParticleDeltaTime;   // seconds this step covers
 float _ParticleLifetime;    // seconds, varied +-25% per particle
 float _ParticleEmission;    // fraction of lives that show
-float4 _ParticleBirth;      // source velocity scale (inherit / step), push along the normal, max inherited speed, 0
+float4 _ParticleBirth;      // source velocity scale (inherit / time since the last store), push along the normal, max inherited speed, attach fraction of a life
 float3 _ParticleWind;       // world units per second the flow carries particles
 float4 _ParticleFlow;       // drag (1/s), turbulence (world units/s), frequency (1/world), speed
-float4 _ParticleShape;      // size (world sigma), end size factor, size variation, 0
-float4 _ParticleLook;       // opacity, source color weight, source lift, 0
-// Color (gamma, may exceed 1) and opacity over a life, sampled evenly from
-// birth to death
-#define COLOR_OVER_LIFE_SAMPLES 32
-float4 _ParticleColorOverLife[COLOR_OVER_LIFE_SAMPLES];
+float4 _ParticleShape;      // size (world sigma), 0, size variation, 0
+float4 _ParticleLook;       // opacity, source tint, source lift, 0
+// Color (gamma, may exceed 1) and opacity, and the size factor, over a
+// life, sampled evenly from birth to death
+#define OVER_LIFE_SAMPLES 32
+float4 _ParticleColorOverLife[OVER_LIFE_SAMPLES];
+float4 _ParticleSizeOverLife[OVER_LIFE_SAMPLES / 4];
 float4x4 _ParticleWorldToObject;
 float _ParticleObjectScale; // world size to particle object size
 
-// 3 float4s per particle: position (world), life index; velocity (world), 0; color, opacity
+// 3 float4s per particle: position (world), life index; velocity (world),
+// meta (source index, flags); birth color, opacity
 RWStructuredBuffer<float4> _ParticleState;
 // The particle renderer's base pose: center (object), 0; rotation
 RWStructuredBuffer<float4> _ParticleBase;
@@ -67,6 +95,13 @@ RWStructuredBuffer<float4> _ParticleBase;
 RWStructuredBuffer<float4> _ParticleAnim;
 // The particle renderer's velocity (world), for velocity streaks
 RWStructuredBuffer<float4> _ParticleVelocity;
+
+// Meta bits: the source splat index below, then whether the particle has
+// left the surface, and whether this life stays hidden (no candidate, or
+// turned down by a soft birth volume edge)
+#define META_INDEX_MASK 0x3FFFFFFFu
+#define META_RELEASED 0x80000000u
+#define META_HIDDEN 0x40000000u
 
 uint PcgHash(uint v)
 {
@@ -81,9 +116,8 @@ float Hash01(uint v)
 }
 
 // The source splat as the view data pass sees it, in world space, its color
-// (gamma) styled as drawn but without view-dependent SH; normal is the
-// splat's local +Z, the surface normal for mesh splats
-void LoadSourceSplat(uint idx, out float3 worldPos, out float3 worldNormal, out float3 color, out float opacity)
+// (gamma) styled as drawn but without view-dependent SH
+void LoadSourceSplat(uint idx, out float3 worldPos, out float3 color, out float opacity)
 {
     SplatData splat = LoadSplatData(idx, 0);
     color = splat.sh.col;
@@ -113,8 +147,6 @@ void LoadSourceSplat(uint idx, out float3 worldPos, out float3 worldNormal, out 
     }
     worldPos = mul(_SourceObjectToWorld, float4(splat.pos, 1)).xyz;
     color = ApplyStyle((half3)color, StyleAt(worldPos), splat, worldPos, idx);
-    float3 normal = mul((float3x3)_SourceObjectToWorld, QuatRotateVector(float3(0, 0, 1), splat.rot));
-    worldNormal = dot(normal, normal) > 1e-12 ? normalize(normal) : float3(0, 1, 0);
 }
 
 // Just the world position of LoadSourceSplat
@@ -132,6 +164,40 @@ float3 LoadSourcePos(uint idx)
     return mul(_SourceObjectToWorld, float4(pos, 1)).xyz;
 }
 
+// The splat's local +Z in world space, the surface normal for mesh splats
+float3 LoadSourceNormal(uint idx)
+{
+    float4 rot;
+    if (_MorphDataValid != 0)
+        rot = _MorphedData[idx * 4 + 1];
+    else if (_DeformedBaseValid != 0)
+        rot = _DeformedBase[idx * 2 + 1];
+    else
+        rot = LoadSplatData(idx, 0).rot;
+    float3 normal = mul((float3x3)_SourceObjectToWorld, QuatRotateVector(float3(0, 0, 1), rot));
+    return dot(normal, normal) > 1e-12 ? normalize(normal) : float3(0, 1, 0);
+}
+
+// The strongest emit volume of a role at a world position
+float EmitVolumeWeight(float3 worldPos, float role)
+{
+    float weight = 0;
+    for (uint i = 0; i < _EmitVolumeCount; i++)
+    {
+        float4 p = _EmitVolumeParams[i];
+        if (abs(p.w - role) > 0.5)
+            continue;
+        float3 localPos = mul(_EmitVolumeWorldToLocal[i], float4(worldPos, 1)).xyz;
+        weight = max(weight, p.z * GaussianVolumeWeight(localPos, p.x, p.y));
+    }
+    return weight;
+}
+
+float BirthWeight(uint idx)
+{
+    return idx < _SplatCount ? EmitVolumeWeight(LoadSourcePos(idx), 0) : 0;
+}
+
 // Raises a color's brightest channel towards 1 by the lift, scaling all
 // channels alike so hue and saturation stay; near black the gain is capped,
 // since hue there is mostly noise
@@ -145,9 +211,21 @@ float3 LiftColor(float3 color, float lift)
 
 float4 ColorOverLife(float age)
 {
-    float x = saturate(age) * (COLOR_OVER_LIFE_SAMPLES - 1);
-    uint i = min((uint)x, COLOR_OVER_LIFE_SAMPLES - 2);
+    float x = saturate(age) * (OVER_LIFE_SAMPLES - 1);
+    uint i = min((uint)x, OVER_LIFE_SAMPLES - 2);
     return lerp(_ParticleColorOverLife[i], _ParticleColorOverLife[i + 1], x - i);
+}
+
+float SizeSample(uint i)
+{
+    return _ParticleSizeOverLife[i >> 2][i & 3];
+}
+
+float SizeOverLife(float age)
+{
+    float x = saturate(age) * (OVER_LIFE_SAMPLES - 1);
+    uint i = min((uint)x, OVER_LIFE_SAMPLES - 2);
+    return lerp(SizeSample(i), SizeSample(i + 1), x - i);
 }
 
 // Divergence-free flow (Bridson 2007): the curl of three noise potentials,
@@ -173,6 +251,17 @@ float3 CurlNoise(float3 p)
     return curl * 0.5;
 }
 
+// The velocity of the source surface at a splat now, scaled and capped
+float3 InheritedVelocity(uint src, float3 worldPos)
+{
+    float4 prev = _SourcePrev[src];
+    float3 inherited = prev.w > 0 ? (worldPos - prev.xyz) * _ParticleBirth.x : 0;
+    float speed = length(inherited);
+    if (speed > _ParticleBirth.z)
+        inherited *= _ParticleBirth.z / speed;
+    return inherited;
+}
+
 [numthreads(GROUP_SIZE, 1, 1)]
 void CSUpdateParticles(uint3 id : SV_DispatchThreadID)
 {
@@ -184,37 +273,65 @@ void CSUpdateParticles(uint3 id : SV_DispatchThreadID)
     // not pulse together
     uint key = PcgHash(i ^ PcgHash(_ParticleSeed));
     float life = _ParticleLifetime * lerp(0.75, 1.25, Hash01(key));
-    float phase = max(_ParticleTime, 0.0) / life + Hash01(key + 1u);
+    float phase = _ParticleTime / life + Hash01(key + 1u);
     float lifeIndex = floor(phase);
     float age = phase - lifeIndex;
-    uint lifeKey = PcgHash(key ^ PcgHash((uint)lifeIndex));
+    uint lifeKey = PcgHash(key ^ PcgHash(asuint((int)lifeIndex)));
 
     float4 position = _ParticleState[i * 3];
     float4 velocity = _ParticleState[i * 3 + 1];
     float4 birthColor = _ParticleState[i * 3 + 2];
+    uint meta = asuint(velocity.w);
     float dt = _ParticleDeltaTime;
-    if (position.w != lifeIndex && _SplatCount > 0)
+
+    if (position.w != lifeIndex)
     {
-        // A new life (or a jump of the clock): start from the source as it
-        // is now, moving with it and pushed off its surface
-        uint src = PcgHash(lifeKey + 2u) % _SplatCount;
-        float3 worldPos, worldNormal, color;
-        float opacity;
-        LoadSourceSplat(src, worldPos, worldNormal, color, opacity);
-        float4 prev = _SourcePrev[src];
-        float3 inherited = prev.w > 0 ? (worldPos - prev.xyz) * _ParticleBirth.x : 0;
-        float inheritedSpeed = length(inherited);
-        if (inheritedSpeed > _ParticleBirth.z)
-            inherited *= _ParticleBirth.z / inheritedSpeed;
-        position = float4(worldPos, lifeIndex);
-        velocity = float4(inherited + worldNormal * _ParticleBirth.y * lerp(0.5, 1.0, Hash01(lifeKey + 3u)), 0);
-        birthColor = float4(color, opacity);
+        // A new life: pick a source splat (among the birth candidates when
+        // birth volumes limit them) and take it as it is drawn now
+        uint src = 0;
+        bool hidden = _SplatCount == 0;
+        if (_EmitFiltered != 0)
+        {
+            uint total = _EmitTotal[0];
+            if (total == 0)
+            {
+                hidden = true;
+            }
+            else
+            {
+                uint2 candidate = _EmitCandidates[PcgHash(lifeKey + 2u) % total];
+                src = candidate.x;
+                // A soft volume edge turns down some of the births there
+                hidden = Hash01(lifeKey + 8u) >= asfloat(candidate.y);
+            }
+        }
+        else if (!hidden)
+        {
+            src = PcgHash(lifeKey + 2u) % _SplatCount;
+        }
+
+        if (hidden)
+        {
+            meta = META_HIDDEN | META_RELEASED;
+            birthColor = 0;
+        }
+        else
+        {
+            float3 worldPos, color;
+            float opacity;
+            LoadSourceSplat(src, worldPos, color, opacity);
+            position.xyz = worldPos;
+            velocity.xyz = InheritedVelocity(src, worldPos);
+            birthColor = float4(color, opacity);
+            meta = src & META_INDEX_MASK;
+        }
+        position.w = lifeIndex;
         _ParticleState[i * 3 + 2] = birthColor;
     }
-    else if (dt > 0)
+    else if ((meta & META_RELEASED) != 0 && dt > 0)
     {
-        // Relax towards the flow (exactly, so any drag and step is stable),
-        // then move
+        // Free: relax towards the flow (exactly, so any drag and step is
+        // stable), then move
         static const float3 flowDrift = float3(0.3, -1.0, 0.2);
         float3 seedOffset = float3(Hash01(PcgHash(_ParticleSeed) + 1u), Hash01(PcgHash(_ParticleSeed) + 2u), Hash01(PcgHash(_ParticleSeed) + 3u)) * 64.0;
         float3 q = position.xyz * _ParticleFlow.z + seedOffset + flowDrift * (_ParticleTime * _ParticleFlow.w);
@@ -222,17 +339,47 @@ void CSUpdateParticles(uint3 id : SV_DispatchThreadID)
         velocity.xyz = lerp(flow, velocity.xyz, exp(-_ParticleFlow.x * dt));
         position.xyz += velocity.xyz * dt;
     }
+
+    if ((meta & META_RELEASED) == 0)
+    {
+        // Attached: ride on the source splat until the attach time is over
+        // or a release volume reaches it, then leave with the surface's
+        // velocity plus the push off it
+        uint src = meta & META_INDEX_MASK;
+        if (src < _SplatCount)
+        {
+            float3 worldPos = LoadSourcePos(src);
+            float3 inherited = InheritedVelocity(src, worldPos);
+            bool release = age >= _ParticleBirth.w;
+            if (!release && _EmitVolumeCount > 0)
+                release = EmitVolumeWeight(worldPos, 1) > Hash01(lifeKey + 9u);
+            position.xyz = worldPos;
+            velocity.xyz = inherited;
+            if (release)
+            {
+                velocity.xyz += LoadSourceNormal(src) * _ParticleBirth.y * lerp(0.5, 1.0, Hash01(lifeKey + 3u));
+                meta |= META_RELEASED;
+            }
+        }
+        else
+        {
+            // The source lost the splat (a new asset): stay hidden this life
+            meta |= META_RELEASED | META_HIDDEN;
+        }
+    }
+
+    velocity.w = asfloat(meta);
     _ParticleState[i * 3] = position;
     _ParticleState[i * 3 + 1] = velocity;
 
     float4 overLife = ColorOverLife(age);
     float3 color = overLife.rgb * lerp(1.0, LiftColor(birthColor.rgb, _ParticleLook.z), _ParticleLook.y);
-    bool shown = _SplatCount > 0 && Hash01(lifeKey + 6u) < _ParticleEmission;
+    bool shown = (meta & META_HIDDEN) == 0 && Hash01(lifeKey + 6u) < _ParticleEmission;
     float opacity = shown ? saturate(birthColor.a) * _ParticleLook.x * overLife.a : 0.0;
 
     // Mostly small particles and a few large ones, averaging the set size
     float sizeFactor = lerp(1.0, 0.5 + 2.5 * pow(Hash01(lifeKey + 7u), 4.0), _ParticleShape.z);
-    float size = _ParticleShape.x * sizeFactor * lerp(1.0, _ParticleShape.y, age) * _ParticleObjectScale;
+    float size = _ParticleShape.x * sizeFactor * max(SizeOverLife(age), 0.0) * _ParticleObjectScale;
 
     _ParticleBase[i * 2] = float4(mul(_ParticleWorldToObject, float4(position.xyz, 1)).xyz, 0);
     _ParticleBase[i * 2 + 1] = float4(0, 0, 0, 1);
@@ -242,8 +389,8 @@ void CSUpdateParticles(uint3 id : SV_DispatchThreadID)
     _ParticleVelocity[i] = float4(velocity.xyz, 0);
 }
 
-// Keeps the source's world positions for the next step's births, which take
-// their velocity from the difference
+// Keeps the source's world positions for the next frame's births and
+// attached particles, which take the surface velocity from the difference
 [numthreads(GROUP_SIZE, 1, 1)]
 void CSStoreSource(uint3 id : SV_DispatchThreadID)
 {
@@ -251,4 +398,56 @@ void CSStoreSource(uint3 id : SV_DispatchThreadID)
     if (idx >= _SplatCount)
         return;
     _SourcePrev[idx] = float4(LoadSourcePos(idx), 1);
+}
+
+// Birth candidates, a stream compaction in three passes: count per block of
+// source splats, offset the blocks, write each block's candidates in order
+
+groupshared uint gs_EmitScan[GROUP_SIZE];
+
+// Inclusive prefix sum of the flags over the group; returns the total
+uint EmitGroupScan(uint local, uint flag)
+{
+    gs_EmitScan[local] = flag;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll]
+    for (uint offset = 1; offset < GROUP_SIZE; offset <<= 1)
+    {
+        uint add = local >= offset ? gs_EmitScan[local - offset] : 0;
+        GroupMemoryBarrierWithGroupSync();
+        gs_EmitScan[local] += add;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    return gs_EmitScan[GROUP_SIZE - 1];
+}
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void CSEmitCount(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint local : SV_GroupIndex)
+{
+    uint flag = BirthWeight(id.x) > 0 ? 1 : 0;
+    uint total = EmitGroupScan(local, flag);
+    if (local == 0)
+        _EmitBlockCounts[group.x] = total;
+}
+
+[numthreads(1, 1, 1)]
+void CSEmitScan(uint3 id : SV_DispatchThreadID)
+{
+    uint sum = 0;
+    for (uint b = 0; b < _EmitBlockCount; b++)
+    {
+        _EmitBlockOffsets[b] = sum;
+        sum += _EmitBlockCounts[b];
+    }
+    _EmitTotal[0] = sum;
+}
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void CSEmitWrite(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint local : SV_GroupIndex)
+{
+    float weight = BirthWeight(id.x);
+    uint flag = weight > 0 ? 1 : 0;
+    EmitGroupScan(local, flag);
+    if (flag != 0)
+        _EmitCandidates[_EmitBlockOffsets[group.x] + gs_EmitScan[local] - 1] = uint2(id.x, asuint(weight));
 }

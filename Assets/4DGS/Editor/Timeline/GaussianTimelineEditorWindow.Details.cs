@@ -268,6 +268,9 @@ namespace GaussianSplatting.Editor
                             Math.Max(GaussianTimelineClip.MinDuration, (animation.length - animationClip.ClipIn) / animationClip.Speed));
                     }
                     break;
+                case GaussianParticleClip when binding is GaussianParticleEmitter emitter:
+                    EditorGUILayout.HelpBox($"Seeking restarts the particles {emitter.PrewarmTime:0.##} s before the new time and simulates up to it; playing on from the start gives the same particles every take.", MessageType.None);
+                    break;
                 case GaussianSubTimelineClip subClip when binding is GaussianTimelinePlayer child:
                     using (new EditorGUILayout.HorizontalScope())
                     {

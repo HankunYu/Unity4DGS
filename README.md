@@ -29,8 +29,9 @@ Based on [aras-p/UnityGaussianSplatting](https://github.com/aras-p/UnityGaussian
 - **GaussianCutout** — box/ellipsoid cutout regions
 - **GaussianStylizePostProcess** — stylization post-processing (stereo aware)
 - **GaussianStyler + GaussianStyleVolume + GaussianSplatStyle** — per-splat stylized looks (color ramps, rim light, dots, streaks, slices and grids, glints) blended in by weight. Like the animator and its volumes, a styler on the renderer takes the style volumes under it, each applying its own style in its region (Unbounded for the whole object, or e.g. the space around the camera); the strongest volume decides where they overlap, so one object can wear several styles. Fading volume weights on the timeline switches and fades styles
+- **GaussianParticleEmitter + GaussianEmitVolume** — GPU particles shed from a splat renderer and drawn as splats of their own: each is born on the source as it is drawn (style included), can ride on the moving surface before it leaves, and is then carried by wind and curl-noise flow, with color, opacity and size following curves over its life. Birth volumes limit where particles come from (e.g. the hands); release volumes free attached particles as they sweep over the body. The simulation steps on a fixed time grid, so a timeline particle track gives the same particles on every take
 - **GaussianDepthOfField** — thin-lens depth of field on the camera, applied per splat: no depth buffer needed, works in Direct mode and 360 (ODS) capture
-- **GaussianTimeline + GaussianTimelinePlayer** — a built-in timeline (no Unity Timeline package): clips with ease in/out and crossfades on channel (modifier, volume, styler, depth-of-field parameters), modifier-state, transform, activation, 4D sequence, model animation (Animator clips, crossfaded, in edit mode too), audio, marker and nested sub-timeline tracks. Every frame depends on the time alone, modifier phases included, so seeking and scrubbing match playback; the clock can follow an AudioSource. Edit it in *Window > Gaussian Splatting > Timeline*, which previews on the scene without Play mode
+- **GaussianTimeline + GaussianTimelinePlayer** — a built-in timeline (no Unity Timeline package): clips with ease in/out and crossfades on channel (modifier, volume, styler, depth-of-field parameters), modifier-state, transform, activation, 4D sequence, model animation (Animator clips, crossfaded, in edit mode too), particle clock, audio, marker and nested sub-timeline tracks. Every frame depends on the time alone, modifier phases included, so seeking and scrubbing match playback; the clock can follow an AudioSource. Edit it in *Window > Gaussian Splatting > Timeline*, which previews on the scene without Play mode
 
 ![Unity4DGS in action](Docs/media/demo.gif)
 
@@ -86,7 +87,7 @@ Assets/4DGS/
 │   ├── PostProcess/  # Stylize post-process volume component
 │   ├── Playback/     # 4D sequence player
 │   ├── Mesh/         # Mesh driver (splats on an animated model)
-│   ├── Particles/    # Particle emitter
+│   ├── Particles/    # Particle emitter and emit volumes
 │   ├── Cutout/       # Cutout regions
 │   ├── Capture/      # Stereo 360 capture
 │   ├── Editing/      # Splat selection and editing state

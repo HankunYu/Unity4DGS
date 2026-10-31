@@ -2,29 +2,40 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.Serialization;
 
 namespace GaussianSplatting.Runtime
 {
     // Particles drifting off a splat renderer, the source: the nearest one
     // above this GameObject, so a renderer's emitters sit under it as
     // children, each with its own particle renderer (GaussianHierarchy keeps
-    // the source's volumes and the particles' apart). Each
-    // particle is born at a random splat of the source, as it is drawn right
-    // now, with the color it is drawn in (style included) and the velocity of
-    // that spot of the surface plus a push along its normal, so a moving body
-    // throws particles off. It is then simulated step by step, its velocity
-    // settling into a flow of wind plus curl noise; its color and opacity
-    // follow a curve over the life, it shrinks, and it is born again
-    // elsewhere. The particles are this GameObject's own splats: the emitter
-    // gives its GaussianSplatRenderer a generated asset of `capacity` splats
-    // and drives their pose, size, opacity, color and velocity on the GPU
-    // each frame, so sorting, styles (from a GaussianStyler of its own, e.g.
-    // with Velocity streaks, or the source's), ODS capture and depth of field
+    // the source's volumes and the particles' apart). Each particle is born
+    // at a random splat of the source (within the Birth GaussianEmitVolumes
+    // under the emitter, if any), as it is drawn right now, with the color it
+    // is drawn in (style included). It can ride on that splat for part of
+    // its life (Attach, or until a Release volume reaches it); it then leaves
+    // with the velocity of that spot of the surface plus a push along its
+    // normal, so a moving body throws particles off, and is simulated step by
+    // step, its velocity settling into a flow of wind plus curl noise. Its
+    // color, opacity and size follow curves over the life, and it is born
+    // again elsewhere. The particles are this GameObject's own splats: the
+    // emitter gives its GaussianSplatRenderer a generated asset of `capacity`
+    // splats and drives their pose, size, opacity, color and velocity on the
+    // GPU, so sorting, styles (from a GaussianStyler of its own, e.g. with
+    // Velocity streaks, or the source's), ODS capture and depth of field
     // treat them like any other splats, and the source is untouched.
+    //
+    // The simulation steps on a fixed grid of SimulationStep seconds of the
+    // emitter's clock, so the same clock times give the same particles at
+    // any frame rate. The clock runs by itself, or follows a timeline's
+    // GaussianParticleTrack. Moving it back, or far ahead, restarts the
+    // particles a full life before the new time and simulates up to it
+    // (prewarm), so the effect is already flowing wherever it starts; the
+    // source is taken in its current pose throughout the prewarm.
     //
     // Runs after the source's mesh driver and animator in LateUpdate, and on
     // every render in edit mode.
-    [AddComponentMenu("Gaussian Splatting/Particle Emitter")]
+    [AddComponentMenu("Gaussian Splatting/Particles/Particle Emitter")]
     [ExecuteAlways]
     [DisallowMultipleComponent]
     [DefaultExecutionOrder(100)]
@@ -53,19 +64,35 @@ namespace GaussianSplatting.Runtime
         private static readonly int PropParticleAnim = Shader.PropertyToID("_ParticleAnim");
         private static readonly int PropParticleVelocity = Shader.PropertyToID("_ParticleVelocity");
         private static readonly int PropParticleColorOverLife = Shader.PropertyToID("_ParticleColorOverLife");
+        private static readonly int PropParticleSizeOverLife = Shader.PropertyToID("_ParticleSizeOverLife");
+        private static readonly int PropEmitVolumeCount = Shader.PropertyToID("_EmitVolumeCount");
+        private static readonly int PropEmitVolumeWorldToLocal = Shader.PropertyToID("_EmitVolumeWorldToLocal");
+        private static readonly int PropEmitVolumeParams = Shader.PropertyToID("_EmitVolumeParams");
+        private static readonly int PropEmitFiltered = Shader.PropertyToID("_EmitFiltered");
+        private static readonly int PropEmitCandidates = Shader.PropertyToID("_EmitCandidates");
+        private static readonly int PropEmitBlockCounts = Shader.PropertyToID("_EmitBlockCounts");
+        private static readonly int PropEmitBlockOffsets = Shader.PropertyToID("_EmitBlockOffsets");
+        private static readonly int PropEmitTotal = Shader.PropertyToID("_EmitTotal");
+        private static readonly int PropEmitBlockCount = Shader.PropertyToID("_EmitBlockCount");
+
+        /// <summary>Seconds between simulation steps on the emitter's clock.</summary>
+        public const double SimulationStep = 1.0 / 120.0;
 
         private const int GroupSize = 256;
         // Splat scale of the template's splats; the particle size scales it
         private const float TemplateScale = 0.001f;
         // Longest step the clock takes in edit mode, where renders are irregular
         private const float MaxEditStep = 0.1f;
-        // Shortest step the source velocity is measured over, and the fastest
+        // Shortest time the source velocity is measured over, and the fastest
         // a particle inherits: a pose that jumps (a scrubbed timeline, two
         // renders around one update) must not fling particles away
         private const float MinVelocityStep = 1f / 240f;
         private const float MaxInheritedSpeed = 3f;
-        // Must match COLOR_OVER_LIFE_SAMPLES in GaussianParticles.compute
-        private const int ColorOverLifeSamples = 32;
+        // Must match OVER_LIFE_SAMPLES and MAX_EMIT_VOLUMES in GaussianParticles.compute
+        private const int OverLifeSamples = 32;
+        private const int MaxEmitVolumes = 8;
+        // A life index no life has, so a cleared particle is born on its next step
+        private const float Unborn = -3.0e38f;
 
         private static readonly string[] TimelineChannels = { "Emission", "Opacity", "Turbulence" };
 
@@ -81,11 +108,13 @@ namespace GaussianSplatting.Runtime
         [SerializeField, Min(0.05f)] private float lifetime = 2.5f;
         [Tooltip("Fraction of lives that show; animate it to start and stop the effect")]
         [SerializeField, Range(0f, 1f)] private float emission = 1f;
+        [Tooltip("Fraction of its life a particle rides on the splat it was born on before it leaves; a Release GaussianEmitVolume frees it earlier. 0 leaves at once")]
+        [SerializeField, Range(0f, 1f)] private float attach;
 
-        [Header("Birth")]
-        [Tooltip("Fraction of the velocity of the source surface a particle starts with: a moving body throws particles off and trails them")]
+        [Header("Release")]
+        [Tooltip("Fraction of the velocity of the source surface a particle leaves with: a moving body throws particles off and trails them")]
         [SerializeField, Range(0f, 2f)] private float inheritVelocity = 1f;
-        [Tooltip("World units per second a particle is pushed off along the surface normal (the splat's local +Z, which mesh splats align with the surface)")]
+        [Tooltip("World units per second a particle is pushed off along the surface normal (the splat's local +Z, which mesh splats align with the surface) as it leaves")]
         [SerializeField, Min(0f)] private float normalSpeed = 0.1f;
 
         [Header("Flow")]
@@ -100,16 +129,18 @@ namespace GaussianSplatting.Runtime
         [Tooltip("How fast the swirl pattern drifts and changes")]
         [SerializeField, Min(0f)] private float turbulenceSpeed = 0.3f;
 
-        [Header("Look")]
+        [Header("Size")]
         [Tooltip("Average size of a new particle, as a splat scale (Gaussian sigma) in world units")]
         [SerializeField, Min(0f)] private float size = 0.0015f;
         [Tooltip("0 makes every particle the same size; 1 makes most small and a few up to three times the average")]
         [SerializeField, Range(0f, 1f)] private float sizeVariation = 0.7f;
-        [Tooltip("Size at the end of a life, as a fraction of the starting size")]
-        [SerializeField, Range(0f, 2f)] private float endSize = 0.4f;
+        [Tooltip("Size over a life as a factor of the particle's own size, from birth on the left to death on the right")]
+        [SerializeField] private AnimationCurve sizeOverLife = AnimationCurve.Linear(0f, 1f, 1f, 0.4f);
+
+        [Header("Color")]
         [Tooltip("Multiplies the opacity a particle takes from its source splat")]
         [SerializeField, Range(0f, 4f)] private float opacity = 1f;
-        [Tooltip("Color (above 1 glows with bloom) and opacity over a life, from birth on the left to death on the right")]
+        [Tooltip("Color (above 1 glows with bloom) and opacity over a life, from birth on the left to death on the right. The particle's color is this, times its source color as weighted by Source Tint; its own styler styles the result")]
         [SerializeField, GradientUsage(true)] private Gradient colorOverLife = new()
         {
             colorKeys = new[]
@@ -127,9 +158,10 @@ namespace GaussianSplatting.Runtime
                 new GradientAlphaKey(0f, 1f),
             },
         };
-        [Tooltip("How much the color over life is tinted by the color the splat a particle was born on is drawn in, style included: 0 ignores it, 1 multiplies by it")]
-        [SerializeField, Range(0f, 1f)] private float sourceColor = 1f;
-        [Tooltip("Brightens dark source colors while keeping their hue, so particles off a dark surface still show: 0 takes them as drawn, 1 brings every color up to full brightness")]
+        [Tooltip("How much Color Over Life is tinted by the source color, the color the splat a particle was born on is drawn in (style included): 0 ignores it, 1 multiplies by it")]
+        [FormerlySerializedAs("sourceColor")]
+        [SerializeField, Range(0f, 1f)] private float sourceTint = 1f;
+        [Tooltip("Brightens dark source colors before they tint, keeping their hue, so particles off a dark surface still show: 0 takes them as drawn, 1 brings every color up to full brightness")]
         [SerializeField, Range(0f, 1f)] private float sourceLift;
 
         private GaussianSplatRenderer _renderer;
@@ -137,6 +169,9 @@ namespace GaussianSplatting.Runtime
         private ComputeShader _shader;
         private int _kernel = -1;
         private int _kernelStore = -1;
+        private int _kernelEmitCount = -1;
+        private int _kernelEmitScan = -1;
+        private int _kernelEmitWrite = -1;
         private CommandBuffer _cmd;
 
         private GaussianSplatAsset _template;
@@ -146,20 +181,65 @@ namespace GaussianSplatting.Runtime
         private GraphicsBuffer _base;
         private GraphicsBuffer _anim;
         private GraphicsBuffer _velocity;
-        private readonly Vector4[] _colorOverLifeSamples = new Vector4[ColorOverLifeSamples];
+        private GraphicsBuffer _emitCandidates;
+        private GraphicsBuffer _emitBlockCounts;
+        private GraphicsBuffer _emitBlockOffsets;
+        private GraphicsBuffer _emitTotal;
+        private readonly Vector4[] _colorOverLifeSamples = new Vector4[OverLifeSamples];
+        private readonly Vector4[] _sizeOverLifeSamples = new Vector4[OverLifeSamples / 4];
+        private readonly List<GaussianEmitVolume> _volumes = new();
+        private readonly Matrix4x4[] _volumeWorldToLocal = new Matrix4x4[MaxEmitVolumes];
+        private readonly Vector4[] _volumeParams = new Vector4[MaxEmitVolumes];
 
-        private double _time;
+        // The clock, and the grid step the particles have been simulated to
+        private double _clock;
+        private long _simStep;
+        // Clock time of the source pose kept in _sourcePrev
+        private double _storeTime;
+        private bool _needsRestart = true;
+        private bool _driven;
         private double _lastEditTime = -1.0;
 
         // The renderer the particles are born on: the nearest one above this
         // GameObject (GaussianHierarchy)
         public GaussianSplatRenderer Source => GaussianHierarchy.ParentRenderer(this);
 
-        /// <summary>Seconds on the emitter's clock, which drives every life.</summary>
+        /// <summary>
+        /// Seconds on the emitter's clock, which drives every life. Setting it
+        /// moves the particles there on their next update: stepping forward,
+        /// or restarting with a prewarm when it goes back or far ahead.
+        /// </summary>
         public double Time
         {
-            get => _time;
-            set => _time = Math.Max(0.0, value);
+            get => _clock;
+            set => _clock = value;
+        }
+
+        /// <summary>Whether a timeline sets the clock (see <see cref="Drive"/>).</summary>
+        public bool IsDriven => _driven;
+
+        /// <summary>Particles born per second at the current emission, on average.</summary>
+        public float BirthRate => capacity * emission / lifetime;
+
+        /// <summary>Particles shown at once at the current emission.</summary>
+        public float ShownCount => capacity * emission;
+
+        /// <summary>Seconds simulated before the clock when the particles restart: the longest life, so each one is mid-flow.</summary>
+        public double PrewarmTime => lifetime * 1.25 + SimulationStep;
+
+        /// <summary>
+        /// Sets the clock and stops it running by itself, for a timeline that
+        /// drives the emitter; <see cref="StopDriving"/> lets it run on.
+        /// </summary>
+        public void Drive(double time)
+        {
+            _driven = true;
+            _clock = time;
+        }
+
+        public void StopDriving()
+        {
+            _driven = false;
         }
 
         private void OnEnable()
@@ -170,8 +250,11 @@ namespace GaussianSplatting.Runtime
             {
                 _kernel = _shader.FindKernel("CSUpdateParticles");
                 _kernelStore = _shader.FindKernel("CSStoreSource");
+                _kernelEmitCount = _shader.FindKernel("CSEmitCount");
+                _kernelEmitScan = _shader.FindKernel("CSEmitScan");
+                _kernelEmitWrite = _shader.FindKernel("CSEmitWrite");
             }
-            _time = 0.0;
+            _needsRestart = true;
             _lastEditTime = -1.0;
             RenderPipelineManager.beginContextRendering += OnBeginContextRendering;
         }
@@ -185,13 +268,19 @@ namespace GaussianSplatting.Runtime
         private void OnValidate()
         {
             capacity = Mathf.Max(1, capacity);
+            // A driven clock may stand still (a paused timeline): restart so
+            // the change shows. A free clock shows it as new lives come in.
+            if (_driven)
+                _needsRestart = true;
         }
 
         private void LateUpdate()
         {
             if (!Application.isPlaying)
                 return;
-            Step(UnityEngine.Time.deltaTime);
+            if (!_driven)
+                _clock += UnityEngine.Time.deltaTime;
+            Simulate();
         }
 
         private void OnBeginContextRendering(ScriptableRenderContext context, List<Camera> cameras)
@@ -199,18 +288,16 @@ namespace GaussianSplatting.Runtime
             if (Application.isPlaying)
                 return;
             double now = UnityEngine.Time.realtimeSinceStartupAsDouble;
-            float deltaTime = _lastEditTime >= 0.0 ? (float)Math.Min(now - _lastEditTime, MaxEditStep) : 0f;
+            if (!_driven && _lastEditTime >= 0.0)
+                _clock += Math.Min(now - _lastEditTime, MaxEditStep);
             _lastEditTime = now;
-            Step(deltaTime);
+            Simulate();
         }
 
-        // Advances the clock and simulates the particles over that time.
-        // Runs on its own (see above); call it after changing the source at
-        // another point, with 0 to only pick up the source's new pose.
-        public void Step(float deltaTime)
+        // Simulates the particles up to the clock. Runs on its own (see
+        // above); call it after posing the source at another point.
+        public void Simulate()
         {
-            deltaTime = Mathf.Max(0f, deltaTime);
-            _time += deltaTime;
             _source = Source;
             // Without the particle buffers the template would draw as is:
             // hand the renderer back empty instead
@@ -222,17 +309,68 @@ namespace GaussianSplatting.Runtime
             EnsureResources();
             _renderer.StylerOverride = followSourceStyle ? _source.Styler : null;
 
+            long targetStep = (long)Math.Floor(_clock / SimulationStep + 1e-6);
+            bool restart = _needsRestart || targetStep < _simStep || (targetStep - _simStep) * SimulationStep > PrewarmTime;
+            if (restart)
+                Restart();
+            int steps = (int)(targetStep - _simStep);
+
+            // Births and attached particles measure the source's velocity
+            // against its pose at the last store; a restart has none
+            float velocityScale = restart ? 0f : inheritVelocity / Mathf.Max((float)(_clock - _storeTime), MinVelocityStep);
+
+            _cmd.Clear();
+            SetSourceParams(velocityScale);
+            SetEmitVolumes(out bool filtered);
+            if (filtered)
+                BuildCandidates();
+            for (int i = 1; i <= steps; i++)
+            {
+                _cmd.SetComputeFloatParam(_shader, PropParticleTime, (float)((_simStep + i) * SimulationStep));
+                _cmd.DispatchCompute(_shader, _kernel, (capacity + GroupSize - 1) / GroupSize, 1, 1);
+            }
+            if (steps > 0 || restart)
+            {
+                _source.SetAssetDataOnCS(_cmd, _shader, _kernelStore);
+                _cmd.SetComputeBufferParam(_shader, _kernelStore, PropSourcePrev, _sourcePrev);
+                _cmd.DispatchCompute(_shader, _kernelStore, (_sourcePrev.count + GroupSize - 1) / GroupSize, 1, 1);
+                _storeTime = _clock;
+            }
+            Graphics.ExecuteCommandBuffer(_cmd);
+            _simStep = targetStep;
+
+            _renderer.SetDeformedBase(_base, null);
+            _renderer.SetAnimationOutput(_anim, null);
+            // A bound on the particle speed, for how far velocity streaks reach
+            _renderer.SetVelocity(_velocity, MaxInheritedSpeed + normalSpeed + wind.magnitude + turbulence * 2f);
+        }
+
+        // Clears every particle and the source's previous pose, and starts
+        // the simulation a prewarm before the clock
+        private void Restart()
+        {
+            var unborn = new Vector4[capacity * 3];
+            for (int i = 0; i < capacity; i++)
+                unborn[i * 3] = new Vector4(0f, 0f, 0f, Unborn);
+            _state.SetData(unborn);
+            _sourcePrev.SetData(new Vector4[_sourcePrev.count]);
+            _simStep = (long)Math.Floor((_clock - PrewarmTime) / SimulationStep);
+            _storeTime = _clock;
+            _needsRestart = false;
+        }
+
+        private void SetSourceParams(float velocityScale)
+        {
             Transform t = transform;
             Vector3 scale = t.lossyScale;
             float objectScale = 1f / TemplateScale / Mathf.Max(Mathf.Max(Mathf.Abs(scale.x), Mathf.Abs(scale.y)), Mathf.Max(Mathf.Abs(scale.z), 1e-6f));
 
-            // Births measure the source's velocity against its pose at the
-            // previous step
-            float velocityScale = inheritVelocity / Mathf.Max(deltaTime, MinVelocityStep);
-            for (int i = 0; i < ColorOverLifeSamples; i++)
+            for (int i = 0; i < OverLifeSamples; i++)
             {
-                Color c = colorOverLife.Evaluate(i / (ColorOverLifeSamples - 1f));
+                float age = i / (OverLifeSamples - 1f);
+                Color c = colorOverLife.Evaluate(age);
                 _colorOverLifeSamples[i] = new Vector4(c.r, c.g, c.b, c.a);
+                _sizeOverLifeSamples[i / 4][i % 4] = sizeOverLife != null ? sizeOverLife.Evaluate(age) : 1f;
             }
 
             // The source's view-dependent style terms (rim, depth ramp) are
@@ -240,7 +378,6 @@ namespace GaussianSplatting.Runtime
             Camera cam = Camera.main;
             Vector3 cameraPos = cam != null ? cam.transform.position : _source.transform.position;
 
-            _cmd.Clear();
             // A hidden source is not drawn, so nothing else refreshes its style
             _source.RefreshStyle();
             _source.SetAssetDataOnCS(_cmd, _shader, _kernel);
@@ -250,16 +387,16 @@ namespace GaussianSplatting.Runtime
             _cmd.SetComputeVectorParam(_shader, PropCameraPos, cameraPos);
             _cmd.SetComputeIntParam(_shader, PropParticleCount, capacity);
             _cmd.SetComputeIntParam(_shader, PropParticleSeed, seed);
-            _cmd.SetComputeFloatParam(_shader, PropParticleTime, (float)_time);
-            _cmd.SetComputeFloatParam(_shader, PropParticleDeltaTime, deltaTime);
+            _cmd.SetComputeFloatParam(_shader, PropParticleDeltaTime, (float)SimulationStep);
             _cmd.SetComputeFloatParam(_shader, PropParticleLifetime, lifetime);
             _cmd.SetComputeFloatParam(_shader, PropParticleEmission, emission);
-            _cmd.SetComputeVectorParam(_shader, PropParticleBirth, new Vector4(velocityScale, normalSpeed, MaxInheritedSpeed, 0f));
+            _cmd.SetComputeVectorParam(_shader, PropParticleBirth, new Vector4(velocityScale, normalSpeed, MaxInheritedSpeed, attach));
             _cmd.SetComputeVectorParam(_shader, PropParticleWind, wind);
             _cmd.SetComputeVectorParam(_shader, PropParticleFlow, new Vector4(drag, turbulence, turbulenceFrequency, turbulenceSpeed));
-            _cmd.SetComputeVectorParam(_shader, PropParticleShape, new Vector4(size, endSize, sizeVariation, 0f));
-            _cmd.SetComputeVectorParam(_shader, PropParticleLook, new Vector4(opacity, sourceColor, sourceLift, 0f));
+            _cmd.SetComputeVectorParam(_shader, PropParticleShape, new Vector4(size, 0f, sizeVariation, 0f));
+            _cmd.SetComputeVectorParam(_shader, PropParticleLook, new Vector4(opacity, sourceTint, sourceLift, 0f));
             _cmd.SetComputeVectorArrayParam(_shader, PropParticleColorOverLife, _colorOverLifeSamples);
+            _cmd.SetComputeVectorArrayParam(_shader, PropParticleSizeOverLife, _sizeOverLifeSamples);
             _cmd.SetComputeMatrixParam(_shader, PropParticleWorldToObject, t.worldToLocalMatrix);
             _cmd.SetComputeFloatParam(_shader, PropParticleObjectScale, objectScale);
             _cmd.SetComputeBufferParam(_shader, _kernel, PropSourcePrev, _sourcePrev);
@@ -267,22 +404,56 @@ namespace GaussianSplatting.Runtime
             _cmd.SetComputeBufferParam(_shader, _kernel, PropParticleBase, _base);
             _cmd.SetComputeBufferParam(_shader, _kernel, PropParticleAnim, _anim);
             _cmd.SetComputeBufferParam(_shader, _kernel, PropParticleVelocity, _velocity);
-            _cmd.DispatchCompute(_shader, _kernel, (capacity + GroupSize - 1) / GroupSize, 1, 1);
+            _cmd.SetComputeBufferParam(_shader, _kernel, PropEmitCandidates, _emitCandidates);
+            _cmd.SetComputeBufferParam(_shader, _kernel, PropEmitTotal, _emitTotal);
+        }
 
-            _source.SetAssetDataOnCS(_cmd, _shader, _kernelStore);
-            _cmd.SetComputeBufferParam(_shader, _kernelStore, PropSourcePrev, _sourcePrev);
-            _cmd.DispatchCompute(_shader, _kernelStore, (_sourcePrev.count + GroupSize - 1) / GroupSize, 1, 1);
-            Graphics.ExecuteCommandBuffer(_cmd);
+        // Loads the active emit volumes under the emitter, as many as the
+        // shader takes; filtered is set when birth volumes limit the births
+        private void SetEmitVolumes(out bool filtered)
+        {
+            GaussianHierarchy.GetOwnedComponents(this, _volumes);
+            int count = 0;
+            filtered = false;
+            foreach (GaussianEmitVolume volume in _volumes)
+            {
+                if (count == MaxEmitVolumes)
+                    break;
+                if (!volume.isActiveAndEnabled)
+                    continue;
+                _volumeWorldToLocal[count] = volume.transform.worldToLocalMatrix;
+                _volumeParams[count] = new Vector4((float)volume.shape, volume.falloff, volume.weight, (float)volume.role);
+                filtered |= volume.role == GaussianEmitVolumeRole.Birth;
+                count++;
+            }
+            _cmd.SetComputeIntParam(_shader, PropEmitVolumeCount, count);
+            _cmd.SetComputeMatrixArrayParam(_shader, PropEmitVolumeWorldToLocal, _volumeWorldToLocal);
+            _cmd.SetComputeVectorArrayParam(_shader, PropEmitVolumeParams, _volumeParams);
+            _cmd.SetComputeIntParam(_shader, PropEmitFiltered, filtered ? 1 : 0);
+        }
 
-            _renderer.SetDeformedBase(_base, null);
-            _renderer.SetAnimationOutput(_anim, null);
-            // A bound on the particle speed, for how far velocity streaks reach
-            _renderer.SetVelocity(_velocity, MaxInheritedSpeed + normalSpeed + wind.magnitude + turbulence * 2f);
+        // Lists the source splats the birth volumes reach, in source order
+        private void BuildCandidates()
+        {
+            int blocks = _emitBlockCounts.count;
+            _cmd.SetComputeIntParam(_shader, PropEmitBlockCount, blocks);
+            _source.SetAssetDataOnCS(_cmd, _shader, _kernelEmitCount);
+            _cmd.SetComputeBufferParam(_shader, _kernelEmitCount, PropEmitBlockCounts, _emitBlockCounts);
+            _cmd.DispatchCompute(_shader, _kernelEmitCount, blocks, 1, 1);
+            _cmd.SetComputeBufferParam(_shader, _kernelEmitScan, PropEmitBlockCounts, _emitBlockCounts);
+            _cmd.SetComputeBufferParam(_shader, _kernelEmitScan, PropEmitBlockOffsets, _emitBlockOffsets);
+            _cmd.SetComputeBufferParam(_shader, _kernelEmitScan, PropEmitTotal, _emitTotal);
+            _cmd.DispatchCompute(_shader, _kernelEmitScan, 1, 1, 1);
+            _source.SetAssetDataOnCS(_cmd, _shader, _kernelEmitWrite);
+            _cmd.SetComputeBufferParam(_shader, _kernelEmitWrite, PropEmitBlockOffsets, _emitBlockOffsets);
+            _cmd.SetComputeBufferParam(_shader, _kernelEmitWrite, PropEmitCandidates, _emitCandidates);
+            _cmd.DispatchCompute(_shader, _kernelEmitWrite, blocks, 1, 1);
         }
 
         private bool CanEmit()
         {
-            if (_shader == null || _kernel < 0 || _kernelStore < 0 || _renderer == null || _source == null)
+            if (_shader == null || _kernel < 0 || _kernelStore < 0 || _kernelEmitCount < 0 || _kernelEmitScan < 0 ||
+                _kernelEmitWrite < 0 || _renderer == null || _source == null)
                 return false;
             return _source.isActiveAndEnabled && _source.HasValidAsset && _source.HasValidRenderSetup;
         }
@@ -300,14 +471,18 @@ namespace GaussianSplatting.Runtime
         private void EnsureResources()
         {
             EnsureParticles();
-            // The previous source pose starts unwritten (w = 0), so the first
-            // births after a change inherit no velocity
             int sourceCount = Mathf.Max(1, _source.EffectiveSplatCount);
             if (_sourcePrev == null || _sourcePrev.count != sourceCount)
             {
-                _sourcePrev?.Dispose();
+                ReleaseSourceBuffers();
                 _sourcePrev = new GraphicsBuffer(GraphicsBuffer.Target.Structured, sourceCount, 16) { name = "GaussianParticleSourcePrev" };
-                _sourcePrev.SetData(new Vector4[sourceCount]);
+                _emitCandidates = new GraphicsBuffer(GraphicsBuffer.Target.Structured, sourceCount, 8) { name = "GaussianParticleEmitCandidates" };
+                int blocks = (sourceCount + GroupSize - 1) / GroupSize;
+                _emitBlockCounts = new GraphicsBuffer(GraphicsBuffer.Target.Structured, blocks, 4) { name = "GaussianParticleEmitBlockCounts" };
+                _emitBlockOffsets = new GraphicsBuffer(GraphicsBuffer.Target.Structured, blocks, 4) { name = "GaussianParticleEmitBlockOffsets" };
+                _emitTotal = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, 4) { name = "GaussianParticleEmitTotal" };
+                _emitTotal.SetData(new uint[1]);
+                _needsRestart = true;
             }
         }
 
@@ -324,14 +499,24 @@ namespace GaussianSplatting.Runtime
             _renderer.nextAsset = _template;
 
             _state = new GraphicsBuffer(GraphicsBuffer.Target.Structured, capacity * 3, 16) { name = "GaussianParticleState" };
-            // Life index -1 matches no life, so every particle is born on the first update
-            var unborn = new Vector4[capacity * 3];
-            for (int i = 0; i < capacity; i++)
-                unborn[i * 3] = new Vector4(0f, 0f, 0f, -1f);
-            _state.SetData(unborn);
             _base = new GraphicsBuffer(GraphicsBuffer.Target.Structured, capacity * 2, 16) { name = "GaussianParticleBase" };
             _anim = new GraphicsBuffer(GraphicsBuffer.Target.Structured, capacity * 3, 16) { name = "GaussianParticleAnim" };
             _velocity = new GraphicsBuffer(GraphicsBuffer.Target.Structured, capacity, 16) { name = "GaussianParticleVelocity" };
+            _needsRestart = true;
+        }
+
+        private void ReleaseSourceBuffers()
+        {
+            _sourcePrev?.Dispose();
+            _sourcePrev = null;
+            _emitCandidates?.Dispose();
+            _emitCandidates = null;
+            _emitBlockCounts?.Dispose();
+            _emitBlockCounts = null;
+            _emitBlockOffsets?.Dispose();
+            _emitBlockOffsets = null;
+            _emitTotal?.Dispose();
+            _emitTotal = null;
         }
 
         private void ReleaseResources()
@@ -339,8 +524,7 @@ namespace GaussianSplatting.Runtime
             Stop();
             _state?.Dispose();
             _state = null;
-            _sourcePrev?.Dispose();
-            _sourcePrev = null;
+            ReleaseSourceBuffers();
             _base?.Dispose();
             _base = null;
             _anim?.Dispose();
@@ -359,6 +543,7 @@ namespace GaussianSplatting.Runtime
             _templateData.Clear();
             _cmd?.Release();
             _cmd = null;
+            _needsRestart = true;
         }
 
         private static void DestroyGenerated(UnityEngine.Object obj)
