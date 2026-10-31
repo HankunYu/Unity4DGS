@@ -27,7 +27,7 @@ Based on [aras-p/UnityGaussianSplatting](https://github.com/aras-p/UnityGaussian
 - **GaussianModifierStateMachine** — state machine with parameter capture and blended transitions between modifier states
 - **GaussianMorph** — GPU morph transition between two splat assets
 - **GaussianCutout** — box/ellipsoid cutout regions
-- **GaussianStylizeVolume** — stylization post-processing (stereo aware)
+- **GaussianStylizePostProcess** — stylization post-processing (stereo aware)
 - **GaussianStyler + GaussianStyleVolume + GaussianSplatStyle** — per-splat stylized looks (color ramps, rim light, dots, streaks, slices and grids, glints) blended in by weight. Like the animator and its volumes, a styler on the renderer takes the style volumes under it, each applying its own style in its region (Unbounded for the whole object, or e.g. the space around the camera); the strongest volume decides where they overlap, so one object can wear several styles. Fading volume weights on the timeline switches and fades styles
 - **GaussianDepthOfField** — thin-lens depth of field on the camera, applied per splat: no depth buffer needed, works in Direct mode and 360 (ODS) capture
 - **GaussianTimeline + GaussianTimelinePlayer** — a built-in timeline (no Unity Timeline package): clips with ease in/out and crossfades on channel (modifier, volume, styler, depth-of-field parameters), modifier-state, transform, activation, 4D sequence, audio, marker and nested sub-timeline tracks. Every frame depends on the time alone, modifier phases included, so seeking and scrubbing match playback; the clock can follow an AudioSource. Edit it in *Window > Gaussian Splatting > Timeline*, which previews on the scene without Play mode

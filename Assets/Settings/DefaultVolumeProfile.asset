@@ -789,8 +789,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 8b59f59992834d95a0905a8af81bc53e, type: 3}
-  m_Name: GaussianStylizeVolume
-  m_EditorClassIdentifier: GaussianSplatting::GaussianSplatting.Runtime.GaussianStylizeVolume
+  m_Name: GaussianStylizePostProcess
+  m_EditorClassIdentifier: GaussianSplatting::GaussianSplatting.Runtime.GaussianStylizePostProcess
   active: 1
   enable:
     m_OverrideState: 1

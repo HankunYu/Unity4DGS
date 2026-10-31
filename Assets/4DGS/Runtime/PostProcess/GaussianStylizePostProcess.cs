@@ -6,7 +6,7 @@ using UnityEngine.Rendering;
 namespace GaussianSplatting.Runtime
 {
     [VolumeComponentMenu("Gaussian Splatting/Stylize")]
-    public sealed class GaussianStylizeVolume : VolumeComponent
+    public sealed class GaussianStylizePostProcess : VolumeComponent
     {
         public BoolParameter enable = new(false);
 

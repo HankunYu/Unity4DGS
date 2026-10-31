@@ -537,7 +537,7 @@ namespace GaussianSplatting.Runtime
             if (volumeStack == null)
                 return false;
 
-            GaussianStylizeVolume stylizeVolume = volumeStack.GetComponent<GaussianStylizeVolume>();
+            GaussianStylizePostProcess stylizeVolume = volumeStack.GetComponent<GaussianStylizePostProcess>();
             if (stylizeVolume == null || !stylizeVolume.IsActive())
                 return false;
 
