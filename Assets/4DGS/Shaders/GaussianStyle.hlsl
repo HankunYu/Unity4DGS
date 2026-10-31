@@ -104,7 +104,7 @@ float StyleRim(float rimPower, float4 rot, float3 scale, float3 centerWorldPos)
     float3 worldNormal = normalize(mul(objNormal, (float3x3)_MatrixWorldToObject));
     float facing = abs(dot(worldNormal, normalize(_VecWorldSpaceCameraPos.xyz - centerWorldPos)));
     float flatness = 1.0 - minScale / max(midScale, 1e-8);
-    return pow(1.0 - facing, rimPower) * flatness;
+    return pow(saturate(1.0 - facing), rimPower) * flatness;
 }
 
 // The style of a splat at this position: its strongest volume's, scaled by

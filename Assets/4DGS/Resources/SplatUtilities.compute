@@ -562,25 +562,29 @@ SplatSharedData CalcSharedSplatData(
 
     float finalOpacity = splat.opacity * opacityScale * animOpacityMul
                        * BackfaceVisibility(splat.rot, centerWorldPos);
-    if (finalOpacity * StyleBrightnessBound(style) < SPLAT_CULL_ALPHA) { ssd.skip = true; return ssd; }
-    if (ssd.skip) return ssd;
+    // One return at the end: fxc reports early returns of a struct as
+    // potentially uninitialized
+    if (finalOpacity * StyleBrightnessBound(style) < SPLAT_CULL_ALPHA)
+        ssd.skip = true;
+    if (!ssd.skip)
+    {
+        float3x3 splatRotScaleMat = CalcMatrixFromRotationScale(splat.rot, splat.scale * animScaleMul);
+        CalcCovariance3D(splatRotScaleMat, ssd.cov3d0, ssd.cov3d1);
+        float splatScale2 = splatScale * splatScale;
+        ssd.cov3d0 *= splatScale2;
+        ssd.cov3d1 *= splatScale2;
+        ssd.maxScale = max(max(abs(splat.scale.x), abs(splat.scale.y)), abs(splat.scale.z))
+                     * splatScale * animScaleMul;
 
-    float3x3 splatRotScaleMat = CalcMatrixFromRotationScale(splat.rot, splat.scale * animScaleMul);
-    CalcCovariance3D(splatRotScaleMat, ssd.cov3d0, ssd.cov3d1);
-    float splatScale2 = splatScale * splatScale;
-    ssd.cov3d0 *= splatScale2;
-    ssd.cov3d1 *= splatScale2;
-    ssd.maxScale = max(max(abs(splat.scale.x), abs(splat.scale.y)), abs(splat.scale.z))
-                 * splatScale * animScaleMul;
+        float3 worldViewDir = _VecWorldSpaceCameraPos.xyz - centerWorldPos;
+        float3 objViewDir = normalize(mul((float3x3)_MatrixWorldToObject, worldViewDir));
 
-    float3 worldViewDir = _VecWorldSpaceCameraPos.xyz - centerWorldPos;
-    float3 objViewDir = normalize(mul((float3x3)_MatrixWorldToObject, worldViewDir));
-
-    ssd.color.rgb = ShadeSH(splat.sh, objViewDir, _SHOrder, _SHOnly != 0);
-    if (animColorBlend > 0)
-        ssd.color.rgb = lerp(ssd.color.rgb, (half3)animColorTint, (half)animColorBlend);
-    ssd.color.rgb = ApplyStyle(ssd.color.rgb, style, splat, centerWorldPos, idx);
-    ssd.color.a = min(finalOpacity, 65000);
+        ssd.color.rgb = ShadeSH(splat.sh, objViewDir, _SHOrder, _SHOnly != 0);
+        if (animColorBlend > 0)
+            ssd.color.rgb = lerp(ssd.color.rgb, (half3)animColorTint, (half)animColorBlend);
+        ssd.color.rgb = ApplyStyle(ssd.color.rgb, style, splat, centerWorldPos, idx);
+        ssd.color.a = min(finalOpacity, 65000);
+    }
 
     return ssd;
 }
