@@ -1,0 +1,3 @@
+[submodule "Packages/com.hankun.tide"]
+	path = Packages/com.hankun.tide
+	url = https://github.com/HankunYu/Tide.git
