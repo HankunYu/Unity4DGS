@@ -922,10 +922,26 @@ namespace GaussianSplatting.Runtime
         // entries per splat. Sorting and view-data code must agree on this.
         internal static bool IsStereoCapture(Camera cam)
         {
+            if (GaussianSplatRenderSystem.instance.StereoOverride.HasValue)
+                return true;
             return XRSettings.enabled && cam.stereoEnabled &&
                    (XRSettings.stereoRenderingMode == XRSettings.StereoRenderingMode.SinglePassInstanced ||
                     XRSettings.stereoRenderingMode == XRSettings.StereoRenderingMode.SinglePassMultiview) &&
                    !Application.isEditor;
+        }
+
+        // An eye's view matrix: the stereo override's, else the XR camera's.
+        private static Matrix4x4 StereoViewMatrix(Camera cam, Camera.StereoscopicEye eye)
+        {
+            var stereoOverride = GaussianSplatRenderSystem.instance.StereoOverride;
+            return stereoOverride?.View(eye) ?? cam.GetStereoViewMatrix(eye);
+        }
+
+        // An eye's GPU projection, flipped for rendering into a texture.
+        private static Matrix4x4 StereoGpuProjection(Camera cam, Camera.StereoscopicEye eye)
+        {
+            var stereoOverride = GaussianSplatRenderSystem.instance.StereoOverride;
+            return GL.GetGPUProjectionMatrix(stereoOverride?.Proj(eye) ?? cam.GetStereoProjectionMatrix(eye), true);
         }
 
         internal bool CalcViewData(CommandBuffer cmb, Camera cam)
@@ -947,6 +963,8 @@ namespace GaussianSplatting.Runtime
             Vector4 screenPar = new Vector4(eyeW != 0 ? eyeW : screenW, eyeH != 0 ? eyeH : screenH, 0, 0);
             if (matrixOverride is { ScreenSize: { x: > 0, y: > 0 } overrideSize })
                 screenPar = new Vector4(overrideSize.x, overrideSize.y, 0, 0);
+            if (GaussianSplatRenderSystem.instance.StereoOverride is { EyeSize: { x: > 0, y: > 0 } eyeSize })
+                screenPar = new Vector4(eyeSize.x, eyeSize.y, 0, 0);
             Vector4 camPos = cam.transform.position;
 
             if (!SetAssetDataOnCS(cmb, KernelIndices.CalcViewData, out int kernelIndex))
@@ -1036,12 +1054,10 @@ namespace GaussianSplatting.Runtime
 
                 if (TryFindSupportedKernel("CSCalcViewDataStereo", out int stereoKernel))
                 {
-                    Matrix4x4 leftView = cam.GetStereoViewMatrix(Camera.StereoscopicEye.Left);
-                    Matrix4x4 rightView = cam.GetStereoViewMatrix(Camera.StereoscopicEye.Right);
-                    Matrix4x4 leftGpu = GL.GetGPUProjectionMatrix(
-                        cam.GetStereoProjectionMatrix(Camera.StereoscopicEye.Left), true);
-                    Matrix4x4 rightGpu = GL.GetGPUProjectionMatrix(
-                        cam.GetStereoProjectionMatrix(Camera.StereoscopicEye.Right), true);
+                    Matrix4x4 leftView = StereoViewMatrix(cam, Camera.StereoscopicEye.Left);
+                    Matrix4x4 rightView = StereoViewMatrix(cam, Camera.StereoscopicEye.Right);
+                    Matrix4x4 leftGpu = StereoGpuProjection(cam, Camera.StereoscopicEye.Left);
+                    Matrix4x4 rightGpu = StereoGpuProjection(cam, Camera.StereoscopicEye.Right);
 
                     eyeVP = new[] { leftGpu * leftView, rightGpu * rightView };
                     cmb.SetComputeMatrixArrayParam(csSplatUtilities, Props.MatrixVPEye, eyeVP);
@@ -1064,9 +1080,8 @@ namespace GaussianSplatting.Runtime
                         var stereoEye = eye == 0
                             ? Camera.StereoscopicEye.Left
                             : Camera.StereoscopicEye.Right;
-                        Matrix4x4 stereoView = cam.GetStereoViewMatrix(stereoEye);
-                        Matrix4x4 stereoGpuProj = GL.GetGPUProjectionMatrix(
-                            cam.GetStereoProjectionMatrix(stereoEye), true);
+                        Matrix4x4 stereoView = StereoViewMatrix(cam, stereoEye);
+                        Matrix4x4 stereoGpuProj = StereoGpuProjection(cam, stereoEye);
 
                         eyeVP ??= new Matrix4x4[2];
                         eyeVP[eye] = stereoGpuProj * stereoView;

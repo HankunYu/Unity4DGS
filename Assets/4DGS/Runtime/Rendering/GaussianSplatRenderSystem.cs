@@ -373,6 +373,28 @@ namespace GaussianSplatting.Runtime
 
         public RenderMatrixOverride? MatrixOverride { get; set; }
 
+        // Per-eye matrices for a stereo render outside XR, such as a benchmark
+        // of the headset path on a desktop GPU. While set, renders take the
+        // stereo path with these eyes; the camera's own transform stays the
+        // head pose that sorting reads. Null = stereo only on an XR device,
+        // with the eyes read from the camera.
+        public struct StereoEyeMatrices
+        {
+            public Matrix4x4 LeftView;
+            public Matrix4x4 RightView;
+            public Matrix4x4 LeftProj;
+            public Matrix4x4 RightProj;
+            public Vector2Int EyeSize;
+
+            public Matrix4x4 View(Camera.StereoscopicEye eye) =>
+                eye == Camera.StereoscopicEye.Left ? LeftView : RightView;
+
+            public Matrix4x4 Proj(Camera.StereoscopicEye eye) =>
+                eye == Camera.StereoscopicEye.Left ? LeftProj : RightProj;
+        }
+
+        public StereoEyeMatrices? StereoOverride { get; set; }
+
         // ── Composite mode ────────────────────────────────────────────
         // Set by the render feature for the render in flight: draw straight
         // into the camera target (pass 1, back-to-front) instead of the
@@ -783,7 +805,7 @@ namespace GaussianSplatting.Runtime
         private bool CanUseGlobalSortPath()
         {
             // Global sort copies view data linearly; incompatible with stereo doubled layout
-            if (XRSettings.enabled && !Application.isEditor)
+            if (StereoOverride.HasValue || (XRSettings.enabled && !Application.isEditor))
                 return false;
 
             if (_config.renderMode is not (GaussianSplatRenderMode.Splats or GaussianSplatRenderMode.PointCloud))
