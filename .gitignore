@@ -59,6 +59,8 @@ AGENTS.md
 # Local debugging tools (not part of the project)
 /Assets/Editor/
 /Assets/Editor.meta
+/Assets/Tests/
+/Assets/Tests.meta
 /Docs/console_log.txt
 
 # Local splat test data and other project content (not distributed with the repo)
