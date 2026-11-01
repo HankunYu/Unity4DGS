@@ -94,7 +94,7 @@ v2fStylized StylizedVert (uint vtxID, uint instID)
 	}
 	else
 	{
-		SplatViewData view = _SplatViewData[_IsStereo ? splatIdx * 2 + _EyeIndex : splatIdx];
+		SplatViewData view = _SplatViewData[SplatViewIndex(instID)];
 		if (view.pos.w <= 0)
 		{
 			o.vertex = asfloat(0x7fc00000); // NaN discards the primitive

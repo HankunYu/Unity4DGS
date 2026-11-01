@@ -145,6 +145,16 @@ namespace GaussianSplatting.Runtime
         private GraphicsBuffer _gpuSortKeys;
         private GraphicsBuffer _gpuVisibleCounter;
         private GraphicsBuffer _gpuIndirectArgs;
+        // The per-object draw list (see PrepareView): a bit per splat that may
+        // be visible, the compacted list and its per-tile sums, and the
+        // view-data pass's thread groups over it
+        private GraphicsBuffer _gpuVisibleBits;
+        private GraphicsBuffer _gpuDrawOrder;
+        private GraphicsBuffer _gpuCompactTileSums;
+        private GraphicsBuffer _gpuViewDispatchArgs;
+        // Whether this frame's draw list is _gpuDrawOrder (compacted) rather
+        // than the front of the sorted order
+        private bool _drawOrderCompacted;
         // Nearest depth per screen cell for occlusion culling; grows to the
         // largest camera that has rendered this splat
         private GraphicsBuffer _gpuOcclusionGrid;
@@ -306,6 +316,15 @@ namespace GaussianSplatting.Runtime
             public static readonly int VisibleCounter = Shader.PropertyToID("_VisibleCounter");
             public static readonly int IndirectArgs = Shader.PropertyToID("_IndirectArgs");
             public static readonly int IndirectIndexCount = Shader.PropertyToID("_IndirectIndexCount");
+            public static readonly int ViewInDrawOrder = Shader.PropertyToID("_ViewInDrawOrder");
+            public static readonly int ViewOrder = Shader.PropertyToID("_ViewOrder");
+            public static readonly int MatrixSortMV = Shader.PropertyToID("_MatrixSortMV");
+            public static readonly int CullWriteKeys = Shader.PropertyToID("_CullWriteKeys");
+            public static readonly int SplatVisibleBits = Shader.PropertyToID("_SplatVisibleBits");
+            public static readonly int DrawOrder = Shader.PropertyToID("_DrawOrder");
+            public static readonly int CompactTileSums = Shader.PropertyToID("_CompactTileSums");
+            public static readonly int CompactTileCount = Shader.PropertyToID("_CompactTileCount");
+            public static readonly int ViewDispatchArgs = Shader.PropertyToID("_ViewDispatchArgs");
             public static readonly int ViewProjMatrixLeft = Shader.PropertyToID("_ViewProjMatrixLeft");
             public static readonly int ViewProjMatrixRight = Shader.PropertyToID("_ViewProjMatrixRight");
             public static readonly int StereoEyeIndex = Shader.PropertyToID("_StereoEyeIndex");
@@ -335,6 +354,8 @@ namespace GaussianSplatting.Runtime
         internal bool GpuChunksValid => _gpuChunksValid;
         internal GraphicsBuffer GpuSortKeys => _gpuSortKeys;
         internal GraphicsBuffer GpuIndirectArgs => _gpuIndirectArgs;
+        // The per-object draw's order buffer: draw slot to splat
+        internal GraphicsBuffer GpuDrawOrder => _drawOrderCompacted ? _gpuDrawOrder : _gpuSortKeys;
         internal bool IndirectDrawReady => _gpuIndirectArgs != null && _gpuIndirectArgs.IsValid();
         internal GraphicsBuffer GpuIndexBuffer => _gpuIndexBuffer;
         internal GraphicsBuffer GpuView => _gpuView;
@@ -445,7 +466,11 @@ namespace GaussianSplatting.Runtime
         internal enum KernelIndices
         {
             SetIndices,
-            CalcDistances,
+            CullSplats,
+            CompactCount,
+            CompactScan,
+            CompactScatter,
+            WriteDrawArgs,
             CalcViewData,
             UpdateEditData,
             InitEditData,
@@ -469,7 +494,11 @@ namespace GaussianSplatting.Runtime
         internal static readonly string[] KernelNames =
         {
             "CSSetIndices",
-            "CSCalcDistances",
+            "CSCullSplats",
+            "CSCompactCount",
+            "CSCompactScan",
+            "CSCompactScatter",
+            "CSWriteDrawArgs",
             "CSCalcViewData",
             "CSUpdateEditData",
             "CSInitEditData",
@@ -491,6 +520,14 @@ namespace GaussianSplatting.Runtime
         };
 
         const string CopyViewDataAndDistancesKernelName = "CSCopyViewDataAndDistances";
+        const string CalcViewDataStereoKernelName = "CSCalcViewDataStereo";
+
+        // SplatUtilities.compute: threads per group (GROUP_SIZE), and sorted
+        // entries per compaction tile (COMPACT_TILE)
+        private const int UtilitiesGroupSize = 256;
+        private const int CompactTile = UtilitiesGroupSize * 4;
+
+        private static int CompactTileCount(int count) => Math.Max(1, (count + CompactTile - 1) / CompactTile);
 
         public bool HasValidAsset =>
             splatAsset != null &&
@@ -681,6 +718,7 @@ namespace GaussianSplatting.Runtime
 
             bool fits = _gpuSortDistances != null && _gpuSortDistances.count >= count &&
                         _gpuSortKeys != null && _gpuVisibleCounter != null && _gpuIndirectArgs != null &&
+                        _gpuDrawOrder != null && _gpuViewDispatchArgs != null &&
                         (_sorter == null || !_sorter.Valid || _sorterArgs.resources.altKeys != null);
             if (!fits)
             {
@@ -688,18 +726,28 @@ namespace GaussianSplatting.Runtime
                 DisposeBuffer(ref _gpuSortKeys);
                 DisposeBuffer(ref _gpuVisibleCounter);
                 DisposeBuffer(ref _gpuIndirectArgs);
+                DisposeDrawOrderBuffers();
                 _sorterArgs.resources.Dispose();
 
                 _gpuSortDistances = new GraphicsBuffer(GraphicsBuffer.Target.Structured, count, 4) { name = "GaussianSplatSortDistances" };
                 _gpuSortKeys = new GraphicsBuffer(GraphicsBuffer.Target.Structured, count, 4) { name = "GaussianSplatSortIndices" };
                 _gpuVisibleCounter = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, 4) { name = "GaussianSplatVisibleCounter" };
                 _gpuIndirectArgs = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments | GraphicsBuffer.Target.Structured, 5, 4) { name = "GaussianSplatIndirectArgs" };
+                int groups = (count + UtilitiesGroupSize - 1) / UtilitiesGroupSize;
+                _gpuVisibleBits = new GraphicsBuffer(GraphicsBuffer.Target.Raw, Math.Max(1, groups * UtilitiesGroupSize / 32), 4) { name = "GaussianSplatVisibleBits" };
+                _gpuDrawOrder = new GraphicsBuffer(GraphicsBuffer.Target.Structured, count, 4) { name = "GaussianSplatDrawOrder" };
+                _gpuCompactTileSums = new GraphicsBuffer(GraphicsBuffer.Target.Structured, CompactTileCount(count), 4) { name = "GaussianSplatCompactTileSums" };
+                _gpuViewDispatchArgs = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments | GraphicsBuffer.Target.Structured, 3, 4) { name = "GaussianSplatViewDispatchArgs" };
                 if (_sorter != null && _sorter.Valid)
                     _sorterArgs.resources = GpuSortResources.Load((uint)count);
             }
             // Until the first sort runs (or if no sorter is available), the
             // indirect draw covers every splat, matching the old direct draw.
             _gpuIndirectArgs.SetData(new uint[] { 6, (uint)count, 0, 0, 0 });
+            // The draw list starts as every splat in identity order
+            _gpuVisibleCounter.SetData(new uint[] { (uint)count });
+            _gpuViewDispatchArgs.SetData(new uint[] { (uint)((count + UtilitiesGroupSize - 1) / UtilitiesGroupSize), 1, 1 });
+            _drawOrderCompacted = false;
 
             // init keys buffer to splat indices
             if (TryFindSupportedKernel(KernelIndices.SetIndices, out int kernelIndex))
@@ -880,6 +928,14 @@ namespace GaussianSplatting.Runtime
             buf = null;
         }
 
+        private void DisposeDrawOrderBuffers()
+        {
+            DisposeBuffer(ref _gpuVisibleBits);
+            DisposeBuffer(ref _gpuDrawOrder);
+            DisposeBuffer(ref _gpuCompactTileSums);
+            DisposeBuffer(ref _gpuViewDispatchArgs);
+        }
+
         private void DisposeResourcesForAsset()
         {
             DestroyImmediate(_gpuColorData);
@@ -896,6 +952,7 @@ namespace GaussianSplatting.Runtime
             DisposeBuffer(ref _gpuSortKeys);
             DisposeBuffer(ref _gpuVisibleCounter);
             DisposeBuffer(ref _gpuIndirectArgs);
+            DisposeDrawOrderBuffers();
             DisposeBuffer(ref _gpuOcclusionGrid);
             DisposeBuffer(ref _gpuStyleRange);
             _styleSet.Dispose();
@@ -944,9 +1001,87 @@ namespace GaussianSplatting.Runtime
             return GL.GetGPUProjectionMatrix(stereoOverride?.Proj(eye) ?? cam.GetStereoProjectionMatrix(eye), true);
         }
 
+        // What the view-data passes of one renderer and camera share
+        private struct ViewPassParams
+        {
+            // The kernel computing the view data: the stereo kernel, or the
+            // single-eye one (mono, or both eyes in turn without the stereo
+            // kernel)
+            public int Kernel;
+            public bool Stereo;
+            public bool StereoKernel;
+            public Matrix4x4 VP;
+            // Per-eye view, projection and view-projection when stereo
+            public Matrix4x4[] EyeView;
+            public Matrix4x4[] EyeProj;
+            public Matrix4x4[] EyeVP;
+            public Matrix4x4 ObjectToWorld;
+            public Vector4 ScreenParams;
+            public bool Occlusion;
+        }
+
+        // Splat order: view slot i is splat i, as the global path copies it.
         internal bool CalcViewData(CommandBuffer cmb, Camera cam)
         {
+            if (!SetViewParamsOnCS(cmb, cam, out ViewPassParams view))
+                return false;
+            DispatchViewData(cmb, view, false);
+            return true;
+        }
+
+        // The per-object path (see "Draw order" in SplatUtilities.compute):
+        // culls, re-sorts when the keys are stale (or forceSort), turns the
+        // sorted order into this frame's draw list, then computes the view
+        // data of the draw list alone, in draw order. Draw with GpuDrawOrder
+        // as the order buffer and GpuIndirectArgs.
+        internal bool PrepareView(CommandBuffer cmb, Camera cam, in GaussianSplatSortState.Settings sortSettings, bool forceSort)
+        {
+            if (!SetViewParamsOnCS(cmb, cam, out ViewPassParams view))
+                return false;
+            if (!TryFindSupportedKernel(KernelIndices.CullSplats, out int cullKernel) ||
+                !TryFindSupportedKernel(KernelIndices.WriteDrawArgs, out int argsKernel))
+                return false;
+
+            // Order-independent splats keep whatever order the keys hold, as
+            // does a device without a sorter; their draw list is compacted
+            // like a throttled one's
+            bool sortable = !StyleOrderIndependent && _sorter != null && _sorter.Valid;
+            bool compact = !sortable || sortSettings.Throttled;
+            bool sortNow = sortable && (forceSort || NeedsSort(cam, sortSettings));
+            if (!sortable)
+                _sortState.Invalidate();
+
+            cmb.BeginSample(GaussianSplatRenderSystem.ProfSort);
+            if (compact || sortNow)
+                CullSplats(cmb, cam, cullKernel, sortSettings, sortNow);
+            if (sortNow)
+            {
+                _sorterArgs.count = (uint)EffectiveSplatCount;
+                _sorter.Dispatch(cmb, _sorterArgs);
+                MarkSorted(cam, sortSettings);
+            }
+            if (compact)
+                CompactDrawOrder(cmb);
+            // Otherwise a frame between sorts keeps the last sort's draw list
+            if (compact || sortNow)
+                WriteDrawArgs(cmb, argsKernel);
+            _drawOrderCompacted = compact;
+            cmb.EndSample(GaussianSplatRenderSystem.ProfSort);
+
+            cmb.BeginSample(GaussianSplatRenderSystem.ProfCalcView);
+            DispatchViewData(cmb, view, true);
+            cmb.EndSample(GaussianSplatRenderSystem.ProfCalcView);
+            return true;
+        }
+
+        // Sets everything the view-data passes read for this camera, and
+        // binds the splats to the kernel that computes the view data
+        private bool SetViewParamsOnCS(CommandBuffer cmb, Camera cam, out ViewPassParams view)
+        {
+            view = default;
             if (cam.cameraType == CameraType.Preview)
+                return false;
+            if (!TryFindSupportedKernel(KernelIndices.CalcViewData, out int kernelIndex))
                 return false;
 
             var tr = transform;
@@ -966,9 +1101,6 @@ namespace GaussianSplatting.Runtime
             if (GaussianSplatRenderSystem.instance.StereoOverride is { EyeSize: { x: > 0, y: > 0 } eyeSize })
                 screenPar = new Vector4(eyeSize.x, eyeSize.y, 0, 0);
             Vector4 camPos = cam.transform.position;
-
-            if (!SetAssetDataOnCS(cmb, KernelIndices.CalcViewData, out int kernelIndex))
-                return false;
 
             // Use renderIntoTexture=true: we always render to an intermediate RT,
             // so the VP must include Metal's Y-flip for correct orientation.
@@ -1014,9 +1146,6 @@ namespace GaussianSplatting.Runtime
                     gpuProj.m11 < 0f ? -1f : 1f));
             }
 
-            // Stereo rendering: pass per-eye view-projection matrices
-            bool isStereo = IsStereoCapture(cam);
-
             cmb.SetComputeVectorParam(csSplatUtilities, Props.VecScreenParams, screenPar);
             // Also set as global so the render shader can use the same screen params
             cmb.SetGlobalVector(Props.VecScreenParams, screenPar);
@@ -1037,86 +1166,120 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeVectorParam(csSplatUtilities, Props.DofParams, dof != null ? dof.ShaderParams : Vector4.zero);
             // The occlusion grid takes blurred splats for solid surfaces
             bool occlusion = occlusionCulling && dof == null;
-            SetStyleOnCS(cmb, kernelIndex, projectionScale, occlusion);
 
-            csSplatUtilities.GetKernelThreadGroupSizes(kernelIndex, out uint gsX, out _, out _);
-            int dispatchCount = EffectiveSplatCount;
-            int groupCount = (dispatchCount + (int)gsX - 1) / (int)gsX;
-
-            // Per-eye view-projections, for a deferred style shape pass
+            // Stereo: both eyes' matrices, for the stereo kernel and for the
+            // passes around it (culling, occlusion, deferred quads)
+            bool isStereo = IsStereoCapture(cam);
+            cmb.SetComputeIntParam(csSplatUtilities, Props.IsStereo, isStereo ? 1 : 0);
+            Matrix4x4[] eyeView = null;
+            Matrix4x4[] eyeProj = null;
             Matrix4x4[] eyeVP = null;
+            bool stereoKernel = false;
             if (isStereo)
             {
-                // Single-dispatch stereo: pass both eyes' matrices and dispatch once.
-                // The CSCalcViewDataStereo kernel computes view-independent data (3D
-                // covariance, SH) once, then per-eye data (clip pos, 2D cov) in a loop.
-                cmb.SetComputeIntParam(csSplatUtilities, Props.IsStereo, 1);
-
-                if (TryFindSupportedKernel("CSCalcViewDataStereo", out int stereoKernel))
+                eyeView = new[]
                 {
-                    Matrix4x4 leftView = StereoViewMatrix(cam, Camera.StereoscopicEye.Left);
-                    Matrix4x4 rightView = StereoViewMatrix(cam, Camera.StereoscopicEye.Right);
-                    Matrix4x4 leftGpu = StereoGpuProjection(cam, Camera.StereoscopicEye.Left);
-                    Matrix4x4 rightGpu = StereoGpuProjection(cam, Camera.StereoscopicEye.Right);
+                    StereoViewMatrix(cam, Camera.StereoscopicEye.Left),
+                    StereoViewMatrix(cam, Camera.StereoscopicEye.Right),
+                };
+                eyeProj = new[]
+                {
+                    StereoGpuProjection(cam, Camera.StereoscopicEye.Left),
+                    StereoGpuProjection(cam, Camera.StereoscopicEye.Right),
+                };
+                eyeVP = new[] { eyeProj[0] * eyeView[0], eyeProj[1] * eyeView[1] };
+                cmb.SetComputeMatrixArrayParam(csSplatUtilities, Props.MatrixVPEye, eyeVP);
+                cmb.SetComputeMatrixArrayParam(csSplatUtilities, Props.MatrixPEye, eyeProj);
+                cmb.SetComputeMatrixArrayParam(csSplatUtilities, Props.MatrixMVEye,
+                    new[] { eyeView[0] * matO2W, eyeView[1] * matO2W });
 
-                    eyeVP = new[] { leftGpu * leftView, rightGpu * rightView };
-                    cmb.SetComputeMatrixArrayParam(csSplatUtilities, Props.MatrixVPEye, eyeVP);
-                    cmb.SetComputeMatrixArrayParam(csSplatUtilities, Props.MatrixPEye,
-                        new[] { leftGpu, rightGpu });
-                    cmb.SetComputeMatrixArrayParam(csSplatUtilities, Props.MatrixMVEye,
-                        new[] { leftView * matO2W, rightView * matO2W });
-
-                    SetAssetDataOnCS(cmb, stereoKernel);
-                    SetStyleOnCS(cmb, stereoKernel, projectionScale, occlusion);
-                    csSplatUtilities.GetKernelThreadGroupSizes(stereoKernel, out uint gsX2, out _, out _);
-                    int stereoGroupCount = (dispatchCount + (int)gsX2 - 1) / (int)gsX2;
-                    cmb.DispatchCompute(csSplatUtilities, stereoKernel, stereoGroupCount, 1, 1);
+                // The single-dispatch kernel computes view-independent data (3D
+                // covariance, SH) once, then per-eye data (clip pos, 2D cov)
+                if (TryFindSupportedKernel(CalcViewDataStereoKernelName, out int stereoKernelIndex))
+                {
+                    kernelIndex = stereoKernelIndex;
+                    stereoKernel = true;
                 }
-                else
+            }
+
+            SetAssetDataOnCS(cmb, kernelIndex);
+            SetStyleOnCS(cmb, kernelIndex, projectionScale, occlusion);
+
+            view = new ViewPassParams
+            {
+                Kernel = kernelIndex,
+                Stereo = isStereo,
+                StereoKernel = stereoKernel,
+                VP = matVP,
+                EyeView = eyeView,
+                EyeProj = eyeProj,
+                EyeVP = eyeVP,
+                ObjectToWorld = matO2W,
+                ScreenParams = screenPar,
+                Occlusion = occlusion,
+            };
+            return true;
+        }
+
+        // The view-data pass and the passes that refine its result, over every
+        // splat in splat order, or over the draw list in draw order
+        private void DispatchViewData(CommandBuffer cmb, in ViewPassParams view, bool inDrawOrder)
+        {
+            ComputeShader cs = csSplatUtilities;
+            cmb.SetComputeIntParam(cs, Props.ViewInDrawOrder, inDrawOrder ? 1 : 0);
+            SetViewOrderOnCS(cmb, view.Kernel);
+            if (view.Stereo && !view.StereoKernel)
+            {
+                // Without the stereo kernel: one single-eye dispatch per eye
+                for (int eye = 0; eye < 2; eye++)
                 {
-                    // Fallback: per-eye dispatch if stereo kernel not available
-                    for (int eye = 0; eye < 2; eye++)
-                    {
-                        var stereoEye = eye == 0
-                            ? Camera.StereoscopicEye.Left
-                            : Camera.StereoscopicEye.Right;
-                        Matrix4x4 stereoView = StereoViewMatrix(cam, stereoEye);
-                        Matrix4x4 stereoGpuProj = StereoGpuProjection(cam, stereoEye);
-
-                        eyeVP ??= new Matrix4x4[2];
-                        eyeVP[eye] = stereoGpuProj * stereoView;
-                        cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixVP, eyeVP[eye]);
-                        cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixP, stereoGpuProj);
-                        cmb.SetComputeMatrixParam(csSplatUtilities, Props.MatrixMV, stereoView * matO2W);
-                        cmb.SetComputeIntParam(csSplatUtilities, Props.StereoEyeIndex, eye);
-
-                        cmb.DispatchCompute(csSplatUtilities, kernelIndex, groupCount, 1, 1);
-                    }
+                    cmb.SetComputeMatrixParam(cs, Props.MatrixVP, view.EyeVP[eye]);
+                    cmb.SetComputeMatrixParam(cs, Props.MatrixP, view.EyeProj[eye]);
+                    cmb.SetComputeMatrixParam(cs, Props.MatrixMV, view.EyeView[eye] * view.ObjectToWorld);
+                    cmb.SetComputeIntParam(cs, Props.StereoEyeIndex, eye);
+                    DispatchOverViews(cmb, view.Kernel, inDrawOrder);
                 }
             }
             else
             {
-                cmb.SetComputeIntParam(csSplatUtilities, Props.IsStereo, 0);
-                cmb.DispatchCompute(csSplatUtilities, kernelIndex, groupCount, 1, 1);
+                DispatchOverViews(cmb, view.Kernel, inDrawOrder);
             }
 
-            if (occlusion)
-                CullOccludedSplats(cmb, screenPar, isStereo);
-            if (QuadsBaked && occlusion)
-                BakeDeferredQuads(cmb, matVP, eyeVP);
-            return true;
+            if (view.Occlusion)
+                CullOccludedSplats(cmb, view.ScreenParams, view.Stereo, inDrawOrder);
+            if (QuadsBaked && view.Occlusion)
+                BakeDeferredQuads(cmb, view.VP, view.EyeVP, inDrawOrder);
+        }
+
+        // Binds the draw list the draw-order passes read (_ViewOrder, and its
+        // length in _VisibleCounter); bound in splat order too, unread
+        private void SetViewOrderOnCS(CommandBuffer cmb, int kernel)
+        {
+            cmb.SetComputeBufferParam(csSplatUtilities, kernel, Props.ViewOrder, GpuDrawOrder);
+            cmb.SetComputeBufferParam(csSplatUtilities, kernel, Props.VisibleCounter, _gpuVisibleCounter);
+        }
+
+        // One thread per view slot: the draw list's length comes from the GPU
+        private void DispatchOverViews(CommandBuffer cmb, int kernel, bool inDrawOrder)
+        {
+            if (inDrawOrder)
+            {
+                cmb.DispatchCompute(csSplatUtilities, kernel, _gpuViewDispatchArgs, 0);
+                return;
+            }
+            csSplatUtilities.GetKernelThreadGroupSizes(kernel, out uint group, out _, out _);
+            cmb.DispatchCompute(csSplatUtilities, kernel, (EffectiveSplatCount + (int)group - 1) / (int)group, 1, 1);
         }
 
         // Quads held back while occlusion culling reads the Gaussian footprints
         // they replace (see _QuadBakeDeferred). Stereo when eyeVP is set.
-        private void BakeDeferredQuads(CommandBuffer cmb, Matrix4x4 vp, Matrix4x4[] eyeVP)
+        private void BakeDeferredQuads(CommandBuffer cmb, Matrix4x4 vp, Matrix4x4[] eyeVP, bool inDrawOrder)
         {
             if (!TryFindSupportedKernel(KernelIndices.BakeQuads, out int kernel))
                 return;
 
             ComputeShader cs = csSplatUtilities;
             bool stereo = eyeVP != null;
-            cmb.SetComputeIntParam(cs, Props.IsStereo, stereo ? 1 : 0);
             if (stereo)
             {
                 cmb.SetComputeMatrixArrayParam(cs, Props.MatrixVPEye, eyeVP);
@@ -1129,13 +1292,13 @@ namespace GaussianSplatting.Runtime
             }
             cmb.SetComputeBufferParam(cs, kernel, Props.SplatViewData, _gpuView);
             SetVelocityOnCS(cmb, cs, kernel);
-            cs.GetKernelThreadGroupSizes(kernel, out uint group, out _, out _);
-            cmb.DispatchCompute(cs, kernel, (EffectiveSplatCount + (int)group - 1) / (int)group, 1, 1);
+            SetViewOrderOnCS(cmb, kernel);
+            DispatchOverViews(cmb, kernel, inDrawOrder);
         }
 
         // Runs on the view data CalcViewData just wrote, with its screen
         // parameters and stereo flag still bound
-        private void CullOccludedSplats(CommandBuffer cmb, Vector4 screenPar, bool isStereo)
+        private void CullOccludedSplats(CommandBuffer cmb, Vector4 screenPar, bool isStereo, bool inDrawOrder)
         {
             if (!TryFindSupportedKernel(KernelIndices.OcclusionClear, out int clearKernel) ||
                 !TryFindSupportedKernel(KernelIndices.OcclusionSplat, out int splatKernel) ||
@@ -1163,15 +1326,15 @@ namespace GaussianSplatting.Runtime
             cs.GetKernelThreadGroupSizes(clearKernel, out uint clearGroup, out _, out _);
             cmb.DispatchCompute(cs, clearKernel, (cellCount + (int)clearGroup - 1) / (int)clearGroup, 1, 1);
 
-            DispatchPerSplat(splatKernel);
-            DispatchPerSplat(cullKernel);
+            DispatchPerView(splatKernel);
+            DispatchPerView(cullKernel);
 
-            void DispatchPerSplat(int kernel)
+            void DispatchPerView(int kernel)
             {
                 cmb.SetComputeBufferParam(cs, kernel, Props.OcclusionGrid, _gpuOcclusionGrid);
                 cmb.SetComputeBufferParam(cs, kernel, Props.SplatViewData, _gpuView);
-                cs.GetKernelThreadGroupSizes(kernel, out uint group, out _, out _);
-                cmb.DispatchCompute(cs, kernel, (EffectiveSplatCount + (int)group - 1) / (int)group, 1, 1);
+                SetViewOrderOnCS(cmb, kernel);
+                DispatchOverViews(cmb, kernel, inDrawOrder);
             }
         }
 
@@ -1264,74 +1427,64 @@ namespace GaussianSplatting.Runtime
             cmd.SetComputeIntParam(csSplatUtilities, Props.SortAllVisible, settings.Throttled ? 1 : 0);
         }
 
-        internal void SortPoints(CommandBuffer cmd, Camera cam, Matrix4x4 matrix, in GaussianSplatSortState.Settings settings)
+        // Visibility bits, the visible count, and on re-sorting frames the
+        // sort keys, for the view SetViewParamsOnCS bound
+        private void CullSplats(CommandBuffer cmd, Camera cam, int kernel, in GaussianSplatSortState.Settings settings, bool writeKeys)
         {
-            if (cam.cameraType == CameraType.Preview)
-                return;
-            if (!TryFindSupportedKernel(KernelIndices.CalcDistances, out int kernelIndex))
-                return;
-
-            cmd.BeginSample(GaussianSplatRenderSystem.ProfSort);
-
+            ComputeShader cs = csSplatUtilities;
+            SetAssetDataOnCS(cmd, kernel);
             cmd.SetBufferData(_gpuVisibleCounter, ZeroCounterData);
-
-            // Reset keys to identity before computing distances: equal keys
-            // then always resolve in splat-index order (the sorters are
-            // stable), instead of in whatever order the previous sort left.
-            if (TryFindSupportedKernel(KernelIndices.SetIndices, out int setIndicesKernel))
-            {
-                cmd.SetComputeBufferParam(csSplatUtilities, setIndicesKernel, Props.SplatSortKeys, _gpuSortKeys);
-                cmd.SetComputeIntParam(csSplatUtilities, Props.SplatCount, EffectiveSplatCount);
-                csSplatUtilities.GetKernelThreadGroupSizes(setIndicesKernel, out uint giX, out _, out _);
-                cmd.DispatchCompute(csSplatUtilities, setIndicesKernel, (EffectiveSplatCount + (int)giX - 1) / (int)giX, 1, 1);
-            }
-
-            cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.SplatSortDistances, _gpuSortDistances);
-            cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.SplatSortKeys, _gpuSortKeys);
-            cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.SplatViewData, _gpuView);
-            cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.VisibleCounter, _gpuVisibleCounter);
-            cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.SplatChunks, _gpuChunks);
-            cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.SplatPos, _gpuPosData);
-            cmd.SetComputeIntParam(csSplatUtilities, Props.SplatFormat, (int)splatAsset.FormatFlags);
-            cmd.SetComputeIntParam(csSplatUtilities, Props.IsStereo, IsStereoCapture(cam) ? 1 : 0);
-            cmd.SetComputeMatrixParam(csSplatUtilities, Props.MatrixMV, SortViewMatrix(cam) * matrix);
-            cmd.SetComputeIntParam(csSplatUtilities, Props.SplatCount, EffectiveSplatCount);
-            cmd.SetComputeIntParam(csSplatUtilities, Props.SrcSplatCount, _splatCount);
-            cmd.SetComputeIntParam(csSplatUtilities, Props.SplatChunkCount, _gpuChunksValid ? _gpuChunks.count : 0);
+            cmd.SetComputeBufferParam(cs, kernel, Props.SplatSortDistances, _gpuSortDistances);
+            cmd.SetComputeBufferParam(cs, kernel, Props.SplatSortKeys, _gpuSortKeys);
+            cmd.SetComputeBufferParam(cs, kernel, Props.SplatVisibleBits, _gpuVisibleBits);
+            cmd.SetComputeBufferParam(cs, kernel, Props.VisibleCounter, _gpuVisibleCounter);
+            cmd.SetComputeMatrixParam(cs, Props.MatrixSortMV, SortViewMatrix(cam) * transform.localToWorldMatrix);
+            cmd.SetComputeIntParam(cs, Props.CullWriteKeys, writeKeys ? 1 : 0);
             SetSortSettingsOnCS(cmd, settings);
+            cs.GetKernelThreadGroupSizes(kernel, out uint group, out _, out _);
+            cmd.DispatchCompute(cs, kernel, (EffectiveSplatCount + (int)group - 1) / (int)group, 1, 1);
+        }
 
-            bool hasMorph = _morphedDataBuffer != null && _morphDataValid != 0;
-            cmd.SetComputeIntParam(csSplatUtilities, Props.MorphDataValid, hasMorph ? 1 : 0);
-            cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.MorphedData, hasMorph ? _morphedDataBuffer : _gpuSortDistances);
+        // The visible splats of the sorted order, in that order, into
+        // _gpuDrawOrder, and their count
+        private void CompactDrawOrder(CommandBuffer cmd)
+        {
+            if (!TryFindSupportedKernel(KernelIndices.CompactCount, out int countKernel) ||
+                !TryFindSupportedKernel(KernelIndices.CompactScan, out int scanKernel) ||
+                !TryFindSupportedKernel(KernelIndices.CompactScatter, out int scatterKernel))
+                return;
 
-            // Sort on the animated position, the one that is actually drawn.
-            bool hasAnim = _animOutputBuffer != null;
-            cmd.SetComputeIntParam(csSplatUtilities, Props.AnimDataValid, hasAnim ? 1 : 0);
-            cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.AnimOutputData, hasAnim ? _animOutputBuffer : _gpuSortDistances);
-            bool hasDeformed = _deformedBase != null;
-            cmd.SetComputeIntParam(csSplatUtilities, Props.DeformedBaseValid, hasDeformed ? 1 : 0);
-            cmd.SetComputeBufferParam(csSplatUtilities, kernelIndex, Props.DeformedBase, hasDeformed ? _deformedBase : _gpuSortDistances);
+            ComputeShader cs = csSplatUtilities;
+            int tileCount = CompactTileCount(EffectiveSplatCount);
+            cmd.SetComputeIntParam(cs, Props.SplatCount, EffectiveSplatCount);
+            cmd.SetComputeIntParam(cs, Props.CompactTileCount, tileCount);
 
-            csSplatUtilities.GetKernelThreadGroupSizes(kernelIndex, out uint gsX, out _, out _);
-            cmd.DispatchCompute(csSplatUtilities, kernelIndex, (EffectiveSplatCount + (int)gsX - 1)/(int)gsX, 1, 1);
+            cmd.SetComputeBufferParam(cs, countKernel, Props.SplatSortKeys, _gpuSortKeys);
+            cmd.SetComputeBufferParam(cs, countKernel, Props.SplatVisibleBits, _gpuVisibleBits);
+            cmd.SetComputeBufferParam(cs, countKernel, Props.CompactTileSums, _gpuCompactTileSums);
+            cmd.DispatchCompute(cs, countKernel, tileCount, 1, 1);
 
-            bool sorted = _sorter != null && _sorter.Valid;
-            if (sorted)
-            {
-                _sorterArgs.count = (uint)EffectiveSplatCount;
-                _sorter.Dispatch(cmd, _sorterArgs);
-            }
+            cmd.SetComputeBufferParam(cs, scanKernel, Props.CompactTileSums, _gpuCompactTileSums);
+            cmd.SetComputeBufferParam(cs, scanKernel, Props.VisibleCounter, _gpuVisibleCounter);
+            cmd.DispatchCompute(cs, scanKernel, 1, 1, 1);
 
-            // Compaction is only valid once sentinel keys are sorted to the
-            // tail; without a sorter the args keep their full-count init.
-            if (sorted && TryFindSupportedKernel(KernelIndices.WriteIndirectArgs, out int argsKernel))
-            {
-                cmd.SetComputeBufferParam(csSplatUtilities, argsKernel, Props.VisibleCounter, _gpuVisibleCounter);
-                cmd.SetComputeBufferParam(csSplatUtilities, argsKernel, Props.IndirectArgs, _gpuIndirectArgs);
-                cmd.SetComputeIntParam(csSplatUtilities, Props.IndirectIndexCount, 6);
-                cmd.DispatchCompute(csSplatUtilities, argsKernel, 1, 1, 1);
-            }
-            cmd.EndSample(GaussianSplatRenderSystem.ProfSort);
+            cmd.SetComputeBufferParam(cs, scatterKernel, Props.SplatSortKeys, _gpuSortKeys);
+            cmd.SetComputeBufferParam(cs, scatterKernel, Props.SplatVisibleBits, _gpuVisibleBits);
+            cmd.SetComputeBufferParam(cs, scatterKernel, Props.CompactTileSums, _gpuCompactTileSums);
+            cmd.SetComputeBufferParam(cs, scatterKernel, Props.DrawOrder, _gpuDrawOrder);
+            cmd.DispatchCompute(cs, scatterKernel, tileCount, 1, 1);
+        }
+
+        // The draw's instance count and the view-data pass's thread groups,
+        // from the draw list's length
+        private void WriteDrawArgs(CommandBuffer cmd, int kernel)
+        {
+            ComputeShader cs = csSplatUtilities;
+            cmd.SetComputeBufferParam(cs, kernel, Props.VisibleCounter, _gpuVisibleCounter);
+            cmd.SetComputeBufferParam(cs, kernel, Props.IndirectArgs, _gpuIndirectArgs);
+            cmd.SetComputeBufferParam(cs, kernel, Props.ViewDispatchArgs, _gpuViewDispatchArgs);
+            cmd.SetComputeIntParam(cs, Props.IndirectIndexCount, 6);
+            cmd.DispatchCompute(cs, kernel, 1, 1, 1);
         }
 
         public void Update()

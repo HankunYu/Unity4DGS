@@ -294,6 +294,15 @@ namespace GaussianSplatting.Runtime
             mpb.SetInteger(GaussianSplatRenderer.Props.StyleRangeCount, 1);
         }
 
+        // A per-object draw reads its view data in draw order. The sorted
+        // modes draw the draw list; the debug modes draw every splat, through
+        // the whole sorted order, and read no view data.
+        private void SetDrawOrderOnMaterial(GaussianSplatRenderer gs, MaterialPropertyBlock mpb)
+        {
+            mpb.SetBuffer(GaussianSplatRenderer.Props.OrderBuffer, UsesSortedViewData ? gs.GpuDrawOrder : gs.GpuSortKeys);
+            mpb.SetInteger(GaussianSplatRenderer.Props.ViewInDrawOrder, 1);
+        }
+
         // Range table of the global group being built, one entry per member
         private GaussianSplatStyleRange[] _styleRanges = new GaussianSplatStyleRange[4];
         private int _styleRangeCount;
@@ -714,8 +723,6 @@ namespace GaussianSplatting.Runtime
                 var gs = kvp.Item1;
                 var mpb = kvp.Item2;
 
-                var matrix = gs.transform.localToWorldMatrix;
-
                 mpb.Clear();
                 Material displayMat = DisplayMaterial(gs);
                 if (displayMat == null)
@@ -728,7 +735,6 @@ namespace GaussianSplatting.Runtime
                 gs.SetAssetDataOnMaterial(mpb);
                 mpb.SetBuffer(GaussianSplatRenderer.Props.SplatChunks, gs.GpuChunksBuffer);
                 mpb.SetBuffer(GaussianSplatRenderer.Props.SplatViewData, gs.GpuView);
-                mpb.SetBuffer(GaussianSplatRenderer.Props.OrderBuffer, gs.GpuSortKeys);
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatScale, gs.splatScale);
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatOpacityScale, gs.opacityScale);
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatSize, _config.pointDisplaySize);
@@ -740,23 +746,9 @@ namespace GaussianSplatting.Runtime
                     _config.renderMode == GaussianSplatRenderMode.DebugChunkBounds ? 1 : 0);
                 SetStyleOnMaterial(cmb, gs, mpb);
 
-                cmb.BeginSample(ProfCalcView);
-                bool calcSuccess = gs.CalcViewData(cmb, cam);
-                cmb.EndSample(ProfCalcView);
-                if (!calcSuccess)
+                if (!gs.PrepareView(cmb, cam, SortSettings(gs.HasAnimatedContent), false))
                     continue;
-
-                // Sort after view data so distance keys can read visibility
-                // (invisible splats sink to the tail; indirect draw skips them).
-                // Order-independent splats keep whatever order the keys hold
-                // and draw them all: a culled splat is a degenerate quad.
-                bool sorted = !gs.StyleOrderIndependent;
-                var sortSettings = SortSettings(gs.HasAnimatedContent);
-                if (sorted && gs.NeedsSort(cam, sortSettings))
-                {
-                    gs.SortPoints(cmb, cam, matrix, sortSettings);
-                    gs.MarkSorted(cam, sortSettings);
-                }
+                SetDrawOrderOnMaterial(gs, mpb);
 
                 int indexCount = 6;
                 int instanceCount = gs.EffectiveSplatCount;
@@ -770,7 +762,7 @@ namespace GaussianSplatting.Runtime
                 {
                     gs = gs, displayMat = displayMat, mpb = mpb,
                     indexCount = indexCount, instanceCount = instanceCount, topology = topology,
-                    indirectArgs = UsesSortedViewData && sorted && gs.IndirectDrawReady ? gs.GpuIndirectArgs : null,
+                    indirectArgs = UsesSortedViewData && gs.IndirectDrawReady ? gs.GpuIndirectArgs : null,
                     pass = UsesSortedViewData ? DisplayPass : 0,
                 });
             }
@@ -1101,6 +1093,7 @@ namespace GaussianSplatting.Runtime
                     _globalMpb.SetBuffer(GaussianSplatRenderer.Props.SplatViewData, groupCache.viewData);
                     _globalMpb.SetBuffer(GaussianSplatRenderer.Props.OrderBuffer, groupCache.sortKeys);
                     _globalMpb.SetInteger(GaussianSplatRenderer.Props.IsStereo, 0);
+                    _globalMpb.SetInteger(GaussianSplatRenderer.Props.ViewInDrawOrder, 0);
                     if (groupBaked)
                         SetGroupStyleRanges(cmb, groupCache, _globalMpb);
                     if (groupCache.indirectArgsValid && !groupOrderIndependent)
@@ -1145,7 +1138,6 @@ namespace GaussianSplatting.Runtime
                 gs.SetAssetDataOnMaterial(mpb);
                 mpb.SetBuffer(GaussianSplatRenderer.Props.SplatChunks, gs.GpuChunksBuffer);
                 mpb.SetBuffer(GaussianSplatRenderer.Props.SplatViewData, gs.GpuView);
-                mpb.SetBuffer(GaussianSplatRenderer.Props.OrderBuffer, gs.GpuSortKeys);
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatScale, gs.splatScale);
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatOpacityScale, gs.opacityScale);
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatSize, _config.pointDisplaySize);
@@ -1156,25 +1148,11 @@ namespace GaussianSplatting.Runtime
                 mpb.SetInteger(GaussianSplatRenderer.Props.IsStereo, 0);
                 SetStyleOnMaterial(cmb, gs, mpb);
 
-                cmb.BeginSample(ProfCalcView);
-                bool calcSuccess = gs.CalcViewData(cmb, cam);
-                cmb.EndSample(ProfCalcView);
-                if (!calcSuccess)
-                    continue;
-
-                // Sort after view data so distance keys can read visibility
-                // (invisible splats sink to the tail; indirect draw skips them).
                 // A matrix override means the same camera renders multiple views
                 // this frame (cubemap faces), so every render must re-sort.
-                // Order-independent splats keep whatever order the keys hold
-                // and draw them all: a culled splat is a degenerate quad.
-                bool sorted = !gs.StyleOrderIndependent;
-                var sortSettings = SortSettings(gs.HasAnimatedContent);
-                if (sorted && (MatrixOverride.HasValue || gs.NeedsSort(cam, sortSettings)))
-                {
-                    gs.SortPoints(cmb, cam, matrix, sortSettings);
-                    gs.MarkSorted(cam, sortSettings);
-                }
+                if (!gs.PrepareView(cmb, cam, SortSettings(gs.HasAnimatedContent), MatrixOverride.HasValue))
+                    continue;
+                SetDrawOrderOnMaterial(gs, mpb);
 
                 // draw
                 int indexCount = 6;
@@ -1187,7 +1165,7 @@ namespace GaussianSplatting.Runtime
 
                 cmb.BeginSample(ProfDraw);
                 int pass = UsesSortedViewData ? DisplayPass : 0;
-                if (UsesSortedViewData && sorted && gs.IndirectDrawReady)
+                if (UsesSortedViewData && gs.IndirectDrawReady)
                     cmb.DrawProceduralIndirect(gs.GpuIndexBuffer, matrix, displayMat, pass, topology,
                         gs.GpuIndirectArgs, 0, mpb);
                 else

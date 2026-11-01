@@ -459,6 +459,48 @@ half3 LoadSplatSHCoeff(uint addr, uint shFormat, uint k)
     return half3(f16tof32(raw.x), f16tof32(raw.x >> 16), f16tof32(raw.y));
 }
 
+// Bytes per splat in _SplatOther: rotation, scale, then the SH cluster index
+// of a clustered asset
+uint SplatOtherStride(uint scaleFmt, uint shFormat)
+{
+    uint stride = 4; // rotation is 10.10.10.2
+    if (scaleFmt == VECTOR_FMT_32F)
+        stride += 12;
+    else if (scaleFmt == VECTOR_FMT_16)
+        stride += 6;
+    else if (scaleFmt == VECTOR_FMT_11)
+        stride += 4;
+    else if (scaleFmt == VECTOR_FMT_6)
+        stride += 2;
+    if (SplatSHClustered(shFormat))
+        stride += 2;
+    return stride;
+}
+
+// A chunk-relative scale decoded to its final value
+float3 ChunkRelativeScale(float3 raw, SplatChunkInfo chunk)
+{
+    half3 sclMin = half3(f16tof32(chunk.sclX    ), f16tof32(chunk.sclY    ), f16tof32(chunk.sclZ    ));
+    half3 sclMax = half3(f16tof32(chunk.sclX>>16), f16tof32(chunk.sclY>>16), f16tof32(chunk.sclZ>>16));
+    float3 scale = lerp(sclMin, sclMax, raw);
+    scale *= scale;
+    scale *= scale;
+    scale *= scale;
+    return scale;
+}
+
+// The splat's scale alone, as LoadSplatData decodes it
+float3 LoadSplatScale(uint idx)
+{
+    uint scaleFmt = SplatFormatScale(_SplatFormat);
+    uint otherAddr = idx * SplatOtherStride(scaleFmt, SplatFormatSH(_SplatFormat));
+    float3 scale = LoadAndDecodeVector(_SplatOther, otherAddr + 4, scaleFmt);
+    uint chunkIdx = idx / kChunkSize;
+    if (chunkIdx < _SplatChunkCount)
+        scale = ChunkRelativeScale(scale, _SplatChunks[chunkIdx]);
+    return scale;
+}
+
 // Reads SH bands up to maxSHOrder (capped by what the asset stores) and
 // leaves the rest zero; 0 skips every SH read, which is all an SH order 0
 // render needs, at a fraction of the bandwidth.
@@ -473,17 +515,7 @@ SplatData LoadSplatData(uint idx, uint maxSHOrder)
     uint shFormat = SplatFormatSH(_SplatFormat);
     uint shDegree = SplatFormatSHDegree(_SplatFormat);
 
-    uint otherStride = 4; // rotation is 10.10.10.2
-    if (scaleFmt == VECTOR_FMT_32F)
-        otherStride += 12;
-    else if (scaleFmt == VECTOR_FMT_16)
-        otherStride += 6;
-    else if (scaleFmt == VECTOR_FMT_11)
-        otherStride += 4;
-    else if (scaleFmt == VECTOR_FMT_6)
-        otherStride += 2;
-    if (SplatSHClustered(shFormat))
-        otherStride += 2;
+    uint otherStride = SplatOtherStride(scaleFmt, shFormat);
     uint otherAddr = idx * otherStride;
 
     uint chunkIdx = idx / kChunkSize;
@@ -538,15 +570,10 @@ SplatData LoadSplatData(uint idx, uint maxSHOrder)
     {
         float3 posMin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
         float3 posMax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
-        half3 sclMin = half3(f16tof32(chunk.sclX    ), f16tof32(chunk.sclY    ), f16tof32(chunk.sclZ    ));
-        half3 sclMax = half3(f16tof32(chunk.sclX>>16), f16tof32(chunk.sclY>>16), f16tof32(chunk.sclZ>>16));
         half4 colMin = half4(f16tof32(chunk.colR    ), f16tof32(chunk.colG    ), f16tof32(chunk.colB    ), f16tof32(chunk.colA    ));
         half4 colMax = half4(f16tof32(chunk.colR>>16), f16tof32(chunk.colG>>16), f16tof32(chunk.colB>>16), f16tof32(chunk.colA>>16));
         s.pos = lerp(posMin, posMax, s.pos);
-        s.scale     = lerp(sclMin, sclMax, s.scale);
-        s.scale *= s.scale;
-        s.scale *= s.scale;
-        s.scale *= s.scale;
+        s.scale = ChunkRelativeScale(s.scale, chunk);
         col   = lerp(colMin, colMax, col);
         col.a = InvSquareCentered01(col.a);
     }

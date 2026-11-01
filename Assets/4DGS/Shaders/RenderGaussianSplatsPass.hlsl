@@ -27,6 +27,16 @@ StructuredBuffer<SplatViewData> _SplatViewData;
 float4 _VecScreenParams;
 uint _EyeIndex;
 uint _IsStereo;
+// Non-zero: the view data is in draw order (a per-object draw), instance i
+// reads view slot i; zero: it is in splat order, at the splat _OrderBuffer
+// names for the instance
+uint _ViewInDrawOrder;
+
+uint SplatViewIndex (uint instID)
+{
+	uint slot = _ViewInDrawOrder != 0 ? instID : _OrderBuffer[instID];
+	return _IsStereo ? slot * 2 + _EyeIndex : slot;
+}
 
 // Quad extent, in the units of the fragment's exp(-dot(pos,pos)) falloff
 // (one unit = sqrt(2) sigma). Set globally from GaussianSplatConfig.
@@ -90,9 +100,7 @@ v2f SplatVert (uint vtxID, uint instID)
     #if defined(GAUSSIAN_LAYERED_EYES) && defined(SHADER_API_METAL)
     o.rtIndex = _EyeIndex;
     #endif
-    instID = _OrderBuffer[instID];
-	uint viewIndex = _IsStereo ? instID * 2 + _EyeIndex : instID;
-	SplatViewData view = _SplatViewData[viewIndex];
+	SplatViewData view = _SplatViewData[SplatViewIndex(instID)];
 	float4 centerClipPos = view.pos;
 	bool behindCam = centerClipPos.w <= 0;
 	if (behindCam)

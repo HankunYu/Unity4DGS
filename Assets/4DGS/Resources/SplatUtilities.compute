@@ -7,7 +7,11 @@
 #define GROUP_SIZE 256
 
 #pragma kernel CSSetIndices
-#pragma kernel CSCalcDistances
+#pragma kernel CSCullSplats
+#pragma kernel CSCompactCount
+#pragma kernel CSCompactScan
+#pragma kernel CSCompactScatter
+#pragma kernel CSWriteDrawArgs
 #pragma kernel CSCalcViewData
 #pragma kernel CSCalcViewDataStereo
 #pragma kernel CSCopyViewDataAndDistances
@@ -73,6 +77,22 @@ RWStructuredBuffer<uint> _IndirectArgs;     // 5 uints for DrawProceduralIndirec
 uint _IndirectIndexCount;
 uint _SplatCount;
 uint _SrcSplatCount; // original source asset splat count (for morph OOB guard)
+
+// Non-zero: the view data is laid out in draw order (see "Draw order"
+// below): view slot i holds splat _ViewOrder[i], and only the first
+// _VisibleCounter[0] slots exist. Zero: slot i is splat i, every splat.
+uint _ViewInDrawOrder;
+StructuredBuffer<uint> _ViewOrder;
+
+uint ViewSlotCount()
+{
+    return _ViewInDrawOrder != 0 ? _VisibleCounter[0] : _SplatCount;
+}
+
+uint ViewSlotSplat(uint slot)
+{
+    return _ViewInDrawOrder != 0 ? _ViewOrder[slot] : slot;
+}
 
 // Morph data (set by GaussianMorph, 4 float4s per splat)
 // [0]: pos.xyz, opacity
@@ -155,7 +175,8 @@ float3 LoadSortPos(uint idx)
     return pos;
 }
 
-// Takes the position in sort-view space (_MatrixMV with z flipped forward).
+// Takes the position in sort-view space: camera space with z flipped forward
+// (_MatrixSortMV per object, _MatrixMV in the global copy).
 float SortDepth(float3 viewPos)
 {
     return (_SortRadial != 0) ? length(viewPos) : viewPos.z;
@@ -187,8 +208,9 @@ uint DepthToSortKey(float depth)
 }
 
 // A splat the view-data pass culled (frustum, opacity, compensated alpha)
-// has zero axes and/or w <= 0. Such splats get sentinel sort keys, sink to
-// the tail of the ascending sort, and are excluded from the indirect draw.
+// has zero axes and/or w <= 0. The global path gives such splats sentinel
+// sort keys, so they sink to the tail of the ascending sort and are
+// excluded from the indirect draw; occlusion culling skips them.
 bool IsSplatViewVisible(SplatViewData view)
 {
     return view.pos.w > 0 &&
@@ -203,35 +225,6 @@ void CSSetIndices (uint3 id : SV_DispatchThreadID)
         return;
 
     _SplatSortKeys[idx] = idx;
-}
-
-[numthreads(GROUP_SIZE,1,1)]
-void CSCalcDistances (uint3 id : SV_DispatchThreadID)
-{
-    uint idx = id.x;
-    if (idx >= _SplatCount)
-        return;
-
-    uint origIdx = _SplatSortKeys[idx];
-
-    bool visible = _SortAllVisible != 0;
-    if (!visible)
-    {
-        if (_IsStereo != 0)
-            visible = IsSplatViewVisible(_SplatViewData[origIdx * 2]) ||
-                      IsSplatViewVisible(_SplatViewData[origIdx * 2 + 1]);
-        else
-            visible = IsSplatViewVisible(_SplatViewData[origIdx]);
-    }
-    if (!visible)
-    {
-        _SplatSortDistances[idx] = 0xFFFFFFFF;
-        return;
-    }
-
-    float3 pos = mul(_MatrixMV, float4(LoadSortPos(origIdx), 1)).xyz;
-    _SplatSortDistances[idx] = DepthToSortKey(SortDepth(pos));
-    InterlockedAdd(_VisibleCounter[0], 1);
 }
 
 RWStructuredBuffer<SplatViewData> _CopyDstViewData;
@@ -1037,54 +1030,49 @@ void ChunkBounds(uint chunkIdx, out float3 bmin, out float3 bmax)
     bmax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
 }
 
+// Whether a chunk lies wholly outside the frustum: of _MatrixVP, or of both
+// eyes (the right eye sees past the left eye's right edge). Never under
+// morph, whose positions leave the chunk AABB (moving chunks of animation
+// and the mesh driver are tested against their current bounds instead), nor
+// under ODS, which has no frustum and nothing off-screen.
+bool ChunkCulled(uint chunkIdx, bool bothEyes)
+{
+    if (_SplatChunkCount == 0 || _MorphDataValid != 0 || _OdsEnabled != 0 || chunkIdx >= _SplatChunkCount)
+        return false;
+    float3 bmin, bmax;
+    ChunkBounds(chunkIdx, bmin, bmax);
+    bmin -= _StyleChunkExpand;
+    bmax += _StyleChunkExpand;
+    if (bothEyes)
+        return ChunkOutsideFrustum(mul(_MatrixVP_Eye[0], _MatrixObjectToWorld), bmin, bmax) &&
+               ChunkOutsideFrustum(mul(_MatrixVP_Eye[1], _MatrixObjectToWorld), bmin, bmax);
+    return ChunkOutsideFrustum(mul(_MatrixVP, _MatrixObjectToWorld), bmin, bmax);
+}
+
+// One eye's view data (_StereoEyeIndex when stereo). In splat order it culls
+// whole chunks first; in draw order CSCullSplats already has.
 [numthreads(GROUP_SIZE,1,1)]
 void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
 {
-    uint idx = id.x;
-    uint localIdx = gtid.x;
-    uint chunkSlot = localIdx / kChunkSize;    // 0..3
-    uint laneInChunk = localIdx % kChunkSize;
-
-    // Phase 1: chunk frustum culling (first thread per 256-splat chunk)
-    // Skip when morph is active (morphed positions leave the chunk AABB);
-    // moving chunks (animation, mesh driver) are tested against their
-    // current bounds instead.
-    // Chunk culling tests AABB corners against the _MatrixVP frustum, which
-    // does not exist under ODS — and nothing is off-screen there anyway.
-    bool canCull = (_SplatChunkCount > 0) && (_MorphDataValid == 0) && (_OdsEnabled == 0);
-
-    if (laneInChunk == 0)
-    {
-        _chunkVisible[chunkSlot] = 1; // default visible
-        if (canCull)
-        {
-            uint globalChunkIdx = idx / kChunkSize;
-            if (globalChunkIdx < _SplatChunkCount)
-            {
-                float3 bmin, bmax;
-                ChunkBounds(globalChunkIdx, bmin, bmax);
-                bmin -= _StyleChunkExpand;
-                bmax += _StyleChunkExpand;
-                if (ChunkOutsideFrustum(mul(_MatrixVP, _MatrixObjectToWorld), bmin, bmax))
-                    _chunkVisible[chunkSlot] = 0;
-            }
-        }
-    }
+    uint slot = id.x;
+    uint chunkSlot = gtid.x / kChunkSize;
+    if (gtid.x % kChunkSize == 0)
+        _chunkVisible[chunkSlot] = _ViewInDrawOrder == 0 && ChunkCulled(slot / kChunkSize, false) ? 0 : 1;
 
     // ALL threads must hit the barrier (no early return before this)
     GroupMemoryBarrierWithGroupSync();
 
-    if (idx >= _SplatCount)
+    if (slot >= ViewSlotCount())
         return;
 
+    uint viewIdx = _IsStereo ? slot * 2 + _StereoEyeIndex : slot;
     // Culled chunk -> write invisible marker and skip
     if (_chunkVisible[chunkSlot] == 0)
     {
-        SplatViewData view = (SplatViewData)0;
-        if (_IsStereo) { _SplatViewData[idx * 2 + _StereoEyeIndex] = view; }
-        else { _SplatViewData[idx] = view; }
+        _SplatViewData[viewIdx] = (SplatViewData)0;
         return;
     }
+    uint idx = ViewSlotSplat(slot);
 
     SplatData splat;
     if (_MorphDataValid != 0)
@@ -1210,10 +1198,7 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
             SetViewAlpha(view.color, -max(alpha, 1.0 / 255.0));
     }
 
-    if (_IsStereo)
-        _SplatViewData[idx * 2 + _StereoEyeIndex] = view;
-    else
-        _SplatViewData[idx] = view;
+    _SplatViewData[viewIdx] = view;
 }
 
 // Single-dispatch stereo kernel: computes view-independent data ONCE (3D covariance,
@@ -1222,46 +1207,23 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
 [numthreads(GROUP_SIZE,1,1)]
 void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
 {
-    uint idx = id.x;
-    uint localIdx = gtid.x;
-    uint chunkSlot = localIdx / kChunkSize;
-    uint laneInChunk = localIdx % kChunkSize;
-
-    // Chunk frustum culling: a chunk is skipped only when it is outside BOTH
-    // eye frusta — the right eye sees past the left eye's right edge.
-    // Chunk culling tests AABB corners against the _MatrixVP frustum, which
-    // does not exist under ODS — and nothing is off-screen there anyway.
-    bool canCull = (_SplatChunkCount > 0) && (_MorphDataValid == 0) && (_OdsEnabled == 0);
-    if (laneInChunk == 0)
-    {
-        _chunkVisible[chunkSlot] = 1;
-        if (canCull)
-        {
-            uint globalChunkIdx = idx / kChunkSize;
-            if (globalChunkIdx < _SplatChunkCount)
-            {
-                float3 bmin, bmax;
-                ChunkBounds(globalChunkIdx, bmin, bmax);
-                bmin -= _StyleChunkExpand;
-                bmax += _StyleChunkExpand;
-                if (ChunkOutsideFrustum(mul(_MatrixVP_Eye[0], _MatrixObjectToWorld), bmin, bmax) &&
-                    ChunkOutsideFrustum(mul(_MatrixVP_Eye[1], _MatrixObjectToWorld), bmin, bmax))
-                    _chunkVisible[chunkSlot] = 0;
-            }
-        }
-    }
+    uint slot = id.x;
+    uint chunkSlot = gtid.x / kChunkSize;
+    if (gtid.x % kChunkSize == 0)
+        _chunkVisible[chunkSlot] = _ViewInDrawOrder == 0 && ChunkCulled(slot / kChunkSize, true) ? 0 : 1;
 
     GroupMemoryBarrierWithGroupSync();
 
-    if (idx >= _SplatCount)
+    if (slot >= ViewSlotCount())
         return;
 
     if (_chunkVisible[chunkSlot] == 0)
     {
-        _SplatViewData[idx * 2 + 0] = (SplatViewData)0;
-        _SplatViewData[idx * 2 + 1] = (SplatViewData)0;
+        _SplatViewData[slot * 2 + 0] = (SplatViewData)0;
+        _SplatViewData[slot * 2 + 1] = (SplatViewData)0;
         return;
     }
+    uint idx = ViewSlotSplat(slot);
 
     // Load splat data ONCE — same logic as CSCalcViewData
     SplatData splat;
@@ -1378,8 +1340,256 @@ void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_Group
                 SetViewAlpha(view.color, -max(alpha, 1.0 / 255.0));
         }
 
-        _SplatViewData[idx * 2 + eye] = view;
+        _SplatViewData[slot * 2 + eye] = view;
     }
+}
+
+// ── Draw order ──────────────────────────────────────────────────────────
+// A renderer drawn on its own (the per-object path: the headset, or modes the
+// global path does not take) settles its draw list before any view data
+// exists. CSCullSplats tests every splat conservatively and, on frames that
+// re-sort, writes its sort key; the view-data pass then runs over the draw
+// list alone, in draw order (_ViewInDrawOrder), so culled splats cost no view
+// data and the draw reads it sequentially.
+//
+// A sort that drops what this view culls (sentinel keys) leaves the draw list
+// as the front of the sorted order, _VisibleCounter[0] long. A throttled sort
+// keeps every splat, so its order outlives the view it was sorted for; then
+// the draw list is compacted out of it every frame (CSCompact*), keeping the
+// sorted order, by the visibility bits of the view at hand.
+
+float4x4 _MatrixSortMV;                     // object to sort-view space (keys)
+uint _CullWriteKeys;                        // non-zero on frames that re-sort
+RWByteAddressBuffer _SplatVisibleBits;      // one bit per splat: may be visible in this view
+RWStructuredBuffer<uint> _DrawOrder;        // compacted draw list: splat per slot
+RWStructuredBuffer<uint> _CompactTileSums;  // per tile: visible count, then its first slot
+RWStructuredBuffer<uint> _ViewDispatchArgs; // thread groups of the view-data pass
+uint _CompactTileCount;
+
+// The view-data pass repeats the frustum test in its own order of operations
+#define CULL_SLACK 1e-3
+
+// The view-data pass's frustum test for one eye (clip margin of the largest
+// scale plus the style reach, in front of the eye), widened by how far the
+// style may still snap the splat: an offset of length r moves each clip
+// coordinate by at most r times the length of its matrix row.
+bool MayBeInFrustum(float3 worldPos, float maxScale, float4x4 vp, float p00)
+{
+    float4 clip = mul(vp, float4(worldPos, 1));
+    float3 reach = _StyleReach * float3(length(vp[0].xyz), length(vp[1].xyz), length(vp[3].xyz));
+    if (clip.w <= -reach.z - 1e-5)
+        return false;
+    float limit = clip.w + reach.z + (maxScale + _StyleReach) * abs(p00) + CULL_SLACK * abs(clip.w);
+    return abs(clip.x) <= limit + reach.x && abs(clip.y) <= limit + reach.y;
+}
+
+// Whether a splat may show in this view: every splat the view-data pass
+// keeps passes (deletion, cutouts, the frustum of either eye), so culling
+// here never changes the image. The opacity culls need the whole splat and
+// stay with the view-data pass, which leaves what they drop degenerate.
+bool SplatMayBeVisible(uint idx, float3 objPos)
+{
+    if (_SplatBitsValid && idx < _SrcSplatCount &&
+        (_SplatDeletedBits.Load((idx / 32) * 4) & (1u << (idx & 31))) != 0)
+        return false;
+    if (IsSplatCut(objPos))
+        return false;
+    float animScaleMul = 1;
+    if (HasAnimData(idx))
+    {
+        if (_AnimOutputData[idx * 3].w <= 0)
+            return false;
+        animScaleMul = _AnimOutputData[idx * 3 + 1].x;
+    }
+    if (_SplatOpacityScale <= 0)
+        return false;
+    if (_OdsEnabled != 0)
+        return true;
+
+    float3 scale = _MorphDataValid != 0 ? _MorphedData[idx * 4 + 2].xyz : LoadSplatScale(idx);
+    float maxScale = max(max(abs(scale.x), abs(scale.y)), abs(scale.z)) * _SplatScale * animScaleMul;
+    float3 worldPos = mul(_MatrixObjectToWorld, float4(objPos, 1)).xyz;
+    if (_IsStereo != 0)
+        return MayBeInFrustum(worldPos, maxScale, _MatrixVP_Eye[0], _MatrixP_Eye[0]._m00) ||
+               MayBeInFrustum(worldPos, maxScale, _MatrixVP_Eye[1], _MatrixP_Eye[1]._m00);
+    return MayBeInFrustum(worldPos, maxScale, _MatrixVP, _MatrixP._m00);
+}
+
+groupshared uint _groupVisibleBits[GROUP_SIZE / 32];
+groupshared uint _groupVisibleCount;
+
+// Per splat: the visibility bit, the visible count, and on re-sorting frames
+// the sort key (identity payload, so equal keys keep splat order) — a
+// sentinel for culled splats unless the sort is throttled.
+[numthreads(GROUP_SIZE,1,1)]
+void CSCullSplats (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
+{
+    uint idx = id.x;
+    uint chunkSlot = gtid.x / kChunkSize;
+    if (gtid.x % kChunkSize == 0)
+        _chunkVisible[chunkSlot] = ChunkCulled(idx / kChunkSize, _IsStereo != 0) ? 0 : 1;
+    if (gtid.x < GROUP_SIZE / 32)
+        _groupVisibleBits[gtid.x] = 0;
+    if (gtid.x == 0)
+        _groupVisibleCount = 0;
+    GroupMemoryBarrierWithGroupSync();
+
+    if (idx < _SplatCount)
+    {
+        float3 pos = LoadSortPos(idx);
+        bool visible = _chunkVisible[chunkSlot] != 0 && SplatMayBeVisible(idx, pos);
+        if (visible)
+        {
+            InterlockedOr(_groupVisibleBits[gtid.x / 32], 1u << (gtid.x % 32));
+            InterlockedAdd(_groupVisibleCount, 1);
+        }
+        if (_CullWriteKeys != 0)
+        {
+            float3 sortPos = mul(_MatrixSortMV, float4(pos, 1)).xyz;
+            _SplatSortKeys[idx] = idx;
+            _SplatSortDistances[idx] = visible || _SortAllVisible != 0 ? DepthToSortKey(SortDepth(sortPos)) : 0xFFFFFFFF;
+        }
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+    if (gtid.x < GROUP_SIZE / 32)
+        _SplatVisibleBits.Store((gid.x * (GROUP_SIZE / 32) + gtid.x) * 4, _groupVisibleBits[gtid.x]);
+    if (gtid.x == 0)
+        InterlockedAdd(_VisibleCounter[0], _groupVisibleCount);
+}
+
+// Compaction of the sorted order into the draw list, in tiles of
+// COMPACT_TILE sorted entries: count per tile, scan the counts into each
+// tile's first slot, then scatter each tile's visible entries in order.
+#define COMPACT_ITEMS 4
+#define COMPACT_TILE (GROUP_SIZE * COMPACT_ITEMS)
+
+groupshared uint _compactScan[2 * GROUP_SIZE];
+groupshared uint _compactCount;
+
+// Exclusive scan of one value per thread across the group (Hillis-Steele;
+// each step reads one half of _compactScan and writes the other, so one
+// barrier per step). Every thread of the group must call it.
+uint GroupExclusiveScan(uint value, uint thread, out uint total)
+{
+    uint src = 0;
+    _compactScan[thread] = value;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll]
+    for (uint offset = 1; offset < GROUP_SIZE; offset <<= 1)
+    {
+        uint sum = _compactScan[src + thread];
+        if (thread >= offset)
+            sum += _compactScan[src + thread - offset];
+        src ^= GROUP_SIZE;
+        _compactScan[src + thread] = sum;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    uint inclusive = _compactScan[src + thread];
+    total = _compactScan[src + GROUP_SIZE - 1];
+    return inclusive - value;
+}
+
+// The splat at a position of the sorted order, and whether it may be visible
+bool SortedSplatVisible(uint position, out uint splat)
+{
+    splat = _SplatSortKeys[position];
+    return ((_SplatVisibleBits.Load((splat / 32) * 4) >> (splat % 32)) & 1) != 0;
+}
+
+[numthreads(GROUP_SIZE,1,1)]
+void CSCompactCount (uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
+{
+    if (gtid.x == 0)
+        _compactCount = 0;
+    GroupMemoryBarrierWithGroupSync();
+
+    uint first = gid.x * COMPACT_TILE + gtid.x * COMPACT_ITEMS;
+    uint count = 0;
+    [unroll]
+    for (uint i = 0; i < COMPACT_ITEMS; i++)
+    {
+        uint splat;
+        if (first + i < _SplatCount && SortedSplatVisible(first + i, splat))
+            count++;
+    }
+    InterlockedAdd(_compactCount, count);
+
+    GroupMemoryBarrierWithGroupSync();
+    if (gtid.x == 0)
+        _CompactTileSums[gid.x] = _compactCount;
+}
+
+// One group: the tile counts become each tile's first slot, and the total
+// the visible count
+[numthreads(GROUP_SIZE,1,1)]
+void CSCompactScan (uint3 gtid : SV_GroupThreadID)
+{
+    uint perThread = (_CompactTileCount + GROUP_SIZE - 1) / GROUP_SIZE;
+    uint first = gtid.x * perThread;
+    uint sum = 0;
+    for (uint i = 0; i < perThread; i++)
+    {
+        if (first + i < _CompactTileCount)
+            sum += _CompactTileSums[first + i];
+    }
+    uint total;
+    uint start = GroupExclusiveScan(sum, gtid.x, total);
+    for (uint j = 0; j < perThread; j++)
+    {
+        if (first + j < _CompactTileCount)
+        {
+            uint count = _CompactTileSums[first + j];
+            _CompactTileSums[first + j] = start;
+            start += count;
+        }
+    }
+    if (gtid.x == 0)
+        _VisibleCounter[0] = total;
+}
+
+[numthreads(GROUP_SIZE,1,1)]
+void CSCompactScatter (uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
+{
+    uint first = gid.x * COMPACT_TILE + gtid.x * COMPACT_ITEMS;
+    uint splats[COMPACT_ITEMS];
+    uint visibleMask = 0;
+    uint count = 0;
+    [unroll]
+    for (uint i = 0; i < COMPACT_ITEMS; i++)
+    {
+        uint splat = 0;
+        if (first + i < _SplatCount && SortedSplatVisible(first + i, splat))
+        {
+            visibleMask |= 1u << i;
+            count++;
+        }
+        splats[i] = splat;
+    }
+    uint total;
+    uint slot = _CompactTileSums[gid.x] + GroupExclusiveScan(count, gtid.x, total);
+    [unroll]
+    for (uint j = 0; j < COMPACT_ITEMS; j++)
+    {
+        if ((visibleMask & (1u << j)) != 0)
+            _DrawOrder[slot++] = splats[j];
+    }
+}
+
+// The per-object draw's indirect args (one instance per draw slot) and the
+// thread groups of the view-data pass over the same slots
+[numthreads(1,1,1)]
+void CSWriteDrawArgs (uint3 id : SV_DispatchThreadID)
+{
+    uint count = _VisibleCounter[0];
+    _IndirectArgs[0] = _IndirectIndexCount;
+    _IndirectArgs[1] = count;
+    _IndirectArgs[2] = 0;
+    _IndirectArgs[3] = 0;
+    _IndirectArgs[4] = 0;
+    _ViewDispatchArgs[0] = (count + GROUP_SIZE - 1) / GROUP_SIZE;
+    _ViewDispatchArgs[1] = 1;
+    _ViewDispatchArgs[2] = 1;
 }
 
 [numthreads(GROUP_SIZE,1,1)]
@@ -1440,7 +1650,7 @@ float _OcclusionTolerance;      // depth behind the nearest surface still kept
 #define OCCLUSION_MAX_RADIUS 4
 
 uint OcclusionEyeCount() { return _IsStereo != 0 ? 2 : 1; }
-uint OcclusionViewIndex(uint idx, uint eye) { return _IsStereo != 0 ? idx * 2 + eye : idx; }
+uint OcclusionViewIndex(uint slot, uint eye) { return _IsStereo != 0 ? slot * 2 + eye : slot; }
 
 bool OcclusionCell(SplatViewData view, out int2 cell)
 {
@@ -1480,13 +1690,13 @@ void CSOcclusionClear (uint3 id : SV_DispatchThreadID)
 [numthreads(GROUP_SIZE,1,1)]
 void CSOcclusionSplat (uint3 id : SV_DispatchThreadID)
 {
-    uint idx = id.x;
-    if (idx >= _SplatCount)
+    uint slot = id.x;
+    if (slot >= ViewSlotCount())
         return;
 
     for (uint eye = 0; eye < OcclusionEyeCount(); eye++)
     {
-        SplatViewData view = _SplatViewData[OcclusionViewIndex(idx, eye)];
+        SplatViewData view = _SplatViewData[OcclusionViewIndex(slot, eye)];
         int2 cell;
         if (!IsSplatViewVisible(view) || !OcclusionCell(view, cell))
             continue;
@@ -1515,13 +1725,13 @@ void CSOcclusionSplat (uint3 id : SV_DispatchThreadID)
 [numthreads(GROUP_SIZE,1,1)]
 void CSOcclusionCull (uint3 id : SV_DispatchThreadID)
 {
-    uint idx = id.x;
-    if (idx >= _SplatCount)
+    uint slot = id.x;
+    if (slot >= ViewSlotCount())
         return;
 
     for (uint eye = 0; eye < OcclusionEyeCount(); eye++)
     {
-        uint viewIdx = OcclusionViewIndex(idx, eye);
+        uint viewIdx = OcclusionViewIndex(slot, eye);
         SplatViewData view = _SplatViewData[viewIdx];
         int2 cell;
         if (!IsSplatViewVisible(view) || !OcclusionCell(view, cell))
@@ -1530,8 +1740,8 @@ void CSOcclusionCull (uint3 id : SV_DispatchThreadID)
         float nearest = asfloat(_OcclusionGrid.Load(OcclusionAddress(cell, eye)));
         if (view.pos.w > nearest + _OcclusionTolerance)
         {
-            // Same marker as the frustum cull: the draw discards it and the
-            // sort leaves it out
+            // Same marker as the frustum cull: the draw discards it, and the
+            // global path's sort leaves it out
             view.pos.w = 0;
             _SplatViewData[viewIdx] = view;
         }
@@ -1544,14 +1754,15 @@ void CSOcclusionCull (uint3 id : SV_DispatchThreadID)
 [numthreads(GROUP_SIZE,1,1)]
 void CSBakeQuads (uint3 id : SV_DispatchThreadID)
 {
-    uint idx = id.x;
-    if (idx >= _SplatCount)
+    uint slot = id.x;
+    if (slot >= ViewSlotCount())
         return;
+    uint idx = ViewSlotSplat(slot);
 
     uint eyeCount = _IsStereo != 0 ? 2 : 1;
     for (uint eye = 0; eye < eyeCount; eye++)
     {
-        uint viewIdx = _IsStereo != 0 ? idx * 2 + eye : idx;
+        uint viewIdx = _IsStereo != 0 ? slot * 2 + eye : slot;
         SplatViewData view = _SplatViewData[viewIdx];
         if (view.pos.w <= 0)
             continue;
