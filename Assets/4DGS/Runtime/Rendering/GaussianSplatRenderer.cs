@@ -3,8 +3,6 @@ using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Mathematics;
-using Unity.Profiling;
-using Unity.Profiling.LowLevel;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
@@ -199,8 +197,6 @@ namespace GaussianSplatting.Runtime
         private const int DeferFrames = 1;
         Hash128 _prevHash;
         bool _registered;
-
-        static readonly ProfilerMarker ProfSort = new(ProfilerCategory.Render, "GaussianSplat.Sort", MarkerFlags.SampleGPU);
 
         // Forwarding properties: compute shaders come from global Config
         internal ComputeShader csSplatUtilities => GaussianSplatRenderSystem.instance.Config?.CsSplatUtilities;
@@ -1260,7 +1256,7 @@ namespace GaussianSplatting.Runtime
             if (!TryFindSupportedKernel(KernelIndices.CalcDistances, out int kernelIndex))
                 return;
 
-            cmd.BeginSample(ProfSort);
+            cmd.BeginSample(GaussianSplatRenderSystem.ProfSort);
 
             cmd.SetBufferData(_gpuVisibleCounter, ZeroCounterData);
 
@@ -1320,7 +1316,7 @@ namespace GaussianSplatting.Runtime
                 cmd.SetComputeIntParam(csSplatUtilities, Props.IndirectIndexCount, 6);
                 cmd.DispatchCompute(csSplatUtilities, argsKernel, 1, 1, 1);
             }
-            cmd.EndSample(ProfSort);
+            cmd.EndSample(GaussianSplatRenderSystem.ProfSort);
         }
 
         public void Update()

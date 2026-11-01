@@ -14,6 +14,10 @@ namespace GaussianSplatting.Runtime
         internal static readonly ProfilerMarker ProfDraw = new(ProfilerCategory.Render, "GaussianSplat.Draw", MarkerFlags.SampleGPU);
         internal static readonly ProfilerMarker ProfCompose = new(ProfilerCategory.Render, "GaussianSplat.Compose", MarkerFlags.SampleGPU);
         internal static readonly ProfilerMarker ProfCalcView = new(ProfilerCategory.Render, "GaussianSplat.CalcView", MarkerFlags.SampleGPU);
+        // Global path only: merging each renderer's view data into the group buffers.
+        internal static readonly ProfilerMarker ProfCopyView = new(ProfilerCategory.Render, "GaussianSplat.CopyView", MarkerFlags.SampleGPU);
+        // Sort plus the indirect-args write that follows it, on every path.
+        internal static readonly ProfilerMarker ProfSort = new(ProfilerCategory.Render, "GaussianSplat.Sort", MarkerFlags.SampleGPU);
         // ReSharper restore MemberCanBePrivate.Global
 
         public static GaussianSplatRenderSystem instance => _instance ??= new GaussianSplatRenderSystem();
@@ -1002,10 +1006,12 @@ namespace GaussianSplatting.Runtime
                         break;
                     }
 
+                    cmb.BeginSample(ProfCopyView);
                     bool copySuccess = gs.CopyViewDataAndDistances(cmb, cam, gs.transform.localToWorldMatrix,
                         groupCache.viewData, groupCache.sortDistances, groupCache.sortKeys,
                         groupCache.visibleCounter, 0, dstOffset, gs.EffectiveSplatCount, writeKeys,
                         sortSettings);
+                    cmb.EndSample(ProfCopyView);
                     if (!copySuccess)
                     {
                         groupValid = false;
@@ -1030,7 +1036,6 @@ namespace GaussianSplatting.Runtime
 
                 groupCache.groupSignature = groupSignature;
 
-                cmb.BeginSample(ProfDraw);
                 // ── Tile-based rendering path ──────────────────────────
                 bool usedTile = false;
                 _tileRenderer ??= new GaussianTileRenderer();
@@ -1044,23 +1049,30 @@ namespace GaussianSplatting.Runtime
                 if (!groupBaked && !DirectToTarget && _config.useTileRenderer && _tileRenderer.HasOutputTarget &&
                     _tileRenderer.EnsureResources(_config, groupCache, tileW, tileH))
                 {
+                    // The tile pipeline sorts and rasterises in one; its GS.Tile*
+                    // markers nest inside Draw.
+                    cmb.BeginSample(ProfDraw);
                     _tileRenderer.Dispatch(cmb, cam, groupCache, dstOffset, groupSortNeeded, tileW, tileH);
+                    cmb.EndSample(ProfDraw);
                     usedTile = true;
                     Journal($"tile cam={cam.name} count={dstOffset}");
                 }
 
                 if (!usedTile && groupSortNeeded)
                 {
+                    cmb.BeginSample(ProfSort);
                     groupCache.sorterArgs.count = (uint)dstOffset;
                     _globalSorter.Dispatch(cmb, groupCache.sorterArgs);
                     groupCache.sortState.MarkSorted(cam.GetInstanceID(), sortSettings.Key, contentKey, camPos);
                     groupCache.indirectArgsValid = DispatchWriteIndirectArgs(cmb, reference,
                         groupCache.visibleCounter, groupCache.indirectArgs);
+                    cmb.EndSample(ProfSort);
                 }
 
                 // ── Fallback: traditional DrawProcedural ───────────────
                 if (!usedTile && BuffersValidForDraw("global", groupCache.viewData, groupCache.sortKeys))
                 {
+                    cmb.BeginSample(ProfDraw);
                     Journal($"draw global cam={cam.name} count={dstOffset} " +
                             $"view#{groupCache.viewData.GetHashCode():X8} order#{groupCache.sortKeys.GetHashCode():X8}");
                     _globalMpb.Clear();
@@ -1075,8 +1087,8 @@ namespace GaussianSplatting.Runtime
                     else
                         cmb.DrawProcedural(reference.GpuIndexBuffer, Matrix4x4.identity,
                             groupDisplayMat, DisplayPass, MeshTopology.Triangles, 6, dstOffset, _globalMpb);
+                    cmb.EndSample(ProfDraw);
                 }
-                cmb.EndSample(ProfDraw);
 
                 hasRenderedAGroup = true;
                 groupStart = groupEnd;
