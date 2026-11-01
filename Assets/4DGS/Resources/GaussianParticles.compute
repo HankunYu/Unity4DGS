@@ -47,8 +47,15 @@ StructuredBuffer<float4> _MorphedData;
 uint _MorphDataValid;
 float4x4 _SourceObjectToWorld;
 
+// Buffers one kernel writes and CSUpdateParticles only reads are declared
+// twice: writable for the kernel that fills them, read-only (*Read, the same
+// GraphicsBuffer) for the update. Unity caps a kernel at 8 UAVs
+// (SystemInfo.supportedRandomWriteTargetCount) and the update already holds
+// its four outputs plus the source's splat data.
+
 // The source's world positions at the previous store, w = 1 once written
 RWStructuredBuffer<float4> _SourcePrev;
+StructuredBuffer<float4> _SourcePrevRead;
 
 // Emit volumes (GaussianEmitVolume, must match MaxEmitVolumes): world to
 // local, and shape, falloff, weight, role (0 = birth, 1 = release)
@@ -65,6 +72,8 @@ RWStructuredBuffer<uint2> _EmitCandidates;
 RWStructuredBuffer<uint> _EmitBlockCounts;
 RWStructuredBuffer<uint> _EmitBlockOffsets;
 RWStructuredBuffer<uint> _EmitTotal;
+StructuredBuffer<uint2> _EmitCandidatesRead;
+StructuredBuffer<uint> _EmitTotalRead;
 uint _EmitBlockCount;
 
 uint _ParticleCount;
@@ -254,7 +263,7 @@ float3 CurlNoise(float3 p)
 // The velocity of the source surface at a splat now, scaled and capped
 float3 InheritedVelocity(uint src, float3 worldPos)
 {
-    float4 prev = _SourcePrev[src];
+    float4 prev = _SourcePrevRead[src];
     float3 inherited = prev.w > 0 ? (worldPos - prev.xyz) * _ParticleBirth.x : 0;
     float speed = length(inherited);
     if (speed > _ParticleBirth.z)
@@ -292,14 +301,14 @@ void CSUpdateParticles(uint3 id : SV_DispatchThreadID)
         bool hidden = _SplatCount == 0;
         if (_EmitFiltered != 0)
         {
-            uint total = _EmitTotal[0];
+            uint total = _EmitTotalRead[0];
             if (total == 0)
             {
                 hidden = true;
             }
             else
             {
-                uint2 candidate = _EmitCandidates[PcgHash(lifeKey + 2u) % total];
+                uint2 candidate = _EmitCandidatesRead[PcgHash(lifeKey + 2u) % total];
                 src = candidate.x;
                 // A soft volume edge turns down some of the births there
                 hidden = Hash01(lifeKey + 8u) >= asfloat(candidate.y);

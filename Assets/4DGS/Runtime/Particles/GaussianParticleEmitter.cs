@@ -58,6 +58,7 @@ namespace GaussianSplatting.Runtime
         private static readonly int PropParticleObjectScale = Shader.PropertyToID("_ParticleObjectScale");
         private static readonly int PropSourceObjectToWorld = Shader.PropertyToID("_SourceObjectToWorld");
         private static readonly int PropSourcePrev = Shader.PropertyToID("_SourcePrev");
+        private static readonly int PropSourcePrevRead = Shader.PropertyToID("_SourcePrevRead");
         private static readonly int PropMatrixWorldToObject = Shader.PropertyToID("_MatrixWorldToObject");
         private static readonly int PropCameraPos = Shader.PropertyToID("_VecWorldSpaceCameraPos");
         private static readonly int PropParticleState = Shader.PropertyToID("_ParticleState");
@@ -74,6 +75,8 @@ namespace GaussianSplatting.Runtime
         private static readonly int PropEmitBlockCounts = Shader.PropertyToID("_EmitBlockCounts");
         private static readonly int PropEmitBlockOffsets = Shader.PropertyToID("_EmitBlockOffsets");
         private static readonly int PropEmitTotal = Shader.PropertyToID("_EmitTotal");
+        private static readonly int PropEmitCandidatesRead = Shader.PropertyToID("_EmitCandidatesRead");
+        private static readonly int PropEmitTotalRead = Shader.PropertyToID("_EmitTotalRead");
         private static readonly int PropEmitBlockCount = Shader.PropertyToID("_EmitBlockCount");
 
         /// <summary>Seconds between simulation steps on the emitter's clock.</summary>
@@ -400,13 +403,14 @@ namespace GaussianSplatting.Runtime
             _cmd.SetComputeVectorArrayParam(_shader, PropParticleSizeOverLife, _sizeOverLifeSamples);
             _cmd.SetComputeMatrixParam(_shader, PropParticleWorldToObject, t.worldToLocalMatrix);
             _cmd.SetComputeFloatParam(_shader, PropParticleObjectScale, objectScale);
-            _cmd.SetComputeBufferParam(_shader, _kernel, PropSourcePrev, _sourcePrev);
+            // Read-only views of the buffers other kernels write, see the shader
+            _cmd.SetComputeBufferParam(_shader, _kernel, PropSourcePrevRead, _sourcePrev);
             _cmd.SetComputeBufferParam(_shader, _kernel, PropParticleState, _state);
             _cmd.SetComputeBufferParam(_shader, _kernel, PropParticleBase, _base);
             _cmd.SetComputeBufferParam(_shader, _kernel, PropParticleAnim, _anim);
             _cmd.SetComputeBufferParam(_shader, _kernel, PropParticleVelocity, _velocity);
-            _cmd.SetComputeBufferParam(_shader, _kernel, PropEmitCandidates, _emitCandidates);
-            _cmd.SetComputeBufferParam(_shader, _kernel, PropEmitTotal, _emitTotal);
+            _cmd.SetComputeBufferParam(_shader, _kernel, PropEmitCandidatesRead, _emitCandidates);
+            _cmd.SetComputeBufferParam(_shader, _kernel, PropEmitTotalRead, _emitTotal);
         }
 
         // Loads the active emit volumes under the emitter, as many as the
