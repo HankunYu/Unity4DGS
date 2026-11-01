@@ -42,24 +42,30 @@
 
 ## 环境要求
 
-- Unity **2022.3+** 且启用 **URP**
+- Unity **6000.3+**,启用 **URP 17.3**
 - 支持 compute shader 的 GPU —— 在 **Vulkan / Metal** 上效果最佳
+- Apple Vision Pro:需安装 visionOS 构建支持模块,并使用 Metal 渲染模式
 
 ## 安装
 
-Unity4DGS 是一个 Unity 包(`com.hankun.4dgs`),其清单文件位于 `Assets/4DGS/package.json`。可用以下任一方式添加到已有项目:
+Unity4DGS 是一个 Unity 包(`com.hankun.4dgs`),其清单文件位于 `Assets/4DGS/package.json`。它依赖时间轴包 [Tide](https://github.com/HankunYu/Tide)(`com.hankun.tide`),而 Tide 不在任何包注册表上,所以要先添加 Tide。
 
-**通过 Git URL** —— 在 Package Manager 中选择 *Add package from git URL*,输入(`?path=` 指向包所在的子目录):
+**通过 Git URL** —— 在 Package Manager 中选择 *Add package from git URL*,按以下顺序添加两次:
 
 ```
+https://github.com/HankunYu/Tide.git#v0.3.0
 https://github.com/HankunYu/Unity4DGS.git?path=Assets/4DGS
 ```
 
-**通过本地磁盘** —— 先 clone 仓库,然后在 Package Manager 中选择 *Add package from disk*,选中 `Assets/4DGS/package.json`:
+`#v0.3.0` 锁定 Unity4DGS 所基于的 Tide 版本;`?path=` 指向包所在的子目录。
+
+**通过本地磁盘** —— 连同子模块一起 clone 仓库,然后在 Package Manager 中选择 *Add package from disk*,先选中 `Packages/com.hankun.tide/package.json`,再选中 `Assets/4DGS/package.json`:
 
 ```
-git clone https://github.com/HankunYu/Unity4DGS.git
+git clone --recursive https://github.com/HankunYu/Unity4DGS.git
 ```
+
+**直接把本仓库作为项目打开** —— 按上面的方式带 `--recursive` clone(Tide 是 `Packages/` 下的子模块)。已有的 clone 需先运行 `git submodule update --init`,否则 Unity 会报找不到 `Tide` 中的类型。
 
 ## 快速开始
 
@@ -72,7 +78,7 @@ git clone https://github.com/HankunYu/Unity4DGS.git
 
 ## 示例资产
 
-`DemoScene` 引用了一个用 [World Labs](https://www.worldlabs.ai/) **Marble** 生成的高斯泼溅资产("ceramic" 场景)。该资产**未包含在本仓库中** —— 全新 clone 后 `DemoScene` 会出现 missing reference。请自备 `.ply` / `.spz` 并导入(见[快速开始](#快速开始))来填充场景。
+`DemoScene` 由一个火车车厢内部的高斯泼溅场景,和一个经 mesh splat 导入器转成泼溅、由 `GaussianMeshDriver` 驱动的动画角色组成。这两个资产都**未包含在本仓库中** —— 全新 clone 后 `DemoScene` 会出现 missing reference。请自备 `.ply` / `.spz`(以及用于 mesh splat 的模型)并导入(见[快速开始](#快速开始))来填充场景。
 
 ## 项目结构
 

@@ -42,24 +42,30 @@ Based on [aras-p/UnityGaussianSplatting](https://github.com/aras-p/UnityGaussian
 
 ## Requirements
 
-- Unity **2022.3+** with **URP**
+- Unity **6000.3+** with **URP 17.3**
 - A GPU with compute shader support — best results on **Vulkan / Metal**
+- Apple Vision Pro: the visionOS build support module and the Metal rendering mode
 
 ## Installation
 
-Unity4DGS is a Unity package (`com.hankun.4dgs`); its manifest lives at `Assets/4DGS/package.json`. Add it to an existing project either way:
+Unity4DGS is a Unity package (`com.hankun.4dgs`); its manifest lives at `Assets/4DGS/package.json`. It depends on [Tide](https://github.com/HankunYu/Tide) (`com.hankun.tide`), a timeline package that is not on a package registry, so add Tide first.
 
-**From a Git URL** — in the Package Manager, choose *Add package from git URL* and enter (the `?path=` points at the package subfolder):
+**From Git URLs** — in the Package Manager, choose *Add package from git URL* twice, in this order:
 
 ```
+https://github.com/HankunYu/Tide.git#v0.3.0
 https://github.com/HankunYu/Unity4DGS.git?path=Assets/4DGS
 ```
 
-**From disk** — clone the repo, then in the Package Manager choose *Add package from disk* and select `Assets/4DGS/package.json`:
+The `#v0.3.0` tag pins the Tide version Unity4DGS is built against; `?path=` points at the package subfolder.
+
+**From disk** — clone the repo with its submodules, then in the Package Manager choose *Add package from disk* and select `Packages/com.hankun.tide/package.json`, then `Assets/4DGS/package.json`:
 
 ```
-git clone https://github.com/HankunYu/Unity4DGS.git
+git clone --recursive https://github.com/HankunYu/Unity4DGS.git
 ```
+
+**Opening this repository as a project** — clone with `--recursive` as above (Tide is a submodule under `Packages/`). In an existing clone, run `git submodule update --init` first, or Unity reports missing `Tide` types.
 
 ## Getting Started
 
@@ -72,7 +78,7 @@ git clone https://github.com/HankunYu/Unity4DGS.git
 
 ## Sample Assets
 
-`DemoScene` references a Gaussian splat asset (a "ceramic" scene) generated with [World Labs](https://www.worldlabs.ai/) **Marble**. That asset is **not included in this repository** — a fresh clone will show a missing reference in `DemoScene`. Bring your own `.ply` / `.spz` and import it (see [Getting Started](#getting-started)) to populate the scene.
+`DemoScene` combines a Gaussian splat scene of a train interior with an animated character turned into splats by the mesh splat importer and driven by `GaussianMeshDriver`. Neither asset is included in this repository — a fresh clone shows missing references in `DemoScene`. Bring your own `.ply` / `.spz` (and a model for the mesh splat part) and import them (see [Getting Started](#getting-started)) to populate the scene.
 
 ## Project Layout
 
