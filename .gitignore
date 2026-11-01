@@ -70,6 +70,9 @@ AGENTS.md
 /Assets/GaussianAssets.meta
 /Assets/Audio/
 /Assets/Audio.meta
+# Scenes reference that content
+/Assets/Scenes/
+/Assets/Scenes.meta
 
 # Internal design notes
 /Assets/docs/
