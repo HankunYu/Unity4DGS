@@ -1,6 +1,6 @@
-// GPU radix sort kernels — separated from SplatUtilities.compute
-// so that wave-ops pragmas do not pollute utility kernels (e.g. CSCalcViewData)
-// which must remain supported on platforms without wave intrinsics (visionOS Metal).
+// GPU radix sort kernels — separated from SplatUtilities.compute so that the
+// wave-op requirements below only gate the sort. On GPUs without wave ops
+// GpuSorters falls back to SplatPortableSort.compute.
 
 // DeviceRadixSort
 #pragma multi_compile __ KEY_UINT KEY_INT KEY_FLOAT
@@ -13,7 +13,8 @@
 #pragma kernel Scan
 #pragma kernel Downsweep
 
-// GPU sorting needs wave ops
+// GPU sorting needs wave ops; wave intrinsics need DXC (FXC stops at SM 5.0).
+// use_dxc adds no requirement of its own, only the two pragmas below do.
 #pragma require wavebasic
 #pragma require waveballot
 #pragma use_dxc

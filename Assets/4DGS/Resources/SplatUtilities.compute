@@ -33,9 +33,9 @@
 #pragma kernel CSOcclusionCull
 #pragma kernel CSBakeQuads
 
-// Sort kernels (InitDeviceRadixSort, Upsweep, Scan, Downsweep) moved to SplatSort.compute
-// to keep wave-ops pragmas out of this file — required for visionOS Metal compatibility.
-// NOTE: Do NOT add #pragma use_dxc here — it causes IsSupported()=false on visionOS Metal.
+// The wave-intrinsic radix sort lives in SplatSort.compute: its #pragma require
+// wavebasic/waveballot applies to every kernel of a file, so keeping it there leaves
+// these kernels usable on GPUs without wave ops (where SplatPortableSort is used).
 
 #include "../Shaders/GaussianSplatting.hlsl"
 #include "../Shaders/GaussianVolume.hlsl"

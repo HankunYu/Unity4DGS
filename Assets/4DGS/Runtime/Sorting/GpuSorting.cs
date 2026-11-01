@@ -39,6 +39,9 @@ namespace GaussianSplatting.Runtime
 
         public bool Valid => _valid;
 
+        // Why Valid is false, for logs; null when valid.
+        public string UnsupportedReason { get; }
+
         public GpuSorting(ComputeShader cs)
         {
             _cs = cs;
@@ -54,15 +57,10 @@ namespace GaussianSplatting.Runtime
                       _kernelUpsweep >= 0 &&
                       _kernelScan >= 0 &&
                       _kernelDownsweep >= 0;
-            if (_valid)
+            if (!_valid)
             {
-                if (!cs.IsSupported(_kernelInit) ||
-                    !cs.IsSupported(_kernelUpsweep) ||
-                    !cs.IsSupported(_kernelScan) ||
-                    !cs.IsSupported(_kernelDownsweep))
-                {
-                    _valid = false;
-                }
+                UnsupportedReason = "sort kernels are missing from the compute shader";
+                return;
             }
 
             _keyUintKeyword = new LocalKeyword(cs, "KEY_UINT");
@@ -79,6 +77,28 @@ namespace GaussianSplatting.Runtime
                 cs.EnableKeyword(_vulkanKeyword);
             else
                 cs.DisableKeyword(_vulkanKeyword);
+
+            // Query support after the keywords are set, so the variant that will
+            // actually run is the one checked.
+            foreach (int kernel in new[] { _kernelInit, _kernelUpsweep, _kernelScan, _kernelDownsweep })
+            {
+                if (!cs.IsSupported(kernel))
+                {
+                    _valid = false;
+                    cs.GetKernelThreadGroupSizes(kernel, out uint x, out uint y, out uint z);
+                    UnsupportedReason = $"kernel {KernelName(kernel)} ({x * y * z} threads per group) " +
+                                        $"is not supported on {SystemInfo.graphicsDeviceType}";
+                    return;
+                }
+            }
+        }
+
+        private string KernelName(int kernel)
+        {
+            if (kernel == _kernelInit) return "InitDeviceRadixSort";
+            if (kernel == _kernelUpsweep) return "Upsweep";
+            if (kernel == _kernelScan) return "Scan";
+            return "Downsweep";
         }
 
         static uint DivRoundUp(uint x, uint y) => (x + y - 1) / y;
