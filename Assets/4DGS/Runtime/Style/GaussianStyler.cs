@@ -31,11 +31,11 @@ namespace GaussianSplatting.Runtime
 
         string ITideChannelTarget.GetChannelName(int index) => ChannelNames[index];
 
-        float ITideChannelTarget.GetChannelValue(int index) => weight;
+        TideValueType ITideChannelTarget.GetChannelType(int index) => TideValueType.Float;
 
-        void ITideChannelTarget.SetChannelValue(int index, float value) => weight = Mathf.Clamp01(value);
+        TideValue ITideChannelTarget.GetChannelValue(int index) => weight;
 
-        float ITideChannelTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
+        void ITideChannelTarget.SetChannelValue(int index, TideValue value) => weight = Mathf.Clamp01(value.AsFloat);
 
         // Loads the active volumes under this styler and their styles, as
         // many as the shaders take (GaussianStyleSet.MaxStyles/MaxVolumes)

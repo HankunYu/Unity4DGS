@@ -70,17 +70,18 @@ namespace GaussianSplatting.Runtime
 
         string ITideChannelTarget.GetChannelName(int index) => TimelineChannels[index];
 
-        float ITideChannelTarget.GetChannelValue(int index) => index == 0 ? splatScale : opacityScale;
+        TideValueType ITideChannelTarget.GetChannelType(int index) => TideValueType.Float;
 
-        void ITideChannelTarget.SetChannelValue(int index, float value)
+        TideValue ITideChannelTarget.GetChannelValue(int index) => index == 0 ? splatScale : opacityScale;
+
+        void ITideChannelTarget.SetChannelValue(int index, TideValue channelValue)
         {
+            float value = channelValue.AsFloat;
             if (index == 0)
                 splatScale = Mathf.Max(0f, value);
             else
                 opacityScale = Mathf.Max(0f, value);
         }
-
-        float ITideChannelTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
 
         // The styles this renderer draws with, refreshed from its styler
         // before each frame's view data (RefreshStyle)

@@ -36,6 +36,7 @@ namespace GaussianSplatting.Runtime
         private ITidePhaseSource _phaseSource;
         // Timeline channels: the labelled param slots, then Enabled
         private int[] _channelSlots;
+        private bool[] _channelDiscrete;
         private string[] _channelLabels;
         private readonly Vector4[] _channelParams = new Vector4[4];
 
@@ -173,39 +174,47 @@ namespace GaussianSplatting.Runtime
             return index < ChannelSlots.Length ? _channelLabels[ChannelSlots[index]] : "Enabled";
         }
 
-        float ITideChannelTarget.GetChannelValue(int index)
+        // Enabled switches; so do the param slots LerpParams snaps (enums),
+        // found by lerping each slot a quarter of the way and seeing whether it moved
+        TideValueType ITideChannelTarget.GetChannelType(int index)
         {
             if (index >= ChannelSlots.Length)
-                return enabled ? 1f : 0f;
+                return TideValueType.Bool;
+            if (_channelDiscrete == null)
+            {
+                _channelDiscrete = new bool[ChannelSlots.Length];
+                for (int i = 0; i < ChannelSlots.Length; i++)
+                {
+                    int s = ChannelSlots[i];
+                    Vector4 b = default;
+                    b[s % 4] = 1f;
+                    _channelDiscrete[i] = LerpParams(s / 4, default, b, 0.25f)[s % 4] != 0.25f;
+                }
+            }
+            return _channelDiscrete[index] ? TideValueType.Int : TideValueType.Float;
+        }
+
+        TideValue ITideChannelTarget.GetChannelValue(int index)
+        {
+            if (index >= ChannelSlots.Length)
+                return TideValue.Bool(enabled);
             int slot = ChannelSlots[index];
             CaptureParams(out _channelParams[0], out _channelParams[1], out _channelParams[2], out _channelParams[3]);
             return _channelParams[slot / 4][slot % 4];
         }
 
-        void ITideChannelTarget.SetChannelValue(int index, float value)
+        void ITideChannelTarget.SetChannelValue(int index, TideValue channelValue)
         {
             if (index >= ChannelSlots.Length)
             {
-                enabled = value >= 0.5f;
+                enabled = channelValue.AsBool;
                 return;
             }
+            float value = channelValue.AsFloat;
             int slot = ChannelSlots[index];
             CaptureParams(out _channelParams[0], out _channelParams[1], out _channelParams[2], out _channelParams[3]);
             _channelParams[slot / 4][slot % 4] = value;
             ApplyParams(_channelParams[0], _channelParams[1], _channelParams[2], _channelParams[3]);
-        }
-
-        float ITideChannelTarget.BlendChannel(int index, float from, float to, float t)
-        {
-            if (index >= ChannelSlots.Length)
-                return t < 0.5f ? from : to;
-            // LerpParams knows which slots are discrete
-            int slot = ChannelSlots[index];
-            Vector4 a = default;
-            Vector4 b = default;
-            a[slot % 4] = from;
-            b[slot % 4] = to;
-            return LerpParams(slot / 4, a, b, t)[slot % 4];
         }
 
         private int[] ChannelSlots

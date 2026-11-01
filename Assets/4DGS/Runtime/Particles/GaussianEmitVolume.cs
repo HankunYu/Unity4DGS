@@ -29,16 +29,17 @@ namespace GaussianSplatting.Runtime
 
         string ITideChannelTarget.GetChannelName(int index) => ChannelNames[index];
 
-        float ITideChannelTarget.GetChannelValue(int index) => index == 0 ? weight : falloff;
+        TideValueType ITideChannelTarget.GetChannelType(int index) => TideValueType.Float;
 
-        void ITideChannelTarget.SetChannelValue(int index, float value)
+        TideValue ITideChannelTarget.GetChannelValue(int index) => index == 0 ? weight : falloff;
+
+        void ITideChannelTarget.SetChannelValue(int index, TideValue channelValue)
         {
+            float value = channelValue.AsFloat;
             if (index == 0)
                 weight = Mathf.Clamp01(value);
             else
                 falloff = Mathf.Max(0f, value);
         }
-
-        float ITideChannelTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
     }
 }

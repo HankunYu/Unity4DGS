@@ -27,17 +27,18 @@ namespace GaussianSplatting.Runtime
 
         string ITideChannelTarget.GetChannelName(int index) => ChannelNames[index];
 
-        float ITideChannelTarget.GetChannelValue(int index) => index == 0 ? falloff : trailDuration;
+        TideValueType ITideChannelTarget.GetChannelType(int index) => TideValueType.Float;
 
-        void ITideChannelTarget.SetChannelValue(int index, float value)
+        TideValue ITideChannelTarget.GetChannelValue(int index) => index == 0 ? falloff : trailDuration;
+
+        void ITideChannelTarget.SetChannelValue(int index, TideValue channelValue)
         {
+            float value = channelValue.AsFloat;
             if (index == 0)
                 falloff = Mathf.Max(0f, value);
             else
                 trailDuration = Mathf.Max(0f, value);
         }
-
-        float ITideChannelTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
 
         /// <summary>
         /// GPU-uploadable data matching AnimVolumeData in the compute shader.

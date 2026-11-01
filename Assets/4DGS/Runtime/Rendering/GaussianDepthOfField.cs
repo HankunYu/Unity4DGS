@@ -64,7 +64,9 @@ namespace GaussianSplatting.Runtime
 
         string ITideChannelTarget.GetChannelName(int index) => ChannelNames[index];
 
-        float ITideChannelTarget.GetChannelValue(int index)
+        TideValueType ITideChannelTarget.GetChannelType(int index) => TideValueType.Float;
+
+        TideValue ITideChannelTarget.GetChannelValue(int index)
         {
             return index switch
             {
@@ -74,8 +76,9 @@ namespace GaussianSplatting.Runtime
             };
         }
 
-        void ITideChannelTarget.SetChannelValue(int index, float value)
+        void ITideChannelTarget.SetChannelValue(int index, TideValue channelValue)
         {
+            float value = channelValue.AsFloat;
             switch (index)
             {
                 case 0:
@@ -89,7 +92,5 @@ namespace GaussianSplatting.Runtime
                     break;
             }
         }
-
-        float ITideChannelTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
     }
 }
