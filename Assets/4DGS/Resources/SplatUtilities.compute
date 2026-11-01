@@ -1,14 +1,10 @@
 // SPDX-License-Identifier: MIT
 
-// Apple GPU Family 1-2 (visionOS simulator, older iOS devices) support max 512 threads
-// per threadgroup. Use 256 on Metal to be safe. Mobile GPUs (Adreno/Mali) also get
-// 256: the view-data kernels exceed the register budget at 1024 threads (fxc
-// X4714), which costs occupancy. Desktop keeps 1024.
-#if defined(SHADER_API_METAL) || defined(SHADER_API_MOBILE)
+// 256 threads everywhere: the view-data kernels exceed the register budget at
+// 1024 (fxc X4714), and the lost occupancy cost a desktop GPU about 20% of the
+// stereo frame; Apple GPU family 1-2 (visionOS simulator, older iOS devices)
+// cap a thread group at 512 anyway.
 #define GROUP_SIZE 256
-#else
-#define GROUP_SIZE 1024
-#endif
 
 #pragma kernel CSSetIndices
 #pragma kernel CSCalcDistances
@@ -996,8 +992,8 @@ SplatViewData CalculateEyeViewData(
     return view;
 }
 
-// Chunk frustum culling: 4 chunks per group (GROUP_SIZE=1024 / kChunkSize=256)
-groupshared uint _chunkVisible[4];
+// Chunk frustum culling: one slot per chunk in the group
+groupshared uint _chunkVisible[GROUP_SIZE / kChunkSize];
 
 // True when all 8 corners of the object-space AABB lie outside one clip plane.
 bool ChunkOutsideFrustum(float4x4 mvp, float3 bmin, float3 bmax)
