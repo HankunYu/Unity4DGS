@@ -1,5 +1,6 @@
 using System;
 using UnityEngine;
+using Tide;
 
 namespace GaussianSplatting.Runtime
 {
@@ -9,7 +10,8 @@ namespace GaussianSplatting.Runtime
     /// timeline's time alone.
     /// </summary>
     [Serializable]
-    public class GaussianParticleClip : GaussianTimelineClip
+    [TideDisplay("Particle")]
+    public class GaussianParticleClip : TideClip
     {
         [Tooltip("Emitter time at the start of the clip; the particles are prewarmed to it")]
         [SerializeField] private double clipIn;

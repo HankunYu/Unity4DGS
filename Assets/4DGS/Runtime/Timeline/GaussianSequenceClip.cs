@@ -1,5 +1,6 @@
 using System;
 using UnityEngine;
+using Tide;
 
 namespace GaussianSplatting.Runtime
 {
@@ -9,7 +10,8 @@ namespace GaussianSplatting.Runtime
     /// repeats the clip, so make the clip as long as the frames it should loop.
     /// </summary>
     [Serializable]
-    public class GaussianSequenceClip : GaussianTimelineClip
+    [TideDisplay("Sequence")]
+    public class GaussianSequenceClip : TideClip
     {
         [Min(0)]
         [SerializeField] private int startFrame;

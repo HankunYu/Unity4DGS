@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using Object = UnityEngine.Object;
+using Tide;
 
 namespace GaussianSplatting.Runtime
 {
@@ -12,24 +13,25 @@ namespace GaussianSplatting.Runtime
     /// by itself as it would without a timeline.
     /// </summary>
     [Serializable]
-    public class GaussianSequenceTrack : GaussianTimelineClipTrack
+    [TideDisplay("Sequence", 0.42f, 0.42f, 0.80f)]
+    public class GaussianSequenceTrack : TideClipTrack
     {
         public override Type BindingType => typeof(GaussianPlayer);
 
         public override Type ClipType => typeof(GaussianSequenceClip);
 
-        public override GaussianTimelineTrackInstance CreateInstance(GaussianTimelinePlayer player, Object binding)
+        public override TideTrackInstance CreateInstance(TidePlayer player, Object binding)
         {
             return new Instance(this, (GaussianPlayer)binding);
         }
 
-        private sealed class Instance : GaussianTimelineTrackInstance
+        private sealed class Instance : TideTrackInstance
         {
             private readonly GaussianSequenceTrack _track;
             private readonly GaussianPlayer _player;
             private readonly bool _ownPlaying;
             private readonly int _ownFrame;
-            private readonly List<GaussianClipSample> _samples = new();
+            private readonly List<TideClipSample> _samples = new();
             private bool _driving;
 
             public Instance(GaussianSequenceTrack track, GaussianPlayer player)
@@ -40,13 +42,13 @@ namespace GaussianSplatting.Runtime
                 _ownFrame = player.currentFrame;
             }
 
-            public override void Evaluate(in GaussianTimelineEvaluation evaluation)
+            public override void Evaluate(in TideEvaluation evaluation)
             {
                 if (_player == null)
                     return;
                 GaussianSplatSequence sequence = _player.sequence;
                 _track.Gather(evaluation, _samples);
-                int strongest = GaussianTimelineClipTrack.Strongest(_samples);
+                int strongest = TideClipTrack.Strongest(_samples);
                 if (strongest < 0 || sequence == null || sequence.FrameCount == 0)
                 {
                     if (_driving)
@@ -55,7 +57,7 @@ namespace GaussianSplatting.Runtime
                     return;
                 }
 
-                GaussianClipSample sample = _samples[strongest];
+                TideClipSample sample = _samples[strongest];
                 int frame = ((GaussianSequenceClip)_track.Clips[sample.ClipIndex]).FrameAt(sample.LocalTime, sequence);
                 _player.isPlaying = false;
                 if (frame != _player.currentFrame)

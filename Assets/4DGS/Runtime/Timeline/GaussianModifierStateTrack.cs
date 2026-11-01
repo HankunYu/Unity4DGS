@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using Object = UnityEngine.Object;
+using Tide;
 
 namespace GaussianSplatting.Runtime
 {
@@ -13,13 +14,14 @@ namespace GaussianSplatting.Runtime
     /// own transitions keep out of the way.
     /// </summary>
     [Serializable]
-    public class GaussianModifierStateTrack : GaussianTimelineClipTrack
+    [TideDisplay("Modifier State", 0.30f, 0.55f, 0.80f)]
+    public class GaussianModifierStateTrack : TideClipTrack
     {
         public override Type BindingType => typeof(GaussianModifierStateMachine);
 
         public override Type ClipType => typeof(GaussianModifierStateClip);
 
-        public override GaussianTimelineTrackInstance CreateInstance(GaussianTimelinePlayer player, Object binding)
+        public override TideTrackInstance CreateInstance(TidePlayer player, Object binding)
         {
             return new Instance(this, (GaussianModifierStateMachine)binding);
         }
@@ -71,7 +73,7 @@ namespace GaussianSplatting.Runtime
             }
         }
 
-        private sealed class Instance : GaussianTimelineTrackInstance
+        private sealed class Instance : TideTrackInstance
         {
             private readonly GaussianModifierStateTrack _track;
             private readonly GaussianModifierStateMachine _machine;
@@ -80,7 +82,7 @@ namespace GaussianSplatting.Runtime
             private readonly Pose[] _own;
             // Per clip, the pose of each modifier (its own pose where the state leaves it out)
             private readonly Dictionary<GaussianModifierStateClip, Pose[]> _clipPoses = new();
-            private readonly List<GaussianClipSample> _samples = new();
+            private readonly List<TideClipSample> _samples = new();
             private bool _driving;
 
             public Instance(GaussianModifierStateTrack track, GaussianModifierStateMachine machine)
@@ -95,7 +97,7 @@ namespace GaussianSplatting.Runtime
                     _own[i] = Pose.Of(_modifiers[i]);
             }
 
-            public override void Evaluate(in GaussianTimelineEvaluation evaluation)
+            public override void Evaluate(in TideEvaluation evaluation)
             {
                 if (_machine == null)
                     return;
@@ -115,7 +117,7 @@ namespace GaussianSplatting.Runtime
                         continue;
                     Pose pose = _own[m];
                     float total = 0f;
-                    foreach (GaussianClipSample sample in _samples)
+                    foreach (TideClipSample sample in _samples)
                     {
                         if (sample.Weight <= 0f)
                             continue;
@@ -137,12 +139,12 @@ namespace GaussianSplatting.Runtime
                     _machine.enabled = _machineEnabled;
             }
 
-            public override void CollectPhaseTargets(List<GaussianAnimModifier> modifiers)
+            public override void CollectPhaseTargets(List<ITidePhaseTarget> targets)
             {
                 foreach (GaussianAnimModifier modifier in _modifiers)
                 {
                     if (modifier != null)
-                        modifiers.Add(modifier);
+                        targets.Add(modifier);
                 }
             }
 

@@ -4,6 +4,7 @@ using System;
 using UnityEngine;
 using UnityEngine.Rendering;
 using Object = UnityEngine.Object;
+using Tide;
 
 namespace GaussianSplatting.Runtime
 {
@@ -232,6 +233,6 @@ namespace GaussianSplatting.Runtime
 
         // Same clock as GaussianAnimator: the timeline's time while one
         // drives the scene, so captures repeat, and edit mode still moves
-        private static float StyleClock => (float)GaussianSceneClock.Time;
+        private static float StyleClock => (float)TideClock.Time;
     }
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 using UnityEngine;
+using Tide;
 
 namespace GaussianSplatting.Runtime
 {
@@ -15,7 +16,7 @@ namespace GaussianSplatting.Runtime
     /// Timelines drive Weight and Falloff as channels.
     /// </summary>
     [AddComponentMenu("Gaussian Splatting/Style/Style Volume")]
-    public class GaussianStyleVolume : GaussianVolume, IGaussianTimelineTarget
+    public class GaussianStyleVolume : GaussianVolume, ITideChannelTarget
     {
         private static readonly string[] ChannelNames = { "Weight", "Falloff" };
 
@@ -27,13 +28,13 @@ namespace GaussianSplatting.Runtime
 
         protected override Color GizmoColor => Color.magenta;
 
-        int IGaussianTimelineTarget.ChannelCount => ChannelNames.Length;
+        int ITideChannelTarget.ChannelCount => ChannelNames.Length;
 
-        string IGaussianTimelineTarget.GetChannelName(int index) => ChannelNames[index];
+        string ITideChannelTarget.GetChannelName(int index) => ChannelNames[index];
 
-        float IGaussianTimelineTarget.GetChannelValue(int index) => index == 0 ? weight : falloff;
+        float ITideChannelTarget.GetChannelValue(int index) => index == 0 ? weight : falloff;
 
-        void IGaussianTimelineTarget.SetChannelValue(int index, float value)
+        void ITideChannelTarget.SetChannelValue(int index, float value)
         {
             if (index == 0)
                 weight = Mathf.Clamp01(value);
@@ -41,6 +42,6 @@ namespace GaussianSplatting.Runtime
                 falloff = Mathf.Max(0f, value);
         }
 
-        float IGaussianTimelineTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
+        float ITideChannelTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
     }
 }

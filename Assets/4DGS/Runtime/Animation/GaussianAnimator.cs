@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using Unity.Collections;
 using UnityEngine;
+using Tide;
 
 namespace GaussianSplatting.Runtime
 {
@@ -255,7 +256,7 @@ namespace GaussianSplatting.Runtime
             // Pack shared extra data (concatenated per-modifier segments)
             var extraData = new NativeArray<float>(Mathf.Max(extraFloatCount, 1), Allocator.Temp);
 
-            float time = (float)GaussianSceneClock.Time;
+            float time = (float)TideClock.Time;
 
             int vi = 0;
             int mi = 0;

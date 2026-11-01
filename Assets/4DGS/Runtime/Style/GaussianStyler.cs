@@ -2,6 +2,7 @@
 
 using System.Collections.Generic;
 using UnityEngine;
+using Tide;
 
 namespace GaussianSplatting.Runtime
 {
@@ -16,7 +17,7 @@ namespace GaussianSplatting.Runtime
     [AddComponentMenu("Gaussian Splatting/Style/Styler")]
     [RequireComponent(typeof(GaussianSplatRenderer))]
     [DisallowMultipleComponent]
-    public class GaussianStyler : MonoBehaviour, IGaussianTimelineTarget
+    public class GaussianStyler : MonoBehaviour, ITideChannelTarget
     {
         private static readonly string[] ChannelNames = { "Weight" };
 
@@ -26,15 +27,15 @@ namespace GaussianSplatting.Runtime
 
         private readonly List<GaussianStyleVolume> _volumes = new();
 
-        int IGaussianTimelineTarget.ChannelCount => ChannelNames.Length;
+        int ITideChannelTarget.ChannelCount => ChannelNames.Length;
 
-        string IGaussianTimelineTarget.GetChannelName(int index) => ChannelNames[index];
+        string ITideChannelTarget.GetChannelName(int index) => ChannelNames[index];
 
-        float IGaussianTimelineTarget.GetChannelValue(int index) => weight;
+        float ITideChannelTarget.GetChannelValue(int index) => weight;
 
-        void IGaussianTimelineTarget.SetChannelValue(int index, float value) => weight = Mathf.Clamp01(value);
+        void ITideChannelTarget.SetChannelValue(int index, float value) => weight = Mathf.Clamp01(value);
 
-        float IGaussianTimelineTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
+        float ITideChannelTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
 
         // Loads the active volumes under this styler and their styles, as
         // many as the shaders take (GaussianStyleSet.MaxStyles/MaxVolumes)

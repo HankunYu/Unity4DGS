@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Object = UnityEngine.Object;
+using Tide;
 
 namespace GaussianSplatting.Runtime
 {
@@ -11,22 +12,23 @@ namespace GaussianSplatting.Runtime
     /// time; between clips the emitter runs on by itself.
     /// </summary>
     [Serializable]
-    public class GaussianParticleTrack : GaussianTimelineClipTrack
+    [TideDisplay("Particle", 0.90f, 0.62f, 0.30f)]
+    public class GaussianParticleTrack : TideClipTrack
     {
         public override Type BindingType => typeof(GaussianParticleEmitter);
 
         public override Type ClipType => typeof(GaussianParticleClip);
 
-        public override GaussianTimelineTrackInstance CreateInstance(GaussianTimelinePlayer player, Object binding)
+        public override TideTrackInstance CreateInstance(TidePlayer player, Object binding)
         {
             return new Instance(this, (GaussianParticleEmitter)binding);
         }
 
-        private sealed class Instance : GaussianTimelineTrackInstance
+        private sealed class Instance : TideTrackInstance
         {
             private readonly GaussianParticleTrack _track;
             private readonly GaussianParticleEmitter _emitter;
-            private readonly List<GaussianClipSample> _samples = new();
+            private readonly List<TideClipSample> _samples = new();
 
             public Instance(GaussianParticleTrack track, GaussianParticleEmitter emitter)
             {
@@ -34,7 +36,7 @@ namespace GaussianSplatting.Runtime
                 _emitter = emitter;
             }
 
-            public override void Evaluate(in GaussianTimelineEvaluation evaluation)
+            public override void Evaluate(in TideEvaluation evaluation)
             {
                 if (_emitter == null)
                     return;
@@ -45,7 +47,7 @@ namespace GaussianSplatting.Runtime
                     _emitter.StopDriving();
                     return;
                 }
-                GaussianClipSample sample = _samples[strongest];
+                TideClipSample sample = _samples[strongest];
                 _emitter.Drive(((GaussianParticleClip)_track.Clips[sample.ClipIndex]).EmitterTime(sample.LocalTime));
             }
 

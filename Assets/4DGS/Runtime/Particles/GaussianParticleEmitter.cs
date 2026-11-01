@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Serialization;
+using Tide;
 
 namespace GaussianSplatting.Runtime
 {
@@ -40,7 +41,7 @@ namespace GaussianSplatting.Runtime
     [DisallowMultipleComponent]
     [DefaultExecutionOrder(100)]
     [RequireComponent(typeof(GaussianSplatRenderer))]
-    public class GaussianParticleEmitter : MonoBehaviour, IGaussianTimelineTarget
+    public class GaussianParticleEmitter : MonoBehaviour, ITideChannelTarget
     {
         private static readonly int PropParticleCount = Shader.PropertyToID("_ParticleCount");
         private static readonly int PropParticleSeed = Shader.PropertyToID("_ParticleSeed");
@@ -607,18 +608,18 @@ namespace GaussianSplatting.Runtime
             return text;
         }
 
-        int IGaussianTimelineTarget.ChannelCount => TimelineChannels.Length;
+        int ITideChannelTarget.ChannelCount => TimelineChannels.Length;
 
-        string IGaussianTimelineTarget.GetChannelName(int index) => TimelineChannels[index];
+        string ITideChannelTarget.GetChannelName(int index) => TimelineChannels[index];
 
-        float IGaussianTimelineTarget.GetChannelValue(int index) => index switch
+        float ITideChannelTarget.GetChannelValue(int index) => index switch
         {
             0 => emission,
             1 => opacity,
             _ => turbulence,
         };
 
-        void IGaussianTimelineTarget.SetChannelValue(int index, float value)
+        void ITideChannelTarget.SetChannelValue(int index, float value)
         {
             switch (index)
             {
@@ -634,6 +635,6 @@ namespace GaussianSplatting.Runtime
             }
         }
 
-        float IGaussianTimelineTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
+        float ITideChannelTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
     }
 }

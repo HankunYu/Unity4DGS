@@ -2,6 +2,7 @@
     "name": "GaussianSplatting",
     "rootNamespace": "GaussianSplatting.Runtime",
     "references": [
+        "GUID:6146dd66dd8740c59d40e4d8d68c223c",
         "GUID:d8b63aba1907145bea998dd612889d6b",
         "GUID:8992d429105beaf428dfc91fb5b9f531",
         "GUID:15fc0a57446b3144c949da3e2b9737a9",

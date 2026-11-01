@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 using UnityEngine;
+using Tide;
 
 namespace GaussianSplatting.Runtime
 {
@@ -12,7 +13,7 @@ namespace GaussianSplatting.Runtime
     /// Timelines drive Falloff and Trail Duration as channels.
     /// </summary>
     [AddComponentMenu("Gaussian Splatting/Animation/Anim Volume")]
-    public class GaussianAnimVolume : GaussianVolume, IGaussianTimelineTarget
+    public class GaussianAnimVolume : GaussianVolume, ITideChannelTarget
     {
         private static readonly string[] ChannelNames = { "Falloff", "Trail Duration" };
 
@@ -22,13 +23,13 @@ namespace GaussianSplatting.Runtime
 
         protected override Color GizmoColor => Color.cyan;
 
-        int IGaussianTimelineTarget.ChannelCount => ChannelNames.Length;
+        int ITideChannelTarget.ChannelCount => ChannelNames.Length;
 
-        string IGaussianTimelineTarget.GetChannelName(int index) => ChannelNames[index];
+        string ITideChannelTarget.GetChannelName(int index) => ChannelNames[index];
 
-        float IGaussianTimelineTarget.GetChannelValue(int index) => index == 0 ? falloff : trailDuration;
+        float ITideChannelTarget.GetChannelValue(int index) => index == 0 ? falloff : trailDuration;
 
-        void IGaussianTimelineTarget.SetChannelValue(int index, float value)
+        void ITideChannelTarget.SetChannelValue(int index, float value)
         {
             if (index == 0)
                 falloff = Mathf.Max(0f, value);
@@ -36,7 +37,7 @@ namespace GaussianSplatting.Runtime
                 trailDuration = Mathf.Max(0f, value);
         }
 
-        float IGaussianTimelineTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
+        float ITideChannelTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
 
         /// <summary>
         /// GPU-uploadable data matching AnimVolumeData in the compute shader.

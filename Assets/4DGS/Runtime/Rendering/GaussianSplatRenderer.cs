@@ -10,12 +10,13 @@ using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
 using UnityEngine.Serialization;
 using UnityEngine.XR;
+using Tide;
 
 namespace GaussianSplatting.Runtime
 {
     [AddComponentMenu("Gaussian Splatting/Splat Renderer")]
     [ExecuteInEditMode]
-    public class GaussianSplatRenderer : MonoBehaviour, IGaussianTimelineTarget
+    public class GaussianSplatRenderer : MonoBehaviour, ITideChannelTarget
     {
         [FormerlySerializedAs("m_Asset")]
         public GaussianSplatAsset splatAsset;
@@ -65,13 +66,13 @@ namespace GaussianSplatting.Runtime
         // volumes
         private static readonly string[] TimelineChannels = { "Splat Scale", "Opacity Scale" };
 
-        int IGaussianTimelineTarget.ChannelCount => TimelineChannels.Length;
+        int ITideChannelTarget.ChannelCount => TimelineChannels.Length;
 
-        string IGaussianTimelineTarget.GetChannelName(int index) => TimelineChannels[index];
+        string ITideChannelTarget.GetChannelName(int index) => TimelineChannels[index];
 
-        float IGaussianTimelineTarget.GetChannelValue(int index) => index == 0 ? splatScale : opacityScale;
+        float ITideChannelTarget.GetChannelValue(int index) => index == 0 ? splatScale : opacityScale;
 
-        void IGaussianTimelineTarget.SetChannelValue(int index, float value)
+        void ITideChannelTarget.SetChannelValue(int index, float value)
         {
             if (index == 0)
                 splatScale = Mathf.Max(0f, value);
@@ -79,7 +80,7 @@ namespace GaussianSplatting.Runtime
                 opacityScale = Mathf.Max(0f, value);
         }
 
-        float IGaussianTimelineTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
+        float ITideChannelTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
 
         // The styles this renderer draws with, refreshed from its styler
         // before each frame's view data (RefreshStyle)

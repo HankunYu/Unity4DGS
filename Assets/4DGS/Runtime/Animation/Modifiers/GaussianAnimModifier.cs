@@ -3,6 +3,7 @@
 using System.Collections.Generic;
 using Unity.Collections;
 using UnityEngine;
+using Tide;
 
 namespace GaussianSplatting.Runtime
 {
@@ -13,7 +14,7 @@ namespace GaussianSplatting.Runtime
     /// labelled parameter slots (see <see cref="GetParamLabels"/>) and Enabled
     /// as channels.
     /// </summary>
-    public abstract class GaussianAnimModifier : MonoBehaviour, IGaussianTimelineTarget
+    public abstract class GaussianAnimModifier : MonoBehaviour, ITideChannelTarget, ITidePhaseTarget
     {
         public const int TypeDissolve = 0;
         public const int TypeWave = 1;
@@ -32,7 +33,7 @@ namespace GaussianSplatting.Runtime
         // Accumulated phases (see PhaseCount), in double so hours of running keep their precision
         private double[] _phases;
         private float[] _phaseRates;
-        private IGaussianPhaseSource _phaseSource;
+        private ITidePhaseSource _phaseSource;
         // Timeline channels: the labelled param slots, then Enabled
         private int[] _channelSlots;
         private string[] _channelLabels;
@@ -63,12 +64,12 @@ namespace GaussianSplatting.Runtime
         /// this modifier, which knows the phase at any of its times), or back
         /// to accumulation with null.
         /// </summary>
-        public void SetPhaseSource(IGaussianPhaseSource source)
+        public void SetPhaseSource(ITidePhaseSource source)
         {
             _phaseSource = source;
         }
 
-        public IGaussianPhaseSource PhaseSource => _phaseSource;
+        public ITidePhaseSource PhaseSource => _phaseSource;
 
         /// <summary>The accumulated phase, as of the last <see cref="AdvanceFillTime"/>.</summary>
         protected double Phase(int index)
@@ -165,14 +166,14 @@ namespace GaussianSplatting.Runtime
 
         // ------------------------------------------------------------------ timeline channels
 
-        int IGaussianTimelineTarget.ChannelCount => ChannelSlots.Length + 1;
+        int ITideChannelTarget.ChannelCount => ChannelSlots.Length + 1;
 
-        string IGaussianTimelineTarget.GetChannelName(int index)
+        string ITideChannelTarget.GetChannelName(int index)
         {
             return index < ChannelSlots.Length ? _channelLabels[ChannelSlots[index]] : "Enabled";
         }
 
-        float IGaussianTimelineTarget.GetChannelValue(int index)
+        float ITideChannelTarget.GetChannelValue(int index)
         {
             if (index >= ChannelSlots.Length)
                 return enabled ? 1f : 0f;
@@ -181,7 +182,7 @@ namespace GaussianSplatting.Runtime
             return _channelParams[slot / 4][slot % 4];
         }
 
-        void IGaussianTimelineTarget.SetChannelValue(int index, float value)
+        void ITideChannelTarget.SetChannelValue(int index, float value)
         {
             if (index >= ChannelSlots.Length)
             {
@@ -194,7 +195,7 @@ namespace GaussianSplatting.Runtime
             ApplyParams(_channelParams[0], _channelParams[1], _channelParams[2], _channelParams[3]);
         }
 
-        float IGaussianTimelineTarget.BlendChannel(int index, float from, float to, float t)
+        float ITideChannelTarget.BlendChannel(int index, float from, float to, float t)
         {
             if (index >= ChannelSlots.Length)
                 return t < 0.5f ? from : to;

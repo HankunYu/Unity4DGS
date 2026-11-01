@@ -31,7 +31,7 @@ Based on [aras-p/UnityGaussianSplatting](https://github.com/aras-p/UnityGaussian
 - **GaussianStyler + GaussianStyleVolume + GaussianSplatStyle** — per-splat stylized looks (color ramps, rim light, dots, streaks, slices and grids, glints) blended in by weight. Like the animator and its volumes, a styler on the renderer takes the style volumes under it, each applying its own style in its region (Unbounded for the whole object, or e.g. the space around the camera); the strongest volume decides where they overlap, so one object can wear several styles. Fading volume weights on the timeline switches and fades styles
 - **GaussianParticleEmitter + GaussianEmitVolume** — GPU particles shed from a splat renderer and drawn as splats of their own: each is born on the source as it is drawn (style included), can ride on the moving surface before it leaves, and is then carried by wind and curl-noise flow, with color, opacity and size following curves over its life. Birth volumes limit where particles come from (e.g. the hands); release volumes free attached particles as they sweep over the body. The simulation steps on a fixed time grid, so a timeline particle track gives the same particles on every take
 - **GaussianDepthOfField** — thin-lens depth of field on the camera, applied per splat: no depth buffer needed, works in Direct mode and 360 (ODS) capture
-- **GaussianTimeline + GaussianTimelinePlayer** — a built-in timeline (no Unity Timeline package): clips with ease in/out and crossfades on channel (modifier, volume, styler, depth-of-field parameters), modifier-state, transform, activation, 4D sequence, model animation (Animator clips, crossfaded, in edit mode too), particle clock, audio, marker and nested sub-timeline tracks. Every frame depends on the time alone, modifier phases included, so seeking and scrubbing match playback; the clock can follow an AudioSource. Edit it in *Window > Gaussian Splatting > Timeline*, which previews on the scene without Play mode
+- **Tide timeline** (`Packages/com.hankun.tide`, a standalone package usable in other projects) — a deterministic timeline with no Unity Timeline dependency: clips with ease in/out and crossfades on channel, transform, activation, model animation (Animator clips, in edit mode too), audio, marker and nested sub-timeline tracks. Every frame depends on the time alone: rate-driven effects are integrated ahead into phase tables, and its scene clock times everything else, so seeking and scrubbing match playback and captures repeat take after take; the clock can follow an AudioSource. This project adds 4D sequence, modifier-state and particle tracks, and the renderer, volumes, styler, modifiers and depth of field expose channels. Edit it in *Window > Tide*, which previews on the scene without Play mode
 
 ![Unity4DGS in action](Docs/media/demo.gif)
 
@@ -91,13 +91,15 @@ Assets/4DGS/
 │   ├── Cutout/       # Cutout regions
 │   ├── Capture/      # Stereo 360 capture
 │   ├── Editing/      # Splat selection and editing state
-│   └── Timeline/     # Built-in timeline
+│   └── Timeline/     # Tide tracks for 4D sequences, modifier states and particles
 ├── Editor/           # Inspectors in the same folders, plus Import (PLY/SPZ),
 │                     # MeshSplat (mesh-to-splat importer) and editing tools
 ├── Shaders/          # Splat / point cloud shaders, sorting & morph compute
 ├── Resources/        # Compute shaders (animation, particles, tile rendering, utilities)
 ├── Presets/          # Style presets
 └── Settings/         # URP pipeline assets
+
+Packages/com.hankun.tide/  # Tide, the timeline (standalone package)
 ```
 
 ## License

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 using UnityEngine;
+using Tide;
 
 namespace GaussianSplatting.Runtime
 {
@@ -16,7 +17,7 @@ namespace GaussianSplatting.Runtime
     [AddComponentMenu("Gaussian Splatting/Depth of Field")]
     [RequireComponent(typeof(Camera))]
     [DisallowMultipleComponent]
-    public class GaussianDepthOfField : MonoBehaviour, IGaussianTimelineTarget
+    public class GaussianDepthOfField : MonoBehaviour, ITideChannelTarget
     {
         private static readonly string[] ChannelNames = { "Focus Distance", "Aperture Radius", "Max Blur Radius" };
 
@@ -59,11 +60,11 @@ namespace GaussianSplatting.Runtime
         // blur radius in pixels
         internal Vector4 ShaderParams => new(apertureRadius, 1f / FocusDistance, maxBlurRadius, 0f);
 
-        int IGaussianTimelineTarget.ChannelCount => ChannelNames.Length;
+        int ITideChannelTarget.ChannelCount => ChannelNames.Length;
 
-        string IGaussianTimelineTarget.GetChannelName(int index) => ChannelNames[index];
+        string ITideChannelTarget.GetChannelName(int index) => ChannelNames[index];
 
-        float IGaussianTimelineTarget.GetChannelValue(int index)
+        float ITideChannelTarget.GetChannelValue(int index)
         {
             return index switch
             {
@@ -73,7 +74,7 @@ namespace GaussianSplatting.Runtime
             };
         }
 
-        void IGaussianTimelineTarget.SetChannelValue(int index, float value)
+        void ITideChannelTarget.SetChannelValue(int index, float value)
         {
             switch (index)
             {
@@ -89,6 +90,6 @@ namespace GaussianSplatting.Runtime
             }
         }
 
-        float IGaussianTimelineTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
+        float ITideChannelTarget.BlendChannel(int index, float from, float to, float t) => Mathf.Lerp(from, to, t);
     }
 }

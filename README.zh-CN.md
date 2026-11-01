@@ -31,7 +31,7 @@
 - **GaussianStyler + GaussianStyleVolume + GaussianSplatStyle** — 逐 splat 风格化(颜色渐变、轮廓光、圆点、拉线、切片与网格、闪烁),按权重混入。和动画器及其体积一样,renderer 上的 Styler 收集它下面的风格体积,每个体积在自己的区域里应用自己的风格(Unbounded 覆盖整个物体,也可以是相机周围);重叠处由权重最大的体积决定,所以一个物体可以同时有多种风格。在时间轴上淡入淡出体积权重即可切换风格
 - **GaussianParticleEmitter + GaussianEmitVolume** — 从 splat renderer 上脱落的 GPU 粒子,本身也作为 splat 绘制:每个粒子出生在源物体当前画出来的样子上(包括风格),可以先附着在运动的表面上再脱离,之后随风和 curl 噪声流动,颜色、不透明度和大小随寿命按曲线变化。出生体积限定粒子从哪里发出(比如只从手上),释放体积扫过身体时让附着的粒子脱落。模拟按固定时间步进行,所以时间轴上的粒子轨道每次录制都得到相同的粒子
 - **GaussianDepthOfField** — 挂在相机上的薄透镜景深,逐 splat 计算:不需要深度缓冲,Direct 模式和 360(ODS)录制都能用
-- **GaussianTimeline + GaussianTimelinePlayer** — 自带的时间轴(不依赖 Unity Timeline 包):片段带淡入淡出和交叉淡化,轨道有通道(修改器、体积、Styler、景深参数)、修改器状态、变换、激活、4D 序列、模型动画(Animator 片段,可交叉淡化,编辑模式下也能预览)、粒子时钟、音频、标记和嵌套子时间轴。每一帧只由时间决定(修改器相位也是),所以跳转和拖动与播放一致;时钟可以跟随 AudioSource。在 *Window > Gaussian Splatting > Timeline* 里编辑,不进 Play 模式就能在场景里预览
+- **Tide 时间轴**(`Packages/com.hankun.tide`,可以在其他项目里单独使用的包) — 确定性的时间轴,不依赖 Unity Timeline 包:片段带淡入淡出和交叉淡化,轨道有通道、变换、激活、模型动画(Animator 片段,编辑模式下也能预览)、音频、标记和嵌套子时间轴。每一帧只由时间决定:随速率累积的效果预先积分成相位表,其余效果读它的场景时钟,所以跳转和拖动与播放一致,每次录制结果也一样;时钟可以跟随 AudioSource。本项目在此基础上加了 4D 序列、修改器状态和粒子轨道,renderer、体积、Styler、修改器和景深都提供通道。在 *Window > Tide* 里编辑,不进 Play 模式就能在场景里预览
 
 ![Unity4DGS 演示](Docs/media/demo.gif)
 
@@ -91,13 +91,15 @@ Assets/4DGS/
 │   ├── Cutout/       # 裁切区域
 │   ├── Capture/      # 双目 360 录制
 │   ├── Editing/      # splat 选择与编辑状态
-│   └── Timeline/     # 自带时间轴
+│   └── Timeline/     # 4D 序列、修改器状态和粒子的 Tide 轨道
 ├── Editor/           # 同名文件夹下的 Inspector,以及 Import(PLY/SPZ)、
 │                     # MeshSplat(模型转 splat 导入器)和编辑工具
 ├── Shaders/          # 泼溅 / 点云 shader、排序与 morph compute
 ├── Resources/        # Compute shader(动画、粒子、tile 渲染、工具)
 ├── Presets/          # 风格预设
 └── Settings/         # URP 管线资产
+
+Packages/com.hankun.tide/  # Tide 时间轴(独立的包)
 ```
 
 ## 许可证

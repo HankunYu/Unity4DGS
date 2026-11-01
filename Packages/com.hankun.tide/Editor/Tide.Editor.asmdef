@@ -1,0 +1,18 @@
+{
+    "name": "Tide.Editor",
+    "rootNamespace": "Tide.Editor",
+    "references": [
+        "GUID:6146dd66dd8740c59d40e4d8d68c223c"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
