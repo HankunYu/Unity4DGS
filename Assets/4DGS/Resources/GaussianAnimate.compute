@@ -713,6 +713,16 @@ void ApplyProperty(float weight, AnimModifierData mod,
     colorBlend = max(colorBlend, cBlend * weight);
 }
 
+// ── Flatten ──
+// p0: x=amount
+// Moves the splat towards the volume's local XY plane (z = 0) by the amount.
+void ApplyFlatten(float3 localPos, float weight, AnimModifierData mod,
+    inout float3 posOffset)
+{
+    float amount = saturate(mod.params0.x);
+    posOffset += float3(0, 0, -localPos.z) * amount * weight;
+}
+
 // ── Main kernel ──
 
 // Order-preserving float <-> uint mapping, so groupshared atomics can take
@@ -827,6 +837,14 @@ float3 AnimateSplat(uint idx)
         else if (mType == 9) // AudioRipple
         {
             ApplyAudioRipple(worldPos, weight, mod, posOffset, colorTint, colorBlend);
+        }
+        else if (mType == 10) // Flatten
+        {
+            // flatten works in volume local space
+            float3 volLocal = mul(vol.worldToLocal, float4(worldPos, 1)).xyz;
+            float3 localOffset = 0;
+            ApplyFlatten(volLocal, weight, mod, localOffset);
+            posOffset += mul((float3x3)vol.localToWorld, localOffset);
         }
     }
 

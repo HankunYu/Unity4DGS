@@ -23,7 +23,7 @@
 ### 动画与特效
 - **GaussianPlayer** — 4D 回放:以可配置的帧率播放逐帧泼溅资产序列
 - **GaussianAnimator + GaussianAnimVolume** — GPU 程序化动画,通过 box/sphere 体积并带衰减限定作用范围,非破坏性(在临时缓冲区上运行)
-- **Modifier 栈** — Dissolve、Wave、Warp、Property、Turbulence、Swirl、Caustic、WheatWave、Converge
+- **Modifier 栈** — Dissolve、Wave、Warp、Property、Turbulence、Swirl、Caustic、WheatWave、Converge、Flatten
 - **GaussianModifierStateMachine** — 状态机,支持参数捕获以及 modifier 状态间的混合过渡
 - **GaussianMorph** — 两个泼溅资产之间的 GPU 变形过渡
 - **GaussianCutout** — box / 椭球裁剪区域

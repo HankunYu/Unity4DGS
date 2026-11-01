@@ -23,7 +23,7 @@ Based on [aras-p/UnityGaussianSplatting](https://github.com/aras-p/UnityGaussian
 ### Animation & Effects
 - **GaussianPlayer** — 4D playback: plays per-frame splat asset sequences at a configurable frame rate
 - **GaussianAnimator + GaussianAnimVolume** — procedural GPU animation, scoped by box/sphere volumes with falloff, non-destructive (runs on temporary buffers)
-- **Modifier stack** — Dissolve, Wave, Warp, Property, Turbulence, Swirl, Caustic, WheatWave, Converge
+- **Modifier stack** — Dissolve, Wave, Warp, Property, Turbulence, Swirl, Caustic, WheatWave, Converge, Flatten
 - **GaussianModifierStateMachine** — state machine with parameter capture and blended transitions between modifier states
 - **GaussianMorph** — GPU morph transition between two splat assets
 - **GaussianCutout** — box/ellipsoid cutout regions

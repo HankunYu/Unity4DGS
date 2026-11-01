@@ -26,6 +26,7 @@ namespace GaussianSplatting.Runtime
         public const int TypeSwirl = 7;
         public const int TypeConverge = 8;
         public const int TypeAudioRipple = 9;
+        public const int TypeFlatten = 10;
 
         public const int ParamSlotCount = 16;
 
