@@ -16,6 +16,11 @@ struct v2f
     half4 col : COLOR0;
     float2 pos : TEXCOORD0;
     float4 vertex : SV_POSITION;
+    #if defined(GAUSSIAN_LAYERED_EYES) && defined(SHADER_API_METAL)
+    // Eye texture array slice (the eye being drawn). Under foveated rendering
+    // it also picks that eye's layer of the rasterization rate map.
+    uint rtIndex : SV_RenderTargetArrayIndex;
+    #endif
 };
 
 StructuredBuffer<SplatViewData> _SplatViewData;
@@ -82,6 +87,9 @@ void SplatManualDepthTest (float4 vertex)
 v2f SplatVert (uint vtxID, uint instID)
 {
     v2f o = (v2f)0;
+    #if defined(GAUSSIAN_LAYERED_EYES) && defined(SHADER_API_METAL)
+    o.rtIndex = _EyeIndex;
+    #endif
     instID = _OrderBuffer[instID];
 	uint viewIndex = _IsStereo ? instID * 2 + _EyeIndex : instID;
 	SplatViewData view = _SplatViewData[viewIndex];

@@ -60,6 +60,9 @@ CGPROGRAM
 #pragma editor_sync_compilation
 #pragma require 2darray
 #pragma multi_compile _ GAUSSIAN_STEREO_DEPTH
+// Direct stereo under foveated rendering: both eyes drawn into the whole eye
+// texture array, each routed to its slice by the vertex stage.
+#pragma multi_compile _ GAUSSIAN_LAYERED_EYES
 
 // Enable foveated rendering (VRR) support on visionOS Metal.
 #include_with_pragmas "Packages/com.unity.render-pipelines.core/ShaderLibrary/FoveatedRenderingKeywords.hlsl"

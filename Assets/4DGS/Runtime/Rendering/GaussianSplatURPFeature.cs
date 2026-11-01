@@ -93,6 +93,9 @@ namespace GaussianSplatting.Runtime
             private static readonly int GaussianSplatRT = Shader.PropertyToID(GaussianSplatRTName);
             private static readonly int CustomStereoEyeIndex = Shader.PropertyToID("_CustomStereoEyeIndex");
             private static readonly int GaussianDepthTex = Shader.PropertyToID("_GaussianDepthTex");
+            // Direct stereo under foveation: the vertex stage routes each eye to
+            // its slice of the eye texture array (RenderGaussianSplatsPass.hlsl).
+            private const string LayeredEyesKeyword = "GAUSSIAN_LAYERED_EYES";
 
             private readonly GaussianSplatURPFeature _owner;
 
@@ -110,6 +113,9 @@ namespace GaussianSplatting.Runtime
                 internal bool IsStereo;
                 internal bool IsXRActive;
                 internal bool Direct;
+                // Direct into a target rasterised under the XR foveation rate
+                // map: RenderDirect switches the foveated mode on itself.
+                internal bool DirectFoveated;
                 internal bool UseMatrixOverride;
                 internal Matrix4x4 OverrideView;
                 internal Matrix4x4 OverrideProj;
@@ -191,17 +197,25 @@ namespace GaussianSplatting.Runtime
                     builder.UseTexture(textureHandle, AccessFlags.ReadWrite);
                 if (applyStylize)
                     builder.UseTexture(stylizedHandle, AccessFlags.ReadWrite);
-                // Direct draws into the camera target, so it foveates under the
-                // same conditions as URP's own passes there (DrawObjectsPass).
-                // Their internal canFoveateIntermediatePasses flag is rebuilt
-                // from its public inputs, taking the untethered branch: a scaled
-                // XR viewport turns foveation off for intermediate targets.
+                // Direct draws into the camera target, so it must foveate exactly
+                // when URP's own passes there do (DrawObjectsPass): splats
+                // rasterised at full rate into a target URP rasterised under the
+                // foveation rate map come out right in the centre and stretched
+                // towards the edges. URP's internal canFoveateIntermediatePasses
+                // is rebuilt here from its public inputs.
+                bool directFoveated = false;
                 if (direct && cameraData.xr.enabled)
                 {
-                    bool passSupportsFoveation = resourceData.isActiveTargetBackBuffer ||
-                                                 XRSystem.GetRenderViewportScale() == 1f;
-                    builder.EnableFoveatedRasterization(cameraData.xr.supportsFoveatedRendering && passSupportsFoveation);
+                    bool canFoveateIntermediatePasses = !IsUntetheredXRPlatform ||
+                                                        XRSystem.GetRenderViewportScale() == 1f;
+                    bool passSupportsFoveation = canFoveateIntermediatePasses || resourceData.isActiveTargetBackBuffer;
+                    directFoveated = cameraData.xr.supportsFoveatedRendering && passSupportsFoveation;
+                    // The native render pass compiler applies this only to the
+                    // native (raster) passes it begins itself; this unsafe pass
+                    // binds its own targets, so RenderDirect also sets the mode.
+                    builder.EnableFoveatedRasterization(directFoveated);
                 }
+                passData.DirectFoveated = directFoveated;
                 builder.AllowPassCulling(false);
                 builder.SetRenderFunc(static (PassData data, UnsafeGraphContext context) =>
                 {
@@ -344,11 +358,19 @@ namespace GaussianSplatting.Runtime
                 });
             }
 
+            // URP's internal PlatformAutoDetect.isXRMobile: only Android and
+            // WinRT XR (Quest, HoloLens) count as untethered, where a scaled
+            // viewport turns foveation off for intermediate passes. visionOS
+            // is not among them, so there URP foveates at any viewport scale.
+            private static bool IsUntetheredXRPlatform =>
+                Application.platform is RuntimePlatform.Android or RuntimePlatform.WSAPlayerARM or
+                    RuntimePlatform.WSAPlayerX64 or RuntimePlatform.WSAPlayerX86;
+
             // Draws splats straight into the camera color target, depth-tested
             // against the camera depth: no intermediate RT, no composite. Under
-            // XR each eye slice is bound in turn; with the pass's foveated
-            // rasterization enabled, the splats rasterise under the eye
-            // texture's own foveation rate map instead of at full rate.
+            // XR foveation both eyes go into the whole eye texture array and
+            // rasterise under its foveation rate map; otherwise each eye slice
+            // is bound in turn and drawn at full rate.
             private static void RenderDirect(PassData data, CommandBuffer cmd, GaussianSplatRenderSystem system)
             {
                 system.DirectToTarget = true;
@@ -357,16 +379,39 @@ namespace GaussianSplatting.Runtime
                     // Prepare once (view data for both eyes, back-to-front sort)
                     system.PrepareSplats(data.CameraData.camera, cmd);
                     cmd.DisableScissorRect();
-                    var eyeViewport = new Rect(0, 0, data.RenderSize.x, data.RenderSize.y);
-                    for (int eye = 0; eye < 2; eye++)
+                    if (data.DirectFoveated)
                     {
-                        cmd.SetRenderTarget(data.SourceTexture, data.SourceDepth, 0, CubemapFace.Unknown, eye);
-                        cmd.SetViewport(eyeViewport);
-                        system.RenderPreparedSplats(cmd, eye);
+                        // The eye texture is rasterised under the compositor's
+                        // foveation rate map. Bind the whole array with the
+                        // foveated mode on, as URP's own XR passes do, and let
+                        // the vertex stage route each eye to its slice: the
+                        // slice also selects that eye's layer of the rate map,
+                        // which binding one slice at a time does not. The
+                        // viewport stays at the target default; under a rate
+                        // map it is in screen space, not texture pixels.
+                        cmd.SetFoveatedRenderingMode(FoveatedRenderingMode.Enabled);
+                        cmd.SetRenderTarget(data.SourceTexture, data.SourceDepth, 0, CubemapFace.Unknown, -1);
+                        cmd.EnableShaderKeyword(LayeredEyesKeyword);
+                        system.RenderPreparedSplats(cmd, 0);
+                        system.RenderPreparedSplats(cmd, 1);
+                        cmd.DisableShaderKeyword(LayeredEyesKeyword);
+                        cmd.SetFoveatedRenderingMode(FoveatedRenderingMode.Disabled);
+                    }
+                    else
+                    {
+                        var eyeViewport = new Rect(0, 0, data.RenderSize.x, data.RenderSize.y);
+                        for (int eye = 0; eye < 2; eye++)
+                        {
+                            cmd.SetRenderTarget(data.SourceTexture, data.SourceDepth, 0, CubemapFace.Unknown, eye);
+                            cmd.SetViewport(eyeViewport);
+                            system.RenderPreparedSplats(cmd, eye);
+                        }
                     }
                 }
                 else
                 {
+                    if (data.DirectFoveated)
+                        cmd.SetFoveatedRenderingMode(FoveatedRenderingMode.Enabled);
                     cmd.SetRenderTarget(data.SourceTexture, data.SourceDepth);
                     if (data.UseMatrixOverride)
                     {
@@ -379,6 +424,8 @@ namespace GaussianSplatting.Runtime
                     }
                     system.SortAndRenderSplats(data.CameraData.camera, cmd);
                     system.MatrixOverride = null;
+                    if (data.DirectFoveated)
+                        cmd.SetFoveatedRenderingMode(FoveatedRenderingMode.Disabled);
                 }
                 system.DirectToTarget = false;
             }

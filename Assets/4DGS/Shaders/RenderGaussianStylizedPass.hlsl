@@ -68,6 +68,10 @@ struct v2fStylized
 	// Eye-to-splat distance, for the depth AOV: clip w in the perspective
 	// path, the ODS solve's distance in the omnidirectional one
 	float viewDist : TEXCOORD2;
+	#if defined(GAUSSIAN_LAYERED_EYES) && defined(SHADER_API_METAL)
+	// Eye texture array slice, as in v2f
+	uint rtIndex : SV_RenderTargetArrayIndex;
+	#endif
 };
 
 v2fStylized StylizedVert (uint vtxID, uint instID)
@@ -75,6 +79,9 @@ v2fStylized StylizedVert (uint vtxID, uint instID)
 	uint splatIdx = _OrderBuffer[instID];
 	SplatStyleRange range = StyleRangeFor(splatIdx);
 	v2fStylized o = (v2fStylized)0;
+	#if defined(GAUSSIAN_LAYERED_EYES) && defined(SHADER_API_METAL)
+	o.rtIndex = _EyeIndex;
+	#endif
 
 	if (range.baked == 0)
 	{
