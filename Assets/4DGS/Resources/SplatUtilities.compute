@@ -28,6 +28,9 @@
 #pragma kernel CSOcclusionSplat
 #pragma kernel CSOcclusionCull
 #pragma kernel CSBakeQuads
+#pragma kernel CSLightShadowClear
+#pragma kernel CSLightShadowBounds
+#pragma kernel CSLightShadowSplat
 
 // The wave-intrinsic radix sort lives in SplatSort.compute: its #pragma require
 // wavebasic/waveballot applies to every kernel of a file, so keeping it there leaves
@@ -106,6 +109,11 @@ uint _DeformedBaseValid;
 // GaussianParticleEmitter, for Velocity streaks
 StructuredBuffer<float4> _SplatVelocity;
 uint _SplatVelocityValid;
+
+// Per-splat world segment (xyz from the splat to its other end, 0) from a
+// segment source such as GaussianParticleLinks, for Segment streaks
+StructuredBuffer<float4> _SplatSegment;
+uint _SplatSegmentValid;
 
 // Per-chunk bounds of moving splats (object space, 2 float4s per chunk:
 // min, max), reduced each frame by the animation or mesh driver kernel so
@@ -367,23 +375,34 @@ float BackfaceVisibility(float4 rot, float3 centerWorldPos)
 // wears the slot StyleAt picks, blended in by its weight. The color side
 // lives in GaussianStyle.hlsl; the shape, snap and blend here.
 #include "../Shaders/GaussianStyle.hlsl"
+// The scene lighting (GaussianLightSet), applied before the style; its
+// shadow map is written by the CSLightShadow* kernels below
+#include "../Shaders/GaussianLighting.hlsl"
 // Per slot: x GaussianSplatStyleShape, y dot radius (pixels),
-// z GaussianSplatStyleStreakAxis, w streak length (world units)
+// z GaussianSplatStyleStreakAxis, w streak length (world units, for the
+// World Axis and View Ray axes)
 float4 _StyleShapeParams[MAX_STYLES];
 // Per slot: xyz streak direction (world, normalized), w streak time
 // (seconds, for the Velocity axis)
 float4 _StyleStreakParams[MAX_STYLES];
 // Per slot: x streak half width (pixels), y dot diameter / streak width
 // floor in world units (0 = off), z additivity at full weight (scaled per
-// splat by its style weight), w fraction of splats kept
+// splat by its style weight), w unused
 float4 _StyleSizeParams[MAX_STYLES];
 // Per slot: x GaussianSplatStyleQuantize, y spacing (world units), z world
 // units around a slice or grid point that stay, w slice offset
 float4 _StyleQuantizeParams[MAX_STYLES];
-// Per slot: xyz slice normal (world, normalized)
+// Per slot: xyz slice normal (world, normalized), w 1 when the style's
+// additive splats still occlude (GaussianSplatStyle.Occludes)
 float4 _StyleSliceNormals[MAX_STYLES];
-// World distance what the styles draw can lie from the splat (snap, streak
-// and size floor), for frustum culling,
+// Per slot: x how far the rim fades splats, y how far it spills them out
+// (world units)
+float4 _StyleRimShapeParams[MAX_STYLES];
+// Per slot: x fraction of splats kept, y camera distance the density is
+// tuned at (world units, 0 = off)
+float4 _StyleThinParams[MAX_STYLES];
+// World distance what the styles draw can lie from the splat (snap, rim
+// spill, streak and size floor), for frustum culling,
 // and the same in object space for the chunk bounds
 float _StyleReach;
 float _StyleChunkExpand;
@@ -494,6 +513,29 @@ float WorldSizeToPixels(float worldSize, float w)
 // disc loses most of its light to the rim while a blurred one loses little.
 #define QUAD_DISC_EDGE_PAD 0.5
 
+// The share of a styled splat that thinning keeps: its random rank against
+// the kept fraction, which past the density distance shrinks with the
+// square of the camera distance, so dots of a fixed pixel size keep their
+// density on screen. The same splats go first at any distance, and those
+// near the cut fade instead of popping as the camera moves. From the camera
+// centre, so both eyes agree.
+float StyleThinKeep(uint idx, uint slot, float3 worldPos)
+{
+    float2 thin = _StyleThinParams[slot].xy;
+    float fraction = thin.x;
+    if (thin.y > 0)
+    {
+        float ratio = thin.y / max(distance(worldPos, _VecWorldSpaceCameraPos.xyz), 1e-4);
+        fraction *= min(ratio * ratio, 1.0);
+    }
+    if (fraction >= 1)
+        return 1.0;
+    // A band a tenth of the kept fraction wide, centred on the cut so the
+    // kept light matches the fraction
+    float band = max(fraction * 0.1, 1e-5);
+    return saturate((fraction - StyleHash01(idx ^ 0x2c1b3c6du)) / band + 0.5);
+}
+
 // Snaps a styled splat toward its slice or grid point and fades the splats
 // the style drops (thinning, or too far from a slice or grid point) by
 // scaling their opacity, so at full weight the opacity cull removes them from
@@ -504,10 +546,9 @@ void ApplyStyleQuantize(uint idx, StyleSample style, inout SplatData splat, inou
     if (style.weight <= 0)
         return;
 
-    float keepFraction = _StyleSizeParams[style.slot].w;
     float4 q = _StyleQuantizeParams[style.slot];
     float3 sliceNormal = _StyleSliceNormals[style.slot].xyz;
-    float keep = (keepFraction >= 1 || StyleHash01(idx ^ 0x2c1b3c6du) < keepFraction) ? 1.0 : 0.0;
+    float keep = StyleThinKeep(idx, style.slot, worldPos);
     float3 snapped = worldPos;
     float dist = 0;
     if (q.x > 0.5 && q.x < 1.5)
@@ -529,6 +570,34 @@ void ApplyStyleQuantize(uint idx, StyleSample style, inout SplatData splat, inou
     worldPos = lerp(worldPos, snapped, style.weight);
     splat.pos = mul(_MatrixWorldToObject, float4(worldPos, 1)).xyz;
     splat.opacity *= (half)lerp(1.0, keep, style.weight);
+}
+
+// Loosens a styled splat at its silhouette: the rim term (with its noise,
+// GaussianStyle.hlsl) fades it and pushes it out along its surface normal,
+// each splat by its own random share of the spill, squared so most move a
+// little and a few far. Runs before projection like the snap, from the
+// camera centre, so both eyes agree.
+void ApplyStyleRimShape(uint idx, StyleSample style, inout SplatData splat, inout float3 worldPos)
+{
+    if (style.weight <= 0)
+        return;
+    float2 rimShape = _StyleRimShapeParams[style.slot].xy;
+    if (rimShape.x <= 0 && rimShape.y <= 0)
+        return;
+
+    float rim = StyleRim(_StyleLightParams[style.slot].z, splat.rot, splat.scale, worldPos)
+              * StyleRimNoise(style.slot, idx);
+    rim = saturate(rim) * style.weight;
+    if (rimShape.y > 0)
+    {
+        // Mesh splats face out along their local +Z; inverse transpose, as
+        // for the backface normal
+        float3 normal = normalize(mul(QuatRotateVector(float3(0, 0, 1), splat.rot), (float3x3)_MatrixWorldToObject));
+        float share = StyleHash01(idx ^ 0x5be0cd19u);
+        worldPos += normal * (rimShape.y * rim * share * share);
+        splat.pos = mul(_MatrixWorldToObject, float4(worldPos, 1)).xyz;
+    }
+    splat.opacity *= (half)(1.0 - rimShape.x * rim);
 }
 
 // Takes and returns gamma-space color, like the SH output it modifies
@@ -578,6 +647,7 @@ SplatSharedData CalcSharedSplatData(
         ssd.color.rgb = ShadeSH(splat.sh, objViewDir, _SHOrder, _SHOnly != 0);
         if (animColorBlend > 0)
             ssd.color.rgb = lerp(ssd.color.rgb, (half3)animColorTint, (half)animColorBlend);
+        ssd.color.rgb = LightSplat(ssd.color.rgb, splat.rot, splat.scale, centerWorldPos);
         ssd.color.rgb = ApplyStyle(ssd.color.rgb, style, splat, centerWorldPos, idx);
         ssd.color.a = min(finalOpacity, 65000);
     }
@@ -792,7 +862,13 @@ void BakeQuad(inout SplatViewData view, uint idx, float3 worldPos, float4x4 vpMa
     {
         float4 streak = _StyleStreakParams[slot];
         float3 tailWorld;
-        if (shape.z > 1.5)
+        if (shape.z > 2.5)
+        {
+            // The splat's own segment
+            float3 segment = _SplatSegmentValid != 0 && idx < _SrcSplatCount ? _SplatSegment[idx].xyz : 0;
+            tailWorld = worldPos + segment;
+        }
+        else if (shape.z > 1.5)
         {
             // The path the splat covered over the streak time
             float3 velocity = _SplatVelocityValid != 0 && idx < _SrcSplatCount ? _SplatVelocity[idx].xyz : 0;
@@ -973,6 +1049,7 @@ SplatViewData CalculateEyeViewData(
         // Apply animation color tint
         if (animColorBlend > 0)
             col.rgb = lerp(col.rgb, (half3)animColorTint, (half)animColorBlend);
+        col.rgb = LightSplat(col.rgb, splat.rot, splat.scale, centerWorldPos);
         col.rgb = ApplyStyle(col.rgb, style, splat, centerWorldPos, idx);
 
         // Baked quads take their blur in BakeQuad, with the shape they morph into
@@ -1179,8 +1256,9 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
 
     // Cutout check (uses object-space position)
     bool isCut = IsSplatCut(splat.pos);
-    StyleSample style = StyleAt(centerWorldPos);
+    StyleSample style = StyleAt(centerWorldPos, idx);
     ApplyStyleQuantize(idx, style, splat, centerWorldPos);
+    ApplyStyleRimShape(idx, style, splat, centerWorldPos);
 
     // Selection highlight: apply to the final view data after helper returns
     // (only relevant for non-stereo / editor usage, but keep consistent)
@@ -1345,8 +1423,9 @@ void CSCalcViewDataStereo (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_Group
         isDeleted = (wordVal & (1 << (idx & 31))) != 0;
     }
     bool isCut = IsSplatCut(splat.pos);
-    StyleSample style = StyleAt(centerWorldPos);
+    StyleSample style = StyleAt(centerWorldPos, idx);
     ApplyStyleQuantize(idx, style, splat, centerWorldPos);
+    ApplyStyleRimShape(idx, style, splat, centerWorldPos);
     bool isSelected = false;
     if (_SplatBitsValid)
     {
@@ -1459,7 +1538,8 @@ uint OcclusionAddress(int2 cell, uint eye)
 // Opacity with which a splat hides what is behind it, as it will be drawn:
 // with the point boost and clamp BakeQuad applies after this pass, less the
 // share the style turns into added light. A fully additive splat hides
-// nothing, so it must not occlude, however bright it is.
+// nothing, so it must not occlude, however bright it is, unless its style
+// asks to be drawn as a solid surface.
 float OcclusionBlockedOpacity(SplatViewData view)
 {
     float opacity = abs(ViewAlpha(view.color));
@@ -1467,7 +1547,10 @@ float OcclusionBlockedOpacity(SplatViewData view)
         return opacity;
     if (_QuadBaseShape == 1)
         opacity = saturate(opacity * _PointOpacityBoost);
-    return opacity * (1.0 - _StyleSizeParams[BakedViewStyleSlot(view.color)].z * BakedViewStyleWeight(view.color));
+    uint slot = BakedViewStyleSlot(view.color);
+    if (_StyleSliceNormals[slot].w > 0.5)
+        return opacity;
+    return opacity * (1.0 - _StyleSizeParams[slot].z * BakedViewStyleWeight(view.color));
 }
 
 [numthreads(GROUP_SIZE,1,1)]
@@ -1569,6 +1652,87 @@ void CSBakeQuads (uint3 id : SV_DispatchThreadID)
         }
         BakeQuad(view, idx, worldPos, vp, DofFocalPx(p));
         _SplatViewData[viewIdx] = view;
+    }
+}
+
+// Shadow map of the scene lighting (GaussianLighting.hlsl): the renderer's
+// splats as the shadow light sees them. The bounds pass fits the map to
+// where the splats are now, the splat pass keeps the nearest depth per
+// texel, each splat covering the texels its own size reaches so the surface
+// has no holes. View-independent; the view data pass runs it per view only
+// because that is where the splats' current positions are bound.
+RWByteAddressBuffer _LightShadowMapRW;
+// Bounds the per-splat write cost of splats much larger than a texel
+#define LIGHT_SHADOW_MAX_RADIUS 3
+
+// The splat's world position as drawn, or false when it is not drawn
+bool LightShadowCaster(uint idx, out float3 worldPos)
+{
+    float3 pos = LoadSortPos(idx);
+    worldPos = mul(_MatrixObjectToWorld, float4(pos, 1)).xyz;
+    return !IsSplatCut(pos);
+}
+
+[numthreads(GROUP_SIZE,1,1)]
+void CSLightShadowClear (uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= LIGHT_SHADOW_HEADER + _LightShadowResolution * _LightShadowResolution)
+        return;
+    // Empty bounds (min above max) and empty texels (past any depth)
+    uint value = i < 3 ? 0xFFFFFFFF : (i < LIGHT_SHADOW_HEADER ? 0 : asuint(3.0e38));
+    _LightShadowMapRW.Store(i * 4, value);
+}
+
+[numthreads(GROUP_SIZE,1,1)]
+void CSLightShadowBounds (uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    float3 worldPos;
+    if (idx >= _SplatCount || !LightShadowCaster(idx, worldPos))
+        return;
+    float3 p = LightShadowSpace(worldPos);
+    if (_LightShadowParams.y > 0.5 && p.z <= 0)
+        return;
+    _LightShadowMapRW.InterlockedMin(0, LightSortableUint(p.x));
+    _LightShadowMapRW.InterlockedMin(4, LightSortableUint(p.y));
+    _LightShadowMapRW.InterlockedMin(8, LightSortableUint(p.z));
+    _LightShadowMapRW.InterlockedMax(12, LightSortableUint(p.x));
+    _LightShadowMapRW.InterlockedMax(16, LightSortableUint(p.y));
+    _LightShadowMapRW.InterlockedMax(20, LightSortableUint(p.z));
+}
+
+[numthreads(GROUP_SIZE,1,1)]
+void CSLightShadowSplat (uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    float3 worldPos;
+    if (idx >= _SplatCount || !LightShadowCaster(idx, worldPos))
+        return;
+    float2 origin;
+    float texel, minZ;
+    if (!LightShadowFrameOf(_LightShadowMapRW.Load3(0), _LightShadowMapRW.Load3(12), origin, texel, minZ))
+        return;
+    float3 p = LightShadowSpace(worldPos);
+    if (_LightShadowParams.y > 0.5 && p.z <= 0)
+        return;
+
+    // A spot's map plane is at unit distance, so its texels widen with depth
+    float3 scale = abs(LoadSplatData(idx, 0).scale);
+    float radiusWorld = max(scale.x, max(scale.y, scale.z)) * _SplatScale;
+    float texelWorld = texel * (_LightShadowParams.y > 0.5 ? p.z : 1.0);
+    int radius = min((int)ceil(radiusWorld / texelWorld - 0.5), LIGHT_SHADOW_MAX_RADIUS);
+    int2 center = int2(floor((p.xy - origin) / texel));
+    uint depth = asuint(max(p.z - minZ, 0.0));
+    for (int y = -radius; y <= radius; y++)
+    {
+        for (int x = -radius; x <= radius; x++)
+        {
+            int2 t = center + int2(x, y);
+            if (x * x + y * y > radius * radius || any(t < 0) || any(t >= (int)_LightShadowResolution))
+                continue;
+            _LightShadowMapRW.InterlockedMin(LightShadowAddress(uint2(t)), depth);
+        }
     }
 }
 

@@ -14,7 +14,8 @@ namespace GaussianSplatting.Runtime
     // at a random splat of the source (within the Birth GaussianEmitVolumes
     // under the emitter, if any), as it is drawn right now, with the color it
     // is drawn in (style included). It can ride on that splat for part of
-    // its life (Attach, or until a Release volume reaches it); it then leaves
+    // its life (Attach, or until a Release volume reaches it), a little above
+    // it and rising and falling with a wave across the surface (Surface); it then leaves
     // with the velocity of that spot of the surface plus a push along its
     // normal, so a moving body throws particles off, and is simulated step by
     // step, its velocity settling into a flow of wind plus curl noise. Its
@@ -50,6 +51,7 @@ namespace GaussianSplatting.Runtime
         private static readonly int PropParticleLifetime = Shader.PropertyToID("_ParticleLifetime");
         private static readonly int PropParticleEmission = Shader.PropertyToID("_ParticleEmission");
         private static readonly int PropParticleBirth = Shader.PropertyToID("_ParticleBirth");
+        private static readonly int PropParticleSurface = Shader.PropertyToID("_ParticleSurface");
         private static readonly int PropParticleWind = Shader.PropertyToID("_ParticleWind");
         private static readonly int PropParticleFlow = Shader.PropertyToID("_ParticleFlow");
         private static readonly int PropParticleShape = Shader.PropertyToID("_ParticleShape");
@@ -114,6 +116,16 @@ namespace GaussianSplatting.Runtime
         [SerializeField, Range(0f, 1f)] private float emission = 1f;
         [Tooltip("Fraction of its life a particle rides on the splat it was born on before it leaves; a Release GaussianEmitVolume frees it earlier. 0 leaves at once")]
         [SerializeField, Range(0f, 1f)] private float attach;
+
+        [Header("Surface")]
+        [Tooltip("Farthest an attached particle rides above its splat, along the surface normal, in world units. Each particle takes its own random share, squared so most stay close and a few float higher, a layer of haze over the surface")]
+        [SerializeField, Min(0f)] private float surfaceHeight;
+        [Tooltip("How far a wave lifts attached particles further off the surface and lets them sink back, in world units. Neighbouring particles rise and fall together, so the surface seems to swell and breathe")]
+        [SerializeField, Min(0f)] private float surfaceWave;
+        [Tooltip("Size of the wave's swells across the source, in its asset's units. The wave sits on each splat's rest position as stored in the asset, so it stays on a body a mesh driver deforms")]
+        [SerializeField, Min(0.001f)] private float surfaceWaveSize = 0.1f;
+        [Tooltip("How fast the swells rise, fall and move on, in swell sizes per second")]
+        [SerializeField, Min(0f)] private float surfaceWaveSpeed = 0.5f;
 
         [Header("Release")]
         [Tooltip("Fraction of the velocity of the source surface a particle leaves with: a moving body throws particles off and trails them")]
@@ -218,6 +230,9 @@ namespace GaussianSplatting.Runtime
             get => _clock;
             set => _clock = value;
         }
+
+        /// <summary>Number of particles, alive or between lives.</summary>
+        public int Capacity => capacity;
 
         /// <summary>Whether a timeline sets the clock (see <see cref="Drive"/>).</summary>
         public bool IsDriven => _driven;
@@ -349,6 +364,20 @@ namespace GaussianSplatting.Runtime
             _renderer.SetVelocity(_velocity, MaxInheritedSpeed + normalSpeed + wind.magnitude + turbulence * 2f);
         }
 
+        /// <summary>Whether particle buffers exist to read (see SetParticlesOnCS): the emitter has simulated.</summary>
+        internal bool HasParticles => _state != null;
+
+        // The particles as last simulated, for a compute shader that reads
+        // them (GaussianParticleLinks): _ParticleCount, and _ParticleState
+        // and _ParticleAnim as GaussianParticles.compute lays them out
+        internal void SetParticlesOnCS(CommandBuffer cmb, ComputeShader cs, int kernelIndex)
+        {
+            cmb.SetComputeIntParam(cs, PropParticleCount, capacity);
+            cmb.SetComputeBufferParam(cs, kernelIndex, PropParticleState, _state);
+            cmb.SetComputeBufferParam(cs, kernelIndex, PropParticleAnim, _anim);
+        }
+
+
         // Clears every particle and the source's previous pose, and starts
         // the simulation a prewarm before the clock
         private void Restart()
@@ -382,10 +411,14 @@ namespace GaussianSplatting.Runtime
             Camera cam = Camera.main;
             Vector3 cameraPos = cam != null ? cam.transform.position : _source.transform.position;
 
-            // A hidden source is not drawn, so nothing else refreshes its style
+            // A hidden source is not drawn, so nothing else refreshes its
+            // style and lighting; its shadow map is the one its last view
+            // data pass rendered
             _source.RefreshStyle();
+            _source.RefreshLighting();
             _source.SetAssetDataOnCS(_cmd, _shader, _kernel);
             _source.SetStyleColorOnCS(_cmd, _shader, _kernel);
+            _source.SetLightingOnCS(_cmd, _shader, _kernel);
             _cmd.SetComputeMatrixParam(_shader, PropSourceObjectToWorld, _source.transform.localToWorldMatrix);
             _cmd.SetComputeMatrixParam(_shader, PropMatrixWorldToObject, _source.transform.worldToLocalMatrix);
             _cmd.SetComputeVectorParam(_shader, PropCameraPos, cameraPos);
@@ -395,6 +428,7 @@ namespace GaussianSplatting.Runtime
             _cmd.SetComputeFloatParam(_shader, PropParticleLifetime, lifetime);
             _cmd.SetComputeFloatParam(_shader, PropParticleEmission, emission);
             _cmd.SetComputeVectorParam(_shader, PropParticleBirth, new Vector4(velocityScale, normalSpeed, MaxInheritedSpeed, attach));
+            _cmd.SetComputeVectorParam(_shader, PropParticleSurface, new Vector4(surfaceHeight, surfaceWave, 1f / surfaceWaveSize, surfaceWaveSpeed));
             _cmd.SetComputeVectorParam(_shader, PropParticleWind, wind);
             _cmd.SetComputeVectorParam(_shader, PropParticleFlow, new Vector4(drag, turbulence, turbulenceFrequency, turbulenceSpeed));
             _cmd.SetComputeVectorParam(_shader, PropParticleShape, new Vector4(size, 0f, sizeVariation, 0f));
@@ -499,7 +533,7 @@ namespace GaussianSplatting.Runtime
 
             _cmd = new CommandBuffer { name = "GaussianParticles" };
 
-            _template = CreateTemplate(capacity, _templateData);
+            _template = GaussianSplatTemplate.Create("GaussianParticles", capacity, TemplateScale, _templateData);
             _renderer.splatAsset = _template;
             _renderer.nextAsset = _template;
 
@@ -541,75 +575,11 @@ namespace GaussianSplatting.Runtime
                 _renderer.splatAsset = null;
                 _renderer.nextAsset = null;
             }
-            DestroyGenerated(_template);
+            GaussianSplatTemplate.Destroy(_template, _templateData);
             _template = null;
-            foreach (TextAsset data in _templateData)
-                DestroyGenerated(data);
-            _templateData.Clear();
             _cmd?.Release();
             _cmd = null;
             _needsRestart = true;
-        }
-
-        private static void DestroyGenerated(UnityEngine.Object obj)
-        {
-            if (obj == null)
-                return;
-            if (Application.isPlaying)
-                Destroy(obj);
-            else
-                DestroyImmediate(obj);
-        }
-
-        // An asset of identical tiny splats: white, opaque, round, at the
-        // origin. The particle buffers replace their pose, size, opacity and
-        // color, so the asset only gives the renderer its splat count.
-        private static GaussianSplatAsset CreateTemplate(int count, List<TextAsset> data)
-        {
-            var asset = ScriptableObject.CreateInstance<GaussianSplatAsset>();
-            asset.name = "GaussianParticles";
-            asset.hideFlags = HideFlags.HideAndDontSave;
-            asset.Initialize(count, GaussianSplatAsset.VectorFormat.Float32, GaussianSplatAsset.VectorFormat.Float32,
-                GaussianSplatAsset.ColorFormat.Norm8x4, GaussianSplatAsset.SHFormat.Float32, 0,
-                Vector3.one * -1000f, Vector3.one * 1000f, null);
-
-            var pos = new byte[GaussianSplatAsset.CalcPosDataSize(count, GaussianSplatAsset.VectorFormat.Float32)];
-
-            // Rotation (10.10.10.2 smallest three of the identity), then scale
-            int otherStride = GaussianSplatAsset.GetOtherSize(GaussianSplatAsset.VectorFormat.Float32, GaussianSplatAsset.SHFormat.Float32);
-            var other = new byte[(long)count * otherStride];
-            uint rotation = 512u | (512u << 10) | (512u << 20) | (3u << 30);
-            byte[] rotationBytes = BitConverter.GetBytes(rotation);
-            byte[] scale = BitConverter.GetBytes(TemplateScale);
-            for (int i = 0; i < count; i++)
-            {
-                int o = i * otherStride;
-                Buffer.BlockCopy(rotationBytes, 0, other, o, 4);
-                Buffer.BlockCopy(scale, 0, other, o + 4, 4);
-                Buffer.BlockCopy(scale, 0, other, o + 8, 4);
-                Buffer.BlockCopy(scale, 0, other, o + 12, 4);
-            }
-
-            var color = new byte[GaussianSplatAsset.CalcColorDataSize(count, GaussianSplatAsset.ColorFormat.Norm8x4)];
-            Array.Fill(color, (byte)255);
-
-            TextAsset posData = CreateData("Pos", pos, data);
-            TextAsset otherData = CreateData("Other", other, data);
-            TextAsset colorData = CreateData("Color", color, data);
-            asset.SetAssetFiles(null, posData, otherData, colorData, null);
-            asset.SetDataHash(Hash128.Compute(count));
-            return asset;
-        }
-
-        private static TextAsset CreateData(string label, byte[] bytes, List<TextAsset> data)
-        {
-            var text = new TextAsset(new ReadOnlySpan<byte>(bytes))
-            {
-                name = "GaussianParticles" + label,
-                hideFlags = HideFlags.HideAndDontSave,
-            };
-            data.Add(text);
-            return text;
         }
 
         int ITideChannelTarget.ChannelCount => TimelineChannels.Length;

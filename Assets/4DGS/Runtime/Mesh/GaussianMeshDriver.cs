@@ -9,10 +9,12 @@ namespace GaussianSplatting.Runtime
     // stay on the same surface spots. The binding carries each mesh's
     // vertices and bone weights, so the driver skins on the GPU from the bone
     // transforms alone: the source meshes need not render (hide them, or
-    // disable them) and nothing waits for Unity's own skinning. The result
-    // is a base pose that sorting, culling, animation modifiers and the view
-    // data all use; GaussianMorph, when active, replaces it. Blend shapes are
-    // not followed.
+    // disable them) and nothing waits for Unity's own skinning. A mesh the
+    // binding marks as vertex-animated (a vertex cache such as Alembic) is
+    // read from its own vertex buffer instead, as whatever plays it left it.
+    // The result is a base pose that sorting, culling, animation modifiers
+    // and the view data all use; GaussianMorph, when active, replaces it.
+    // Blend shapes are not followed.
     //
     // Runs in LateUpdate ahead of GaussianAnimator, once animation and
     // constraints have posed the bones, and on every render in edit mode,
@@ -32,6 +34,10 @@ namespace GaussianSplatting.Runtime
         private static readonly int PropFirstVertex = Shader.PropertyToID("_DriveFirstVertex");
         private static readonly int PropFirstBone = Shader.PropertyToID("_DriveFirstBone");
         private static readonly int PropHandedness = Shader.PropertyToID("_DriveHandedness");
+        private static readonly int PropMeshVertices = Shader.PropertyToID("_DriveMeshVertices");
+        private static readonly int PropMeshStride = Shader.PropertyToID("_DriveMeshStride");
+        private static readonly int PropMeshPositionOffset = Shader.PropertyToID("_DriveMeshPositionOffset");
+        private static readonly int PropMeshNormalOffset = Shader.PropertyToID("_DriveMeshNormalOffset");
         private static readonly int PropDeformedBase = Shader.PropertyToID("_DeformedBase");
         private static readonly int PropSplatCount = Shader.PropertyToID("_DriveSplatCount");
         private static readonly int PropChunkBounds = Shader.PropertyToID("_DeformedChunkBounds");
@@ -50,6 +56,7 @@ namespace GaussianSplatting.Runtime
         private GaussianSplatRenderer _renderer;
         private ComputeShader _shader;
         private int _kernelDrive = -1;
+        private int _kernelDriveFromMesh = -1;
         private int _kernelBounds = -1;
 
         private GraphicsBuffer _entries;
@@ -61,9 +68,14 @@ namespace GaussianSplatting.Runtime
         private Matrix4x4[] _boneMatrixData;
 
         // Per binding mesh, found by transform path below source: the
-        // renderer, and the transforms its bind poses refer to
+        // renderer, the transforms its bind poses refer to (skinned meshes)
+        // and the filter holding its current vertices (vertex-animated ones)
         private Renderer[] _meshRenderers;
         private Transform[][] _meshBones;
+        private MeshFilter[] _meshFilters;
+        // Vertex-animated meshes whose vertices could not be read, each
+        // warned about once
+        private bool[] _meshUnreadable;
         private GaussianMeshBinding _resolvedBinding;
         private Transform _resolvedSource;
         private readonly List<Renderer> _hidden = new();
@@ -77,6 +89,7 @@ namespace GaussianSplatting.Runtime
             if (_shader != null)
             {
                 _kernelDrive = _shader.FindKernel("CSDriveSplats");
+                _kernelDriveFromMesh = _shader.FindKernel("CSDriveSplatsFromMesh");
                 _kernelBounds = _shader.FindKernel("CSDriveChunkBounds");
             }
             RenderPipelineManager.beginContextRendering += OnBeginContextRendering;
@@ -89,6 +102,8 @@ namespace GaussianSplatting.Runtime
             ReleaseBuffers();
             _meshRenderers = null;
             _meshBones = null;
+            _meshFilters = null;
+            _meshUnreadable = null;
             _resolvedBinding = null;
             _resolvedSource = null;
         }
@@ -105,8 +120,9 @@ namespace GaussianSplatting.Runtime
                 Drive();
         }
 
-        // Re-evaluates the splats on the current bone transforms. Runs on its
-        // own (see above); call it after moving bones at another point.
+        // Re-evaluates the splats on the current bone transforms and animated
+        // vertices. Runs on its own (see above); call it after moving bones or
+        // stepping a vertex cache at another point.
         public void Drive()
         {
             if (!CanDrive() || !ResolveSource())
@@ -123,7 +139,7 @@ namespace GaussianSplatting.Runtime
                 GaussianMeshBinding.MeshInfo info = binding.meshes[m];
                 for (int b = 0; b < info.boneCount; b++)
                 {
-                    Transform bone = info.skinned ? _meshBones[m][b] : _meshRenderers[m].transform;
+                    Transform bone = info.motion == GaussianMeshMotion.Skinned ? _meshBones[m][b] : _meshRenderers[m].transform;
                     _boneMatrixData[info.firstBone + b] = worldToObject * bone.localToWorldMatrix * binding.bindposes[info.firstBone + b];
                 }
             }
@@ -133,16 +149,32 @@ namespace GaussianSplatting.Runtime
             _shader.SetBuffer(_kernelDrive, PropVertices, _vertices);
             _shader.SetBuffer(_kernelDrive, PropBoneMatrices, _boneMatrices);
             _shader.SetBuffer(_kernelDrive, PropDeformedBase, _deformedBase);
+            _shader.SetBuffer(_kernelDriveFromMesh, PropEntries, _entries);
+            _shader.SetBuffer(_kernelDriveFromMesh, PropBoneMatrices, _boneMatrices);
+            _shader.SetBuffer(_kernelDriveFromMesh, PropDeformedBase, _deformedBase);
             _shader.SetFloat(PropHandedness, worldToObject.determinant < 0 ? -1f : 1f);
-            foreach (GaussianMeshBinding.MeshInfo info in binding.meshes)
+            for (int m = 0; m < binding.meshes.Length; m++)
             {
+                GaussianMeshBinding.MeshInfo info = binding.meshes[m];
                 if (info.entryCount == 0)
                     continue;
                 _shader.SetInt(PropFirstEntry, info.firstEntry);
                 _shader.SetInt(PropEntryCount, info.entryCount);
                 _shader.SetInt(PropFirstVertex, info.firstVertex);
                 _shader.SetInt(PropFirstBone, info.firstBone);
-                _shader.Dispatch(_kernelDrive, (info.entryCount + GroupSize - 1) / GroupSize, 1, 1);
+                int groups = (info.entryCount + GroupSize - 1) / GroupSize;
+                // Without readable vertices the mesh keeps its sampled shape
+                // and still follows its transform
+                GraphicsBuffer meshVertices = info.motion == GaussianMeshMotion.Vertices ? BindMeshVertices(m) : null;
+                if (meshVertices != null)
+                {
+                    _shader.Dispatch(_kernelDriveFromMesh, groups, 1, 1);
+                    meshVertices.Dispose();
+                }
+                else
+                {
+                    _shader.Dispatch(_kernelDrive, groups, 1, 1);
+                }
             }
 
             int splatCount = binding.splatCount;
@@ -157,9 +189,60 @@ namespace GaussianSplatting.Runtime
             IsDriving = true;
         }
 
+        // Points the from-mesh kernel at the mesh's current vertex buffer;
+        // null when it cannot be read that way. The caller disposes the
+        // returned handle once it has dispatched.
+        private GraphicsBuffer BindMeshVertices(int m)
+        {
+            Mesh mesh = _meshFilters[m].sharedMesh;
+            int stream = mesh != null ? mesh.GetVertexAttributeStream(VertexAttribute.Position) : -1;
+            if (stream < 0)
+                return MeshUnreadable(m, "it has no mesh");
+            if (mesh.vertexCount != binding.meshes[m].vertexCount)
+                return MeshUnreadable(m, $"it has {mesh.vertexCount} vertices; the binding has {binding.meshes[m].vertexCount}");
+            if (!IsFloat3(mesh, VertexAttribute.Position))
+                return MeshUnreadable(m, "its positions are not three floats");
+
+            // A compute shader reads the buffer only as a raw one, which the
+            // mesh has to ask for before it uploads its vertices
+            if ((mesh.vertexBufferTarget & GraphicsBuffer.Target.Raw) == 0)
+            {
+                mesh.vertexBufferTarget |= GraphicsBuffer.Target.Raw;
+                mesh.UploadMeshData(false);
+            }
+            GraphicsBuffer buffer = mesh.GetVertexBuffer(stream);
+            if (buffer == null)
+                return null;
+            if ((buffer.target & GraphicsBuffer.Target.Raw) == 0)
+            {
+                // Still the buffer from before: raw from the next upload on
+                buffer.Dispose();
+                return null;
+            }
+
+            bool hasNormal = mesh.GetVertexAttributeStream(VertexAttribute.Normal) == stream && IsFloat3(mesh, VertexAttribute.Normal);
+            _shader.SetBuffer(_kernelDriveFromMesh, PropMeshVertices, buffer);
+            _shader.SetInt(PropMeshStride, buffer.stride);
+            _shader.SetInt(PropMeshPositionOffset, mesh.GetVertexAttributeOffset(VertexAttribute.Position));
+            _shader.SetInt(PropMeshNormalOffset, hasNormal ? mesh.GetVertexAttributeOffset(VertexAttribute.Normal) : -1);
+            return buffer;
+        }
+
+        private static bool IsFloat3(Mesh mesh, VertexAttribute attribute) =>
+            mesh.GetVertexAttributeFormat(attribute) == VertexAttributeFormat.Float32 &&
+            mesh.GetVertexAttributeDimension(attribute) == 3;
+
+        private GraphicsBuffer MeshUnreadable(int m, string message)
+        {
+            if (!_meshUnreadable[m])
+                Debug.LogWarning($"{name}: cannot follow the vertices of {binding.meshes[m].path}: {message}", this);
+            _meshUnreadable[m] = true;
+            return null;
+        }
+
         private bool CanDrive()
         {
-            if (_shader == null || _kernelDrive < 0 || binding == null || source == null)
+            if (_shader == null || _kernelDrive < 0 || _kernelDriveFromMesh < 0 || binding == null || source == null)
                 return false;
             if (binding.entryData == null || binding.vertexData == null || binding.meshes == null || binding.bindposes == null)
                 return false;
@@ -186,9 +269,12 @@ namespace GaussianSplatting.Runtime
             _resolvedSource = source;
             _meshRenderers = null;
             _meshBones = null;
+            _meshFilters = null;
+            _meshUnreadable = null;
 
             var renderers = new Renderer[binding.meshes.Length];
             var bones = new Transform[binding.meshes.Length][];
+            var filters = new MeshFilter[binding.meshes.Length];
             for (int m = 0; m < binding.meshes.Length; m++)
             {
                 GaussianMeshBinding.MeshInfo info = binding.meshes[m];
@@ -196,7 +282,9 @@ namespace GaussianSplatting.Runtime
                 renderers[m] = t != null ? t.GetComponent<Renderer>() : null;
                 if (renderers[m] == null)
                     return Mismatch($"no renderer at {info.path}");
-                if (!info.skinned)
+                if (info.motion == GaussianMeshMotion.Vertices && !t.TryGetComponent(out filters[m]))
+                    return Mismatch($"{info.path} has no mesh filter");
+                if (info.motion != GaussianMeshMotion.Skinned)
                     continue;
                 if (renderers[m] is not SkinnedMeshRenderer skinned)
                     return Mismatch($"{info.path} is not a skinned mesh");
@@ -206,6 +294,8 @@ namespace GaussianSplatting.Runtime
             }
             _meshRenderers = renderers;
             _meshBones = bones;
+            _meshFilters = filters;
+            _meshUnreadable = new bool[binding.meshes.Length];
             return true;
         }
 

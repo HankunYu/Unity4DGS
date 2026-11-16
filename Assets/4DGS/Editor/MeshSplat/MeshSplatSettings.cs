@@ -10,6 +10,11 @@ namespace GaussianSplatting.Editor.MeshSplat
     [Serializable]
     public class MeshSplatSettings
     {
+        // Meshes of the model whose vertices move as it plays (a vertex
+        // cache such as Alembic): their splats follow the vertices, where
+        // those of other meshes follow the transform or the bones
+        public List<Mesh> vertexAnimatedMeshes = new();
+
         public MeshSplatOutput output = MeshSplatOutput.Asset;
         public MeshSplatSequenceSettings sequence = new();
 
@@ -20,6 +25,8 @@ namespace GaussianSplatting.Editor.MeshSplat
         public FeatureSampler feature = new();
         public ScanlineSampler scanline = new();
         public GridSampler grid = new();
+        // Applied to whichever sampler is chosen
+        public HiddenSurfaceFilter hiddenSurfaces = new();
 
         // Source for every surface whose material has no override
         public SplatColorKind color = SplatColorKind.Uniform;
@@ -58,6 +65,11 @@ namespace GaussianSplatting.Editor.MeshSplat
             SurfaceSamplerKind.Grid => grid,
             _ => throw new ArgumentOutOfRangeException(nameof(sampler), sampler, null),
         };
+
+        // Where the splats go: the sampler's points, less those the model
+        // covers itself
+        public List<SurfaceSample> SampleSurface(IReadOnlyList<SurfaceMesh> meshes) =>
+            hiddenSurfaces.Apply(meshes, Sampler.Sample(meshes));
 
         public ISplatColorSource ColorSource(SplatColorKind kind) => kind switch
         {

@@ -34,6 +34,24 @@ namespace GaussianSplatting.Runtime
         [SerializeField, Range(0f, 1f)] private float rimAmount;
         [Tooltip("Sharpness of the rim: higher keeps the light closer to silhouettes")]
         [SerializeField, Range(0.5f, 8f)] private float rimPower = 2f;
+        [Tooltip("Light added at grazing angles, a Fresnel edge following the rim power. Unlike the rim amount, which only darkens surfaces facing the camera, it lifts edges past the base color")]
+        [SerializeField, Range(0f, 8f)] private float rimGlow;
+        [Tooltip("Color of the rim glow, multiplied with the splat's own color by the source tint")]
+        [SerializeField] private Color rimColor = Color.white;
+        [Tooltip("How far the rim glow takes each splat's own color, lifted to full brightness with its hue kept: 0 glows in the rim color alone, 1 in the splat's color times the rim color")]
+        [SerializeField, Range(0f, 1f)] private float rimSourceTint = 1f;
+        [Tooltip("How far a noise breaks up the rim: 0 keeps it an even band, 1 lets it come and go in patches. The rim amount, glow, fade and spill all follow the broken rim")]
+        [SerializeField, Range(0f, 1f)] private float rimNoise;
+        [Tooltip("Size of the noise patches, in the asset's units. The noise sits on each splat's rest position as stored in the asset, so it stays on a body a mesh driver deforms")]
+        [SerializeField, Min(0.001f)] private float rimNoiseSize = 0.05f;
+        [Tooltip("How fast the noise patches drift and change, in patch sizes per second")]
+        [SerializeField, Min(0f)] private float rimNoiseSpeed = 0.3f;
+        [Tooltip("Per-splat randomness in where the patches end: 0 keeps their edges smooth, 1 breaks them into scattered grains")]
+        [SerializeField, Range(0f, 1f)] private float rimNoiseGrain;
+        [Tooltip("How far the rim fades splats out, so silhouettes thin into scattered points instead of a solid line")]
+        [SerializeField, Range(0f, 1f)] private float rimFade;
+        [Tooltip("Farthest the rim pushes splats out along their surface normal (mesh splats' local +Z), in world units. Each splat goes its own random share of it, most a little and a few the whole way, so silhouettes spill a scatter of points")]
+        [SerializeField, Min(0f)] private float rimSpill;
 
         [Header("Shape")]
         [SerializeField] private GaussianSplatStyleShape shape = GaussianSplatStyleShape.Base;
@@ -48,8 +66,8 @@ namespace GaussianSplatting.Runtime
         [SerializeField, Min(0f)] private float streakTime = 0.05f;
         [Tooltip("Streak width in pixels. Below 2 pixels a streak is drawn 2 pixels wide and dimmer, so it does not alias")]
         [SerializeField, Range(0.5f, 8f)] private float streakWidth = 1f;
-        [Tooltip("How fast a streak fades from the splat to its tail: higher keeps the light near the splat")]
-        [SerializeField, Range(0.25f, 8f)] private float streakTailPower = 1.5f;
+        [Tooltip("How fast a streak fades from the splat to its tail: higher keeps the light near the splat, 0 keeps it even along the streak")]
+        [SerializeField, Range(0f, 8f)] private float streakTailPower = 1.5f;
         [Tooltip("Smallest dot diameter or streak width in world units, for the Disc and Streak shapes. Their pixel size holds at a distance; up close this floor takes over, so they grow with the scene instead of shrinking into it. 0 turns it off")]
         [SerializeField, Min(0f)] private float minWorldSize;
 
@@ -67,6 +85,8 @@ namespace GaussianSplatting.Runtime
         [Header("Thinning")]
         [Tooltip("Fraction of splats kept. The rest fade out with the style weight and stop costing anything at full weight")]
         [SerializeField, Range(0f, 1f)] private float keepFraction = 1f;
+        [Tooltip("Camera distance (world units) the look is tuned at. Farther away, splats are thinned by the square of the distance ratio, so fixed-size dots and streaks keep the density and brightness on screen they have here instead of piling up into a blown-out blob. 0 turns it off")]
+        [SerializeField, Min(0f)] private float densityDistance;
 
         [Header("Glint")]
         [Tooltip("Fraction of splats that flash now and then")]
@@ -79,6 +99,8 @@ namespace GaussianSplatting.Runtime
         [Header("Blend")]
         [Tooltip("0 blends like ordinary splats, 1 adds light without occluding what is behind. Fully additive splats skip sorting")]
         [SerializeField, Range(0f, 1f)] private float additivity;
+        [Tooltip("Additive splats still hide what lies behind them under the renderer's occlusion culling, so they glow like a solid surface instead of adding up with the layers behind (e.g. clothes over clothes)")]
+        [SerializeField] private bool occludes;
 
         [NonSerialized] private Texture2D _rampTexture;
         [NonSerialized] private bool _rampDirty = true;
@@ -90,6 +112,15 @@ namespace GaussianSplatting.Runtime
         public float Intensity => intensity;
         public float RimAmount => rimAmount;
         public float RimPower => rimPower;
+        public float RimGlow => rimGlow;
+        public Color RimColor => rimColor;
+        public float RimSourceTint => rimSourceTint;
+        public float RimNoise => rimNoise;
+        public float RimNoiseSize => rimNoiseSize;
+        public float RimNoiseSpeed => rimNoiseSpeed;
+        public float RimNoiseGrain => rimNoiseGrain;
+        public float RimFade => rimFade;
+        public float RimSpill => rimSpill;
         public GaussianSplatStyleShape Shape => shape;
         public float DotSize => dotSize;
         public GaussianSplatStyleStreakAxis StreakAxis => streakAxis;
@@ -105,16 +136,19 @@ namespace GaussianSplatting.Runtime
         public Vector3 SliceNormal => sliceNormal.sqrMagnitude > 1e-8f ? sliceNormal.normalized : Vector3.up;
         public float SliceOffset => sliceOffset;
         public float KeepFraction => keepFraction;
+        public float DensityDistance => densityDistance;
         public float GlintDensity => glintDensity;
         public float GlintRate => glintRate;
         public float GlintIntensity => glintIntensity;
         public float Additivity => additivity;
+        public bool Occludes => occludes;
 
         // How far what the style draws can lie from the splat's own position,
-        // in world units: the snap distance plus the streak length and the
-        // world size floor's radius. Velocity streaks are as long as the
-        // fastest splat moves in the streak time.
-        public float Reach(float maxSpeed)
+        // in world units: the snap distance and the rim spill plus the streak
+        // length and the world size floor's radius. Velocity streaks are as long as the
+        // fastest splat moves in the streak time, Segment streaks as the
+        // longest segment.
+        public float Reach(float maxSpeed, float maxSegment)
         {
             float snap = quantize switch
             {
@@ -125,14 +159,18 @@ namespace GaussianSplatting.Runtime
             float extent = shape switch
             {
                 GaussianSplatStyleShape.Disc => minWorldSize * 0.5f,
-                GaussianSplatStyleShape.Streak => StreakReach(maxSpeed) + minWorldSize * 0.5f,
+                GaussianSplatStyleShape.Streak => StreakReach(maxSpeed, maxSegment) + minWorldSize * 0.5f,
                 _ => 0f,
             };
-            return snap + extent;
+            return snap + rimSpill + extent;
         }
 
-        private float StreakReach(float maxSpeed) =>
-            streakAxis == GaussianSplatStyleStreakAxis.Velocity ? streakTime * maxSpeed : streakLength;
+        private float StreakReach(float maxSpeed, float maxSegment) => streakAxis switch
+        {
+            GaussianSplatStyleStreakAxis.Velocity => streakTime * maxSpeed,
+            GaussianSplatStyleStreakAxis.Segment => maxSegment,
+            _ => streakLength,
+        };
 
         // The ramp baked into a 1D lookup texture, holding the gradient's
         // values unconverted: splat colors are gamma space at this stage

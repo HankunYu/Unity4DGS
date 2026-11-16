@@ -8,8 +8,9 @@ namespace GaussianSplatting.Editor.MeshSplat
 {
     // Poses a model's meshes on the CPU, in the model root's space, the way
     // GaussianMeshDriver does on the GPU (linear blend skinning with the four
-    // strongest bones, rigid meshes by their transform), so baked frames
-    // match what the driver would show. Blend shapes are not applied.
+    // strongest bones, rigid meshes by their transform, vertex-animated ones
+    // from the vertices they have at the time), so baked frames match what
+    // the driver would show. Blend shapes are not applied.
     public sealed class MeshPoser
     {
         private readonly GameObject _instance;
@@ -43,7 +44,9 @@ namespace GaussianSplatting.Editor.MeshSplat
             {
                 SurfaceMesh mesh = _rest[m];
                 Matrix4x4[] bones = BoneMatrices(mesh, _renderers[m], toModel);
-                GaussianMeshBinding.Vertex[] vertices = _vertices[m];
+                GaussianMeshBinding.Vertex[] vertices = mesh.motion == GaussianMeshMotion.Vertices
+                    ? CurrentVertices(_renderers[m], _vertices[m])
+                    : _vertices[m];
                 var positions = new float3[vertices.Length];
                 var normals = new float3[vertices.Length];
                 for (int v = 0; v < vertices.Length; v++)
@@ -68,10 +71,28 @@ namespace GaussianSplatting.Editor.MeshSplat
             return posed;
         }
 
-        // Bind pose -> model space per bone; a rigid mesh has one
+        // The sampled vertices with the positions and normals the instance's
+        // mesh has now; the sampled ones where it no longer matches
+        private static GaussianMeshBinding.Vertex[] CurrentVertices(Renderer renderer, GaussianMeshBinding.Vertex[] rest)
+        {
+            Mesh mesh = renderer.TryGetComponent(out MeshFilter filter) ? filter.sharedMesh : null;
+            if (mesh == null || mesh.vertexCount != rest.Length)
+                return rest;
+            Vector3[] positions = mesh.vertices;
+            Vector3[] normals = mesh.normals;
+            var current = (GaussianMeshBinding.Vertex[])rest.Clone();
+            for (int v = 0; v < current.Length; v++)
+            {
+                current[v].position = positions[v];
+                current[v].normal = normals.Length == positions.Length ? (float3)normals[v] : float3.zero;
+            }
+            return current;
+        }
+
+        // Bind pose -> model space per bone; a mesh that is not skinned has one
         private static Matrix4x4[] BoneMatrices(SurfaceMesh mesh, Renderer renderer, Matrix4x4 toModel)
         {
-            if (!mesh.skinned)
+            if (mesh.motion != GaussianMeshMotion.Skinned)
                 return new[] { toModel * renderer.transform.localToWorldMatrix };
             Transform[] bones = ((SkinnedMeshRenderer)renderer).bones;
             Matrix4x4[] bindposes = mesh.source.bindposes;

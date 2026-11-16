@@ -20,7 +20,7 @@ namespace GaussianSplatting.Editor.MeshSplat
     {
         public const string Extension = "meshsplat";
         // Bump whenever the output for the same model and settings changes
-        public const int Version = 6;
+        public const int Version = 7;
 
         [SerializeField] private GameObject model;
         [SerializeField] private MeshSplatSettings settings = new();
@@ -45,7 +45,7 @@ namespace GaussianSplatting.Editor.MeshSplat
 
             try
             {
-                var meshes = MeshSplatBaker.CollectMeshes(model);
+                var meshes = MeshSplatBaker.CollectMeshes(model, settings.vertexAnimatedMeshes);
                 if (meshes.Count == 0)
                     throw new InvalidOperationException($"{model.name} has no meshes");
                 AddColorDependencies(ctx, meshes);
@@ -63,7 +63,7 @@ namespace GaussianSplatting.Editor.MeshSplat
         // The rest pose asset as the main object, with its binding
         private void ImportAsset(AssetImportContext ctx, string name, List<SurfaceMesh> meshes)
         {
-            var samples = settings.Sampler.Sample(meshes);
+            var samples = settings.SampleSurface(meshes);
             GaussianSplatAsset asset = BuildAsset(ctx, name, meshes, samples, "", out NativeArray<int> sourceIndices);
             using (sourceIndices)
                 AddBinding(ctx, name, meshes, samples, sourceIndices, asset);
@@ -92,7 +92,7 @@ namespace GaussianSplatting.Editor.MeshSplat
                 foreach (Animator animator in instance.GetComponentsInChildren<Animator>())
                     animator.enabled = false;
                 var poser = new MeshPoser(instance, meshes);
-                List<SurfaceSample> restSamples = sequenceSettings.resampleEveryFrame ? null : settings.Sampler.Sample(meshes);
+                List<SurfaceSample> restSamples = sequenceSettings.resampleEveryFrame ? null : settings.SampleSurface(meshes);
                 var frames = new GaussianSplatAsset[last - first + 1];
                 for (int f = first; f <= last; f++)
                 {
@@ -101,7 +101,7 @@ namespace GaussianSplatting.Editor.MeshSplat
                         throw new OperationCanceledException("baking was cancelled");
                     clip.SampleAnimation(instance, f / frameRate);
                     List<SurfaceMesh> posed = poser.Pose();
-                    List<SurfaceSample> samples = restSamples ?? settings.Sampler.Sample(posed);
+                    List<SurfaceSample> samples = restSamples ?? settings.SampleSurface(posed);
                     frames[f - first] = BuildAsset(ctx, $"{name}_{f:D4}", posed, samples, $"f{f}_", out NativeArray<int> sourceIndices);
                     sourceIndices.Dispose();
                 }

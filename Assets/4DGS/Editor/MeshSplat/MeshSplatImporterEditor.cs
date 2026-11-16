@@ -19,6 +19,9 @@ namespace GaussianSplatting.Editor.MeshSplat
         private static readonly GUIContent s_ModelLabel = new("Model",
             "Model asset or prefab to sample. Every MeshRenderer and SkinnedMeshRenderer under it is " +
             "used; skinned meshes in their bind pose.");
+        private static readonly GUIContent s_VertexAnimatedLabel = new("Vertex Animated",
+            "Meshes of the model whose vertices move as it plays, e.g. the deforming meshes of an Alembic file. " +
+            "Their splats follow the vertices; those of other meshes follow the transform or the bones.");
         private static readonly GUIContent s_OutputLabel = new("Output",
             "Asset: one splat asset in the rest pose; drag it into the scene and a GaussianMeshDriver moves it with " +
             "the model. Sequence: one splat asset per animation frame, played by a GaussianPlayer. Every frame is " +
@@ -26,6 +29,9 @@ namespace GaussianSplatting.Editor.MeshSplat
         private static readonly GUIContent s_OverridesLabel = new("Overrides",
             "Materials colored by another source than the default one, e.g. a textured character among " +
             "uniformly colored props.");
+        private static readonly GUIContent s_HiddenLabel = new("Remove Hidden",
+            "Drop samples the model covers itself, e.g. clothing under other clothing, judged in the sampled " +
+            "pose (the bind pose for skinned meshes).");
         private static readonly GUIContent s_LightLabel = new("Bake Lighting",
             "Multiply the color by a fixed directional light. An asset bakes it in the rest pose, so it turns " +
             "with the model as it animates; a sequence bakes it for every frame's pose.");
@@ -37,6 +43,7 @@ namespace GaussianSplatting.Editor.MeshSplat
 
         private SerializedProperty _model;
         private SerializedProperty _settings;
+        private SerializedProperty _vertexAnimatedMeshes;
         private SerializedProperty _output;
         private SerializedProperty _sequence;
         private SerializedProperty _sampler;
@@ -48,6 +55,8 @@ namespace GaussianSplatting.Editor.MeshSplat
         private SerializedProperty _splatSize;
         private SerializedProperty _splatThickness;
         private SerializedProperty _opacity;
+        private SerializedProperty _hiddenSurfaces;
+        private SerializedProperty _hiddenEnabled;
         private SerializedProperty _quality;
         private SerializedProperty _customFormats;
 
@@ -56,6 +65,7 @@ namespace GaussianSplatting.Editor.MeshSplat
             base.OnEnable();
             _model = serializedObject.FindProperty("model");
             var settings = _settings = serializedObject.FindProperty("settings");
+            _vertexAnimatedMeshes = settings.FindPropertyRelative(nameof(MeshSplatSettings.vertexAnimatedMeshes));
             _output = settings.FindPropertyRelative(nameof(MeshSplatSettings.output));
             _sequence = settings.FindPropertyRelative(nameof(MeshSplatSettings.sequence));
             _sampler = settings.FindPropertyRelative(nameof(MeshSplatSettings.sampler));
@@ -67,6 +77,8 @@ namespace GaussianSplatting.Editor.MeshSplat
             _splatSize = settings.FindPropertyRelative(nameof(MeshSplatSettings.splatSize));
             _splatThickness = settings.FindPropertyRelative(nameof(MeshSplatSettings.splatThickness));
             _opacity = settings.FindPropertyRelative(nameof(MeshSplatSettings.opacity));
+            _hiddenSurfaces = settings.FindPropertyRelative(nameof(MeshSplatSettings.hiddenSurfaces));
+            _hiddenEnabled = _hiddenSurfaces.FindPropertyRelative(nameof(HiddenSurfaceFilter.enabled));
             _quality = settings.FindPropertyRelative(nameof(MeshSplatSettings.quality));
             _customFormats = settings.FindPropertyRelative(nameof(MeshSplatSettings.customFormats));
         }
@@ -86,6 +98,8 @@ namespace GaussianSplatting.Editor.MeshSplat
                                                      $"up to {largest:N0} splats, {EditorUtility.FormatBytes(size)}");
             }
 
+            EditorGUILayout.PropertyField(_vertexAnimatedMeshes, s_VertexAnimatedLabel, true);
+
             EditorGUILayout.Space();
             EditorGUILayout.PropertyField(_output, s_OutputLabel);
             if (!_output.hasMultipleDifferentValues && (MeshSplatOutput)_output.enumValueIndex == MeshSplatOutput.Sequence)
@@ -96,6 +110,9 @@ namespace GaussianSplatting.Editor.MeshSplat
             EditorGUILayout.PropertyField(_sampler);
             if (!_sampler.hasMultipleDifferentValues)
                 DrawFields(SamplerProperty((SurfaceSamplerKind)_sampler.enumValueIndex));
+            EditorGUILayout.PropertyField(_hiddenEnabled, s_HiddenLabel);
+            if (_hiddenEnabled.boolValue || _hiddenEnabled.hasMultipleDifferentValues)
+                DrawFields(_hiddenSurfaces, _hiddenEnabled);
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Color", EditorStyles.boldLabel);
@@ -169,14 +186,17 @@ namespace GaussianSplatting.Editor.MeshSplat
         }
 
         // The selected sampler's or color source's own settings, indented
-        // below its popup
-        private static void DrawFields(SerializedProperty owner)
+        // below its popup; skip is drawn by the caller
+        private static void DrawFields(SerializedProperty owner, SerializedProperty skip = null)
         {
             EditorGUI.indentLevel++;
             SerializedProperty end = owner.GetEndProperty();
             SerializedProperty field = owner.Copy();
             for (bool enter = true; field.NextVisible(enter) && !SerializedProperty.EqualContents(field, end); enter = false)
-                EditorGUILayout.PropertyField(field, true);
+            {
+                if (skip == null || !SerializedProperty.EqualContents(field, skip))
+                    EditorGUILayout.PropertyField(field, true);
+            }
             EditorGUI.indentLevel--;
         }
 

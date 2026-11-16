@@ -20,8 +20,9 @@ namespace GaussianSplatting.Editor.MeshSplat
         // Every mesh drawn by a MeshRenderer or SkinnedMeshRenderer under the
         // model, inactive ones included. Skinned meshes are taken in their
         // bind pose, which is where the renderer would draw them with the
-        // bones at rest.
-        public static List<SurfaceMesh> CollectMeshes(GameObject model)
+        // bones at rest. vertexAnimated names the meshes whose vertices move
+        // as the model plays; skinning comes first where a mesh has both.
+        public static List<SurfaceMesh> CollectMeshes(GameObject model, ICollection<Mesh> vertexAnimated)
         {
             var meshes = new List<SurfaceMesh>();
             Matrix4x4 toModel = model.transform.worldToLocalMatrix;
@@ -39,7 +40,12 @@ namespace GaussianSplatting.Editor.MeshSplat
                     TransformPath(model.transform, renderer.transform));
                 surface.source = mesh;
                 surface.materials = renderer.sharedMaterials;
-                surface.skinned = renderer is SkinnedMeshRenderer && mesh.bindposeCount > 0;
+                if (renderer is SkinnedMeshRenderer && mesh.bindposeCount > 0)
+                    surface.motion = GaussianMeshMotion.Skinned;
+                else if (renderer is MeshRenderer && vertexAnimated.Contains(mesh))
+                    surface.motion = GaussianMeshMotion.Vertices;
+                else
+                    surface.motion = GaussianMeshMotion.Rigid;
                 meshes.Add(surface);
             }
             return meshes;
@@ -119,12 +125,12 @@ namespace GaussianSplatting.Editor.MeshSplat
                 SurfaceMesh mesh = meshes[m];
                 ref GaussianMeshBinding.MeshInfo info = ref meshInfos[m];
                 info.path = mesh.path;
-                info.skinned = mesh.skinned;
+                info.motion = mesh.motion;
                 info.firstEntry = firstEntry;
                 info.firstVertex = firstVertex;
                 info.vertexCount = mesh.positions.Length;
                 info.firstBone = allBindposes.Count;
-                if (mesh.skinned)
+                if (mesh.motion == GaussianMeshMotion.Skinned)
                     allBindposes.AddRange(mesh.source.bindposes);
                 else
                     allBindposes.Add(Matrix4x4.identity);
@@ -162,8 +168,9 @@ namespace GaussianSplatting.Editor.MeshSplat
             Vector3[] positions = mesh.source.vertices;
             Vector3[] normals = mesh.source.normals;
             bool hasNormals = normals.Length == positions.Length;
-            NativeArray<byte> bonesPerVertex = mesh.skinned ? mesh.source.GetBonesPerVertex() : default;
-            NativeArray<BoneWeight1> weights = mesh.skinned ? mesh.source.GetAllBoneWeights() : default;
+            bool skinned = mesh.motion == GaussianMeshMotion.Skinned;
+            NativeArray<byte> bonesPerVertex = skinned ? mesh.source.GetBonesPerVertex() : default;
+            NativeArray<BoneWeight1> weights = skinned ? mesh.source.GetAllBoneWeights() : default;
             var vertices = new GaussianMeshBinding.Vertex[positions.Length];
             int w = 0;
             for (int v = 0; v < positions.Length; v++)
@@ -174,7 +181,7 @@ namespace GaussianSplatting.Editor.MeshSplat
                     normal = hasNormals ? (float3)normals[v] : float3.zero,
                     weights = new float4(1, 0, 0, 0),
                 };
-                if (mesh.skinned)
+                if (skinned)
                 {
                     // Unity sorts each vertex's weights strongest first
                     int count = bonesPerVertex[v];

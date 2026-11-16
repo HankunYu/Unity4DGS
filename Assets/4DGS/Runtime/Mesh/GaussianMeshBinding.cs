@@ -2,12 +2,14 @@ using System;
 using Unity.Collections;
 using Unity.Mathematics;
 using UnityEngine;
+using UnityEngine.Serialization;
 
 namespace GaussianSplatting.Runtime
 {
     // Ties every splat of a mesh-sampled asset to a spot on one of the
     // model's meshes, with what it takes to skin those meshes, so
-    // GaussianMeshDriver can move the splats from the bone transforms alone.
+    // GaussianMeshDriver can move the splats from the bone transforms alone
+    // (or, for a vertex-animated mesh, from the vertices it has at the time).
     // Imported next to the asset it belongs to.
     public class GaussianMeshBinding : ScriptableObject
     {
@@ -16,14 +18,16 @@ namespace GaussianSplatting.Runtime
         {
             // Transform path of the renderer below the model root
             public string path;
-            // Skinned meshes follow the renderer's bones, others its transform
-            public bool skinned;
+            // Was a bool, skinned or not: its values read as Rigid and Skinned
+            [FormerlySerializedAs("skinned")]
+            public GaussianMeshMotion motion;
             // This mesh's entries are firstEntry .. firstEntry + entryCount - 1
             public int firstEntry;
             public int entryCount;
             public int firstVertex;
             public int vertexCount;
-            // Its bind poses are bindposes[firstBone .. firstBone + boneCount - 1]
+            // Its bind poses are bindposes[firstBone .. firstBone + boneCount - 1];
+            // a mesh that is not skinned has one, the identity
             public int firstBone;
             public int boneCount;
         }
