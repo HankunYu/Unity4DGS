@@ -15,5 +15,11 @@ namespace GaussianSplatting.Runtime
         // source on the renderer (GaussianParticleEmitter); without one, or
         // for still splats, the streaks shrink to dots.
         Velocity,
+        // From the splat to the other end of its own segment, which the
+        // renderer's segment source gives per splat: GaussianParticleLinks
+        // (lines between nearby particles), or GaussianParticleEmitter (back
+        // to the spot on the source each particle came from). Without one
+        // the streaks shrink to dots.
+        Segment,
     }
 }

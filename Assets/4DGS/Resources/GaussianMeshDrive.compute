@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Moves mesh-bound splats with their meshes (GaussianMeshDriver). Each
-// binding entry skins its triangle's three vertices (linear blend skinning,
-// four bones) and re-evaluates its spot on the triangle, then writes the
+// binding entry poses its triangle's three vertices (linear blend skinning
+// with four bones, or, for a vertex-animated mesh, the vertices the mesh
+// has right now) and re-evaluates its spot on the triangle, then writes the
 // splat's pose: center, plus a rotation whose local +Z is the surface
 // normal and +X follows the triangle's first edge, the same frame the
 // importer baked. Everything else (color, size, opacity) stays in the asset.
 
 #pragma kernel CSDriveSplats
+#pragma kernel CSDriveSplatsFromMesh
 #pragma kernel CSDriveChunkBounds
 
 #define GROUP_SIZE 256
@@ -40,6 +42,14 @@ uint _DriveFirstBone;
 // -1 when splat object space is mirrored relative to the meshes (it is
 // for the usual y-down splats), so face normals still point outwards
 float _DriveHandedness;
+
+// A vertex-animated mesh's own vertex buffer, read in place: its stride,
+// and where a vertex's position and normal (float3 each) lie in it. No
+// normal when the offset is negative: the face normal stands in.
+ByteAddressBuffer _DriveMeshVertices;
+uint _DriveMeshStride;
+uint _DriveMeshPositionOffset;
+int _DriveMeshNormalOffset;
 
 // 2 float4s per splat: center.xyz (object space), 0; rotation.xyzw
 RWStructuredBuffer<float4> _DeformedBase;
@@ -92,18 +102,21 @@ float4 QuatFromAxes(float3 x, float3 y, float3 z)
     return normalize(q);
 }
 
-[numthreads(GROUP_SIZE,1,1)]
-void CSDriveSplats(uint3 id : SV_DispatchThreadID)
+// The mesh's current vertex under its renderer's transform, its one "bone"
+void MeshVertex(uint index, out float3 position, out float3 normal)
 {
-    if (id.x >= _DriveEntryCount)
-        return;
-    BindingEntry e = _DriveEntries[_DriveFirstEntry + id.x];
-    float3 w = float3(e.bary, 1.0 - e.bary.x - e.bary.y);
+    uint address = index * _DriveMeshStride;
+    float4x4 m = _DriveBoneMatrices[_DriveFirstBone];
+    position = mul(m, float4(asfloat(_DriveMeshVertices.Load3(address + _DriveMeshPositionOffset)), 1)).xyz;
+    normal = 0;
+    if (_DriveMeshNormalOffset >= 0)
+        normal = mul((float3x3)m, asfloat(_DriveMeshVertices.Load3(address + (uint)_DriveMeshNormalOffset)));
+}
 
-    float3 p0, p1, p2, n0, n1, n2;
-    SkinVertex(e.vertices.x, p0, n0);
-    SkinVertex(e.vertices.y, p1, n1);
-    SkinVertex(e.vertices.z, p2, n2);
+// The splat's pose from its triangle's posed vertices
+void WriteSplat(BindingEntry e, float3 p0, float3 p1, float3 p2, float3 n0, float3 n1, float3 n2)
+{
+    float3 w = float3(e.bary, 1.0 - e.bary.x - e.bary.y);
     float3 center = w.x * p0 + w.y * p1 + w.z * p2;
 
     // Interpolated normals cancel out across sharp folds: fall back to the face
@@ -120,6 +133,32 @@ void CSDriveSplats(uint3 id : SV_DispatchThreadID)
 
     _DeformedBase[e.splat * 2] = float4(center, 0);
     _DeformedBase[e.splat * 2 + 1] = QuatFromAxes(tangent, cross(normal, tangent), normal);
+}
+
+[numthreads(GROUP_SIZE,1,1)]
+void CSDriveSplats(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _DriveEntryCount)
+        return;
+    BindingEntry e = _DriveEntries[_DriveFirstEntry + id.x];
+    float3 p0, p1, p2, n0, n1, n2;
+    SkinVertex(e.vertices.x, p0, n0);
+    SkinVertex(e.vertices.y, p1, n1);
+    SkinVertex(e.vertices.z, p2, n2);
+    WriteSplat(e, p0, p1, p2, n0, n1, n2);
+}
+
+[numthreads(GROUP_SIZE,1,1)]
+void CSDriveSplatsFromMesh(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _DriveEntryCount)
+        return;
+    BindingEntry e = _DriveEntries[_DriveFirstEntry + id.x];
+    float3 p0, p1, p2, n0, n1, n2;
+    MeshVertex(e.vertices.x, p0, n0);
+    MeshVertex(e.vertices.y, p1, n1);
+    MeshVertex(e.vertices.z, p2, n2);
+    WriteSplat(e, p0, p1, p2, n0, n1, n2);
 }
 
 uint FloatToOrderedUint(float f)

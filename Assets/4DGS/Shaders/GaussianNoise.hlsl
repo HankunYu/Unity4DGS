@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Hash and value noise shared by the animation and particle kernels.
+// Hash and value noise shared by the animation, particle and style kernels.
 #ifndef GAUSSIAN_NOISE_HLSL
 #define GAUSSIAN_NOISE_HLSL
 
@@ -72,6 +72,15 @@ float4 ValueNoise3DGrad(float3 p)
         k2 + k5 * u.z + k4 * u.x + k7 * u.z * u.x,
         k3 + k6 * u.x + k5 * u.y + k7 * u.x * u.y);
     return float4(value, grad);
+}
+
+// Two octaves of value noise in 0..1 that drift through each other over
+// time (in units of the noise's own cells), so the pattern keeps changing
+// rather than sliding as one
+float DriftingNoise(float3 p, float time)
+{
+    return ValueNoise3D(p + float3(0, time, 0)) * 0.65
+         + ValueNoise3D(p * 2.03 + float3(time * 1.3, 17.1, -time * 0.9)) * 0.35;
 }
 
 #endif // GAUSSIAN_NOISE_HLSL

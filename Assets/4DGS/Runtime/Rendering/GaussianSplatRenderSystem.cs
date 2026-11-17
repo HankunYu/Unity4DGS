@@ -615,9 +615,13 @@ namespace GaussianSplatting.Runtime
             }
         }
 
+        // Counts the gathers: view data computed in one belongs to that view
+        internal int GatherSerial { get; private set; }
+
         // ReSharper disable once MemberCanBePrivate.Global - used by HDRP/URP features that are not always compiled
         public bool GatherSplatsForCamera(Camera cam)
         {
+            GatherSerial++;
             FlushDeferredDisposal();
             DumpJournalOnBindingError();
 
@@ -635,9 +639,13 @@ namespace GaussianSplatting.Runtime
             foreach (var kvp in _splats)
             {
                 var gs = kvp.Key;
-                if (gs == null || !gs.isActiveAndEnabled || !gs.visible || !gs.HasValidAsset || !gs.HasValidRenderSetup)
+                if (gs == null || !gs.isActiveAndEnabled || !gs.visible)
+                    continue;
+                gs.RaiseBeforeGather(cam);
+                if (!gs.HasValidAsset || !gs.HasValidRenderSetup)
                     continue;
                 gs.RefreshStyle();
+                gs.RefreshLighting();
                 _activeSplats.Add((kvp.Key, kvp.Value));
             }
             if (_activeSplats.Count == 0)

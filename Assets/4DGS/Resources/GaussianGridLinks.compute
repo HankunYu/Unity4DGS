@@ -1,0 +1,281 @@
+// Lines from a lattice of points fixed in space to a target renderer's
+// splats (GaussianGridLinks). Each lattice point near the target links to
+// its nearest target splats within the maximum distance: from outside a
+// surface the nearest point lies along the surface normal, so the links
+// stand out of the body like pins, and they break as it moves away. Lattice
+// points a little farther out can show as faint dots.
+//
+// Each frame: gather a sample of the target's splats as it draws them
+// (position, opacity, color, normal) and bound them in lattice space; list
+// them in a hashed grid (GaussianPointHash.hlsl); clear the link splats;
+// then visit only the lattice points around the target's bounds and append
+// a link splat per link (and a dot per revealed point), up to the capacity.
+//
+// A link splat sits at its lattice point and is drawn as a Segment streak
+// to the target splat; a dot has no segment.
+
+#pragma kernel CSHashClear
+#pragma kernel CSHashCount
+#pragma kernel CSHashScan
+#pragma kernel CSHashScatter
+#pragma kernel CSGridReset
+#pragma kernel CSGridGather
+#pragma kernel CSGridClearLinks
+#pragma kernel CSGridBuild
+
+#define GROUP_SIZE 256
+// Must match GaussianGridLinks.MaxLinksPerPoint
+#define MAX_LINKS_PER_POINT 4
+// Must match GaussianGridLinks.BuildGroups; the build's own group is small,
+// as each thread holds its search state in registers
+#define BUILD_GROUPS 4096
+#define BUILD_GROUP_SIZE 64
+#define NO_POINT 0xFFFFFFFFu
+
+#include "../Shaders/GaussianSplatting.hlsl"
+// The target as it is drawn (asset data, style and lighting)
+#include "../Shaders/GaussianSourceSplat.hlsl"
+
+// The target splats to gather: their indices
+uint _GridSampleCount;
+StructuredBuffer<uint> _GridSamples;
+// 3 float4s per sample: position (world), opacity; color (gamma), 0;
+// normal (world), 0
+RWStructuredBuffer<float4> _GridPoints;
+StructuredBuffer<float4> _GridPointsRead;
+// Lattice-space bounds of the shown samples (min x, y, z, max x, y, z as
+// sortable uints), then the number of splats appended
+RWStructuredBuffer<uint> _GridState;
+
+float4x4 _GridWorldToLattice;   // world to lattice units (one per spacing)
+float4x4 _GridLatticeToWorld;
+float _GridInvSpacing;          // lattice units per world unit
+int3 _GridExtent;               // lattice points span -extent .. +extent
+float4 _GridParams;             // jitter (lattice units), seed, outside only, links per point
+float4 _GridLinkParams;         // max distance, fade power, opacity, point tint
+float4 _GridRevealParams;       // reveal distance (0 off), dot opacity, 0, 0
+float4 _GridColor;              // rgb gamma, may exceed 1
+uint _GridCapacity;
+float4x4 _GridLinkWorldToObject;
+float _GridSplatScale;          // splat scale factor of every link splat
+
+// The link renderer's base pose (center (object), 0; rotation), animation
+// output (offset, opacity; scale, color blend; color) and segments (world,
+// from the splat to the other end), per splat
+RWStructuredBuffer<float4> _GridLinkBase;
+RWStructuredBuffer<float4> _GridLinkAnim;
+RWStructuredBuffer<float4> _GridLinkSegments;
+
+uint GridSortableUint(float f)
+{
+    uint u = asuint(f);
+    return u ^ (-((int)(u >> 31)) | 0x80000000);
+}
+
+float GridSortableFloat(uint u)
+{
+    return asfloat(u ^ ((u >> 31) != 0 ? 0x80000000 : 0xFFFFFFFF));
+}
+
+uint GridHash(uint x)
+{
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+float GridHash01(uint x)
+{
+    return (GridHash(x) >> 8) * (1.0 / 16777216.0);
+}
+
+uint HashPointCount()
+{
+    return _GridSampleCount;
+}
+
+bool HashPointActive(uint i)
+{
+    return _GridPointsRead[i * 3].w > 0;
+}
+
+float3 HashPointPos(uint i)
+{
+    return _GridPointsRead[i * 3].xyz;
+}
+
+#include "../Shaders/GaussianPointHash.hlsl"
+
+[numthreads(1, 1, 1)]
+void CSGridReset(uint3 id : SV_DispatchThreadID)
+{
+    for (uint a = 0; a < 3; a++)
+    {
+        _GridState[a] = 0xFFFFFFFFu;
+        _GridState[a + 3] = 0;
+    }
+    _GridState[6] = 0;
+}
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void CSGridGather(uint3 id : SV_DispatchThreadID)
+{
+    uint n = id.x;
+    if (n >= _GridSampleCount)
+        return;
+    uint idx = _GridSamples[n];
+    float3 worldPos = 0, color = 0, normal = float3(0, 1, 0);
+    float opacity = 0;
+    if (idx < _SplatCount)
+    {
+        LoadSourceSplat(idx, worldPos, color, opacity);
+        normal = LoadSourceNormal(idx);
+    }
+    opacity = saturate(opacity);
+    _GridPoints[n * 3] = float4(worldPos, opacity);
+    _GridPoints[n * 3 + 1] = float4(color, 0);
+    _GridPoints[n * 3 + 2] = float4(normal, 0);
+    if (opacity <= 0)
+        return;
+    float3 lattice = mul(_GridWorldToLattice, float4(worldPos, 1)).xyz;
+    InterlockedMin(_GridState[0], GridSortableUint(lattice.x));
+    InterlockedMin(_GridState[1], GridSortableUint(lattice.y));
+    InterlockedMin(_GridState[2], GridSortableUint(lattice.z));
+    InterlockedMax(_GridState[3], GridSortableUint(lattice.x));
+    InterlockedMax(_GridState[4], GridSortableUint(lattice.y));
+    InterlockedMax(_GridState[5], GridSortableUint(lattice.z));
+}
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void CSGridClearLinks(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= _GridCapacity)
+        return;
+    _GridLinkBase[i * 2] = 0;
+    _GridLinkBase[i * 2 + 1] = float4(0, 0, 0, 1);
+    _GridLinkAnim[i * 3] = 0;
+    _GridLinkAnim[i * 3 + 1] = float4(_GridSplatScale, 1, 0, 0);
+    _GridLinkAnim[i * 3 + 2] = float4(0, 0, 0, 1);
+    _GridLinkSegments[i] = 0;
+}
+
+// A lattice point in world space: its lattice coordinate, moved by up to
+// half the jitter on each axis
+float3 GridPointWorld(int3 c)
+{
+    uint h = GridHash((uint)c.x * 73856093u ^ (uint)c.y * 19349663u ^ (uint)c.z * 83492791u ^ asuint(_GridParams.y));
+    float3 jitter = float3(GridHash01(h), GridHash01(h ^ 0x68e31da4u), GridHash01(h ^ 0xb5297a4du)) - 0.5;
+    return mul(_GridLatticeToWorld, float4((float3)c + jitter * _GridParams.x, 1)).xyz;
+}
+
+void AppendSplat(float3 pos, float3 segment, float opacity, float3 color)
+{
+    uint slot;
+    InterlockedAdd(_GridState[6], 1, slot);
+    if (slot >= _GridCapacity)
+        return;
+    _GridLinkBase[slot * 2] = float4(mul(_GridLinkWorldToObject, float4(pos, 1)).xyz, 0);
+    _GridLinkAnim[slot * 3] = float4(0, 0, 0, opacity);
+    _GridLinkAnim[slot * 3 + 2] = float4(color, 1);
+    _GridLinkSegments[slot] = float4(segment, 0);
+}
+
+[numthreads(BUILD_GROUP_SIZE, 1, 1)]
+void CSGridBuild(uint3 id : SV_DispatchThreadID)
+{
+    float3 lo = float3(GridSortableFloat(_GridState[0]), GridSortableFloat(_GridState[1]), GridSortableFloat(_GridState[2]));
+    float3 hi = float3(GridSortableFloat(_GridState[3]), GridSortableFloat(_GridState[4]), GridSortableFloat(_GridState[5]));
+    if (any(hi < lo))
+        return;
+
+    float maxDistance = _GridLinkParams.x;
+    float reach = max(maxDistance, _GridRevealParams.x);
+    // The lattice points within reach of the bounds, inside the box; the
+    // reach is in world units, the lattice is spacing units, and the jitter
+    // moves points by up to half of it
+    float reachLattice = reach * _GridInvSpacing + _GridParams.x * 0.5;
+    int3 first = max((int3)floor(lo - reachLattice), -_GridExtent);
+    int3 last = min((int3)ceil(hi + reachLattice), _GridExtent);
+    if (any(last < first))
+        return;
+    uint3 size = (uint3)(last - first + 1);
+    uint total = size.x * size.y * size.z;
+    uint k = clamp((uint)_GridParams.w, 1, MAX_LINKS_PER_POINT);
+
+    for (uint t = id.x; t < total; t += BUILD_GROUPS * BUILD_GROUP_SIZE)
+    {
+        int3 c = first + int3(t % size.x, (t / size.x) % size.y, t / (size.x * size.y));
+        float3 p = GridPointWorld(c);
+
+        // The nearest target points within reach, nearest first
+        float bestDistSq[MAX_LINKS_PER_POINT];
+        uint best[MAX_LINKS_PER_POINT];
+        for (uint n = 0; n < MAX_LINKS_PER_POINT; n++)
+        {
+            bestDistSq[n] = reach * reach;
+            best[n] = NO_POINT;
+        }
+        int3 home = HashCellCoord(p);
+        uint visited[27];
+        uint visitedCount = 0;
+        for (int dz = -1; dz <= 1; dz++)
+        for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++)
+        {
+            uint cell;
+            if (!HashVisitCell(home + int3(dx, dy, dz), visited, visitedCount, cell))
+                continue;
+            uint start = _HashCellStartsRead[cell];
+            uint count = _HashCellsRead[cell];
+            for (uint m = 0; m < count; m++)
+            {
+                uint j = _HashSortedRead[start + m];
+                float3 d = _GridPointsRead[j * 3].xyz - p;
+                float distSq = dot(d, d);
+                if (distSq >= bestDistSq[k - 1])
+                    continue;
+                uint slot = k - 1;
+                while (slot > 0 && bestDistSq[slot - 1] > distSq)
+                {
+                    bestDistSq[slot] = bestDistSq[slot - 1];
+                    best[slot] = best[slot - 1];
+                    slot--;
+                }
+                bestDistSq[slot] = distSq;
+                best[slot] = j;
+            }
+        }
+        if (best[0] == NO_POINT)
+            continue;
+
+        // Inside the target, behind its nearest surface: no links
+        float3 nearest = _GridPointsRead[best[0] * 3].xyz;
+        if (_GridParams.z > 0.5 && dot(p - nearest, _GridPointsRead[best[0] * 3 + 2].xyz) <= 0)
+            continue;
+
+        float nearestDist = sqrt(bestDistSq[0]);
+        if (nearestDist >= maxDistance)
+        {
+            // Revealed: a dot fading out towards the reveal distance
+            float fade = saturate((_GridRevealParams.x - nearestDist) / max(_GridRevealParams.x - maxDistance, 1e-5));
+            AppendSplat(p, 0, _GridRevealParams.y * fade, _GridColor.rgb);
+            continue;
+        }
+        for (uint s = 0; s < k; s++)
+        {
+            uint j = best[s];
+            if (j == NO_POINT)
+                break;
+            float3 segment = _GridPointsRead[j * 3].xyz - p;
+            float dist = length(segment);
+            if (dist >= maxDistance)
+                break;
+            float fade = pow(saturate(1.0 - dist / maxDistance), _GridLinkParams.y);
+            float opacity = _GridLinkParams.z * fade * _GridPointsRead[j * 3].w;
+            float3 color = _GridColor.rgb * lerp(1.0, _GridPointsRead[j * 3 + 1].rgb, _GridLinkParams.w);
+            AppendSplat(p, segment, opacity, color);
+        }
+    }
+}

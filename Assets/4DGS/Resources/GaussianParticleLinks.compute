@@ -1,0 +1,161 @@
+// Lines between nearby particles of a GaussianParticleEmitter
+// (GaussianParticleLinks). Each shown particle links to its nearest
+// particles within the maximum distance, only to those with a higher index,
+// so a pair is linked once. A link fades out as its ends move apart and is
+// gone at the maximum distance, and fades with either end. Every particle
+// owns a fixed run of link slots, so a link keeps its splat while it lasts.
+//
+// The neighbours come from a hashed grid of cells as wide as the maximum
+// distance (GaussianPointHash.hlsl).
+//
+// The links are written as the link renderer's base pose, animation output
+// and segments, one splat per link at its first end, drawn as Segment
+// streaks to the other.
+
+#pragma kernel CSHashClear
+#pragma kernel CSHashCount
+#pragma kernel CSHashScan
+#pragma kernel CSHashScatter
+#pragma kernel CSLinkBuild
+
+// The build's group is small, as each thread holds its search state in
+// registers; must match GaussianParticleLinks.BuildGroupSize
+#define BUILD_GROUP_SIZE 64
+// Must match GaussianParticleLinks.MaxLinksPerPoint
+#define MAX_LINKS_PER_POINT 8
+#define NO_POINT 0xFFFFFFFFu
+
+// The emitter's particles, bound by GaussianParticleEmitter.SetParticlesOnCS:
+// 3 float4s each in the state (position (world), life index; velocity,
+// meta; birth color, opacity) and in the animation output (offset,
+// opacity; scale, color blend; color)
+uint _ParticleCount;
+StructuredBuffer<float4> _ParticleState;
+StructuredBuffer<float4> _ParticleAnim;
+
+uint _LinksPerPoint;
+float4 _LinkParams;         // max distance, fade power, opacity, point tint
+float4 _LinkColor;          // rgb gamma, may exceed 1
+float4x4 _LinkWorldToObject;
+float _LinkSplatScale;      // splat scale factor of every link splat
+
+// The link renderer's base pose (center (object), 0; rotation), animation
+// output (offset, opacity; scale, color blend; color) and segments (world,
+// from the splat to the other end), per link slot
+RWStructuredBuffer<float4> _LinkBase;
+RWStructuredBuffer<float4> _LinkAnim;
+RWStructuredBuffer<float4> _LinkSegments;
+
+float3 PointPos(uint i)
+{
+    return _ParticleState[i * 3].xyz;
+}
+
+float PointOpacity(uint i)
+{
+    return saturate(_ParticleAnim[i * 3].w);
+}
+
+float3 PointColor(uint i)
+{
+    return _ParticleAnim[i * 3 + 2].rgb;
+}
+
+uint HashPointCount()
+{
+    return _ParticleCount;
+}
+
+bool HashPointActive(uint i)
+{
+    return PointOpacity(i) > 0;
+}
+
+float3 HashPointPos(uint i)
+{
+    return PointPos(i);
+}
+
+#include "../Shaders/GaussianPointHash.hlsl"
+
+[numthreads(BUILD_GROUP_SIZE, 1, 1)]
+void CSLinkBuild(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= _ParticleCount)
+        return;
+
+    float maxDistance = _LinkParams.x;
+    uint k = min(_LinksPerPoint, MAX_LINKS_PER_POINT);
+    // The nearest particles so far, nearest first
+    float bestDistSq[MAX_LINKS_PER_POINT];
+    uint best[MAX_LINKS_PER_POINT];
+    for (uint n = 0; n < MAX_LINKS_PER_POINT; n++)
+    {
+        bestDistSq[n] = maxDistance * maxDistance;
+        best[n] = NO_POINT;
+    }
+
+    float3 p = PointPos(i);
+    float opacity = PointOpacity(i);
+    if (opacity > 0)
+    {
+        int3 home = HashCellCoord(p);
+        uint visited[27];
+        uint visitedCount = 0;
+        for (int dz = -1; dz <= 1; dz++)
+        for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++)
+        {
+            uint cell;
+            if (!HashVisitCell(home + int3(dx, dy, dz), visited, visitedCount, cell))
+                continue;
+            uint start = _HashCellStartsRead[cell];
+            uint count = _HashCellsRead[cell];
+            for (uint m = 0; m < count; m++)
+            {
+                uint j = _HashSortedRead[start + m];
+                if (j <= i)
+                    continue;
+                float3 d = PointPos(j) - p;
+                float distSq = dot(d, d);
+                if (distSq >= bestDistSq[k - 1])
+                    continue;
+                // Insert, keeping the list sorted
+                uint slot = k - 1;
+                while (slot > 0 && bestDistSq[slot - 1] > distSq)
+                {
+                    bestDistSq[slot] = bestDistSq[slot - 1];
+                    best[slot] = best[slot - 1];
+                    slot--;
+                }
+                bestDistSq[slot] = distSq;
+                best[slot] = j;
+            }
+        }
+    }
+
+    float3 objectPos = mul(_LinkWorldToObject, float4(p, 1)).xyz;
+    float3 color = PointColor(i);
+    for (uint s = 0; s < k; s++)
+    {
+        uint link = i * k + s;
+        uint j = best[s];
+        float linkOpacity = 0;
+        float3 segment = 0;
+        float3 linkColor = _LinkColor.rgb;
+        if (j != NO_POINT)
+        {
+            segment = PointPos(j) - p;
+            float fade = pow(saturate(1.0 - length(segment) / maxDistance), _LinkParams.y);
+            linkOpacity = _LinkParams.z * fade * min(opacity, PointOpacity(j));
+            linkColor *= lerp(1.0, (color + PointColor(j)) * 0.5, _LinkParams.w);
+        }
+        _LinkBase[link * 2] = float4(objectPos, 0);
+        _LinkBase[link * 2 + 1] = float4(0, 0, 0, 1);
+        _LinkAnim[link * 3] = float4(0, 0, 0, linkOpacity);
+        _LinkAnim[link * 3 + 1] = float4(_LinkSplatScale, 1, 0, 0);
+        _LinkAnim[link * 3 + 2] = float4(linkColor, 1);
+        _LinkSegments[link] = float4(segment, 0);
+    }
+}

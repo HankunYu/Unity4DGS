@@ -1,7 +1,7 @@
 namespace GaussianSplatting.Runtime
 {
     // Image format for the captured sequence.
-    public enum Stereo360OutputFormat
+    public enum CaptureOutputFormat
     {
         // 8 bits per channel. Correct for a beauty pass, useless for an AOV:
         // a depth channel quantised to 256 steps carries no usable range.

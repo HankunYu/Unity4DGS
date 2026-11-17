@@ -26,6 +26,9 @@ namespace GaussianSplatting.Runtime
         [Tooltip("Style weight inside the volume, before the styler's Weight scales it")]
         public float weight = 1f;
 
+        [Tooltip("Turns the falloff from a fade into a scatter: inside the falloff each splat is either fully in the volume or out of it, more of them towards the inside. A moving volume then changes the splats over one by one instead of along a line")]
+        [Range(0f, 1f)] public float scatter;
+
         protected override Color GizmoColor => Color.magenta;
 
         int ITideChannelTarget.ChannelCount => ChannelNames.Length;

@@ -3,6 +3,7 @@ using Unity.Profiling;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
+using Tide;
 
 namespace GaussianSplatting.Runtime
 {
@@ -16,8 +17,10 @@ namespace GaussianSplatting.Runtime
     [RequireComponent(typeof(GaussianSplatRenderer))]
     [ExecuteInEditMode]
     [DefaultExecutionOrder(-50)]
-    public class GaussianMorph : MonoBehaviour
+    public class GaussianMorph : MonoBehaviour, ITideChannelTarget
     {
+        private static readonly string[] ChannelNames = { "Weight" };
+
         [SerializeField] [Tooltip("Target asset to morph into")]
         private GaussianSplatAsset _targetAsset;
 
@@ -32,9 +35,19 @@ namespace GaussianSplatting.Runtime
 
         // Public accessors
         public GaussianSplatAsset TargetAsset { get => _targetAsset; set => _targetAsset = value; }
-        public float Weight { get => _weight; set => _weight = value; }
+        public float Weight { get => _weight; set => _weight = Mathf.Clamp01(value); }
         public ComputeShader MorphShader { get => _morphShader; set => _morphShader = value; }
         public bool UseNearestMatch { get => _useNearestMatch; set => _useNearestMatch = value; }
+
+        int ITideChannelTarget.ChannelCount => ChannelNames.Length;
+
+        string ITideChannelTarget.GetChannelName(int index) => ChannelNames[index];
+
+        TideValueType ITideChannelTarget.GetChannelType(int index) => TideValueType.Float;
+
+        TideValue ITideChannelTarget.GetChannelValue(int index) => _weight;
+
+        void ITideChannelTarget.SetChannelValue(int index, TideValue value) => Weight = value.AsFloat;
 
         // Cached renderer reference
         private GaussianSplatRenderer _renderer;

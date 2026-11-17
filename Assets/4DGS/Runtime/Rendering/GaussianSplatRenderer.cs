@@ -56,6 +56,8 @@ namespace GaussianSplatting.Runtime
         public float occlusionTolerance = 0.03f;
         [Range(0.5f, 8.0f)] [Tooltip("Widens each splat's footprint when building the nearest-surface depth, so sparse samples still form a closed surface")]
         public float occlusionFootprintScale = 2.0f;
+        [Tooltip("Another renderer whose surface hides this one's splats, such as the body its particles are born on: splats lying more than Occlusion Tolerance behind that renderer's nearest surface are dropped. It needs Occlusion Culling on")]
+        public GaussianSplatRenderer occluder;
 
         // Screen pixels per occlusion grid cell
         const int OcclusionCellSize = 4;
@@ -90,6 +92,26 @@ namespace GaussianSplatting.Runtime
         [NonSerialized] internal GaussianStyler StylerOverride;
 
         internal GaussianStyler Styler => StylerOverride != null ? StylerOverride : GetComponent<GaussianStyler>();
+
+        // The scene lighting this renderer's splats take, refreshed from its
+        // GaussianSplatLighting before each frame's view data (RefreshLighting)
+        private readonly GaussianLightSet _lightSet = new();
+
+        // Loads the lighting component's lights as they are now
+        internal void RefreshLighting()
+        {
+            var lighting = GetComponent<GaussianSplatLighting>();
+            if (lighting != null)
+                lighting.FillLightSet(_lightSet);
+            else
+                _lightSet.Begin(0f);
+        }
+
+        // The lighting parameters (GaussianLighting.hlsl): for the view data,
+        // and for another compute shader that colors splats the way this
+        // renderer draws them, e.g. GaussianParticleEmitter
+        internal void SetLightingOnCS(CommandBuffer cmb, ComputeShader cs, int kernelIndex) =>
+            _lightSet.SetOnCS(cmb, cs, kernelIndex);
 
         // Loads the styler's volumes and styles as they are now
         internal void RefreshStyle()
@@ -148,6 +170,20 @@ namespace GaussianSplatting.Runtime
         // Nearest depth per screen cell for occlusion culling; grows to the
         // largest camera that has rendered this splat
         private GraphicsBuffer _gpuOcclusionGrid;
+        // The grid as the last occlusion pass left it: its cells per eye, and
+        // the gather it was built in (another renderer may cull against it)
+        private Vector2Int _occlusionGridSize;
+        private int _occlusionGridGather = -1;
+        // What the view data now in the buffers was computed for, so a second
+        // request within the same gather (from a renderer this one occludes)
+        // does not compute it again
+        private int _viewDataGather = -1;
+        private Camera _viewDataCamera;
+        private Matrix4x4 _viewDataView;
+        private Matrix4x4 _viewDataProj;
+        private Vector4 _viewDataScreen;
+        private bool _viewDataValid;
+        private bool _viewDataInProgress;
         private GraphicsBuffer _gpuStyleRange;
         internal GraphicsBuffer _gpuPosData;
         internal GraphicsBuffer _gpuOtherData;
@@ -163,6 +199,9 @@ namespace GaussianSplatting.Runtime
         private GraphicsBuffer _deformedChunkBounds;
         private GraphicsBuffer _velocity;
         private float _velocityMaxSpeed;
+        // Set by GaussianParticleLinks: per-splat segments for Segment streaks
+        private GraphicsBuffer _segments;
+        private float _segmentMaxLength;
         // Set by GaussianMorph: pre-blended splat data (4 float4s per splat)
         private GraphicsBuffer _morphedDataBuffer;
         private GraphicsBuffer _morphSHBuffer;
@@ -293,6 +332,8 @@ namespace GaussianSplatting.Runtime
             public static readonly int DeformedBaseValid = Shader.PropertyToID("_DeformedBaseValid");
             public static readonly int SplatVelocity = Shader.PropertyToID("_SplatVelocity");
             public static readonly int SplatVelocityValid = Shader.PropertyToID("_SplatVelocityValid");
+            public static readonly int SplatSegment = Shader.PropertyToID("_SplatSegment");
+            public static readonly int SplatSegmentValid = Shader.PropertyToID("_SplatSegmentValid");
             public static readonly int MorphedData = Shader.PropertyToID("_MorphedData");
             public static readonly int MorphDataValid = Shader.PropertyToID("_MorphDataValid");
             public static readonly int MorphWeight = Shader.PropertyToID("_MorphWeight");
@@ -418,6 +459,30 @@ namespace GaussianSplatting.Runtime
             _velocityMaxSpeed = 0f;
         }
 
+        // Per-splat world segment (1 float4 per splat: xyz from the splat to
+        // the segment's other end, 0) for Segment streaks, with the longest
+        // length in it, which bounds how far the streaks reach for culling
+        internal void SetSegments(GraphicsBuffer segments, float maxLength)
+        {
+            _segments = segments;
+            _segmentMaxLength = maxLength;
+        }
+
+        internal void ClearSegments()
+        {
+            _segments = null;
+            _segmentMaxLength = 0f;
+        }
+
+        // Raised each time the render system gathers this renderer for a
+        // camera, before its splats are read: after every pose and
+        // simulation of the frame, for components that derive this
+        // renderer's splats from other renderers (GaussianParticleLinks,
+        // GaussianGridLinks)
+        internal event Action<Camera> BeforeGather;
+
+        internal void RaiseBeforeGather(Camera cam) => BeforeGather?.Invoke(cam);
+
         internal void SetAnimationOutput(GraphicsBuffer animBuffer, GraphicsBuffer chunkBounds)
         {
             _animOutputBuffer = animBuffer;
@@ -464,6 +529,9 @@ namespace GaussianSplatting.Runtime
             OcclusionSplat,
             OcclusionCull,
             BakeQuads,
+            LightShadowClear,
+            LightShadowBounds,
+            LightShadowSplat,
         }
 
         internal static readonly string[] KernelNames =
@@ -488,6 +556,9 @@ namespace GaussianSplatting.Runtime
             "CSOcclusionSplat",
             "CSOcclusionCull",
             "CSBakeQuads",
+            "CSLightShadowClear",
+            "CSLightShadowBounds",
+            "CSLightShadowSplat",
         };
 
         const string CopyViewDataAndDistancesKernelName = "CSCopyViewDataAndDistances";
@@ -832,7 +903,7 @@ namespace GaussianSplatting.Runtime
             GraphicsBuffer chunkBounds = hasAnim ? _animChunkBounds : hasDeformed ? _deformedChunkBounds : null;
             cmb.SetComputeIntParam(cs, Props.DynamicChunkBoundsValid, chunkBounds != null ? 1 : 0);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.DynamicChunkBounds, chunkBounds ?? _gpuView);
-            SetVelocityOnCS(cmb, cs, kernelIndex);
+            SetStreakSourcesOnCS(cmb, cs, kernelIndex);
 
             // Morph data binding
             bool hasMorph = _morphedDataBuffer != null && _morphDataValid != 0;
@@ -843,11 +914,15 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.MorphSHData, hasMorphSH ? _morphSHBuffer : _gpuView);
         }
 
-        private void SetVelocityOnCS(CommandBuffer cmb, ComputeShader cs, int kernelIndex)
+        // The per-splat sources the Velocity and Segment streaks read
+        private void SetStreakSourcesOnCS(CommandBuffer cmb, ComputeShader cs, int kernelIndex)
         {
             bool hasVelocity = _velocity != null;
             cmb.SetComputeIntParam(cs, Props.SplatVelocityValid, hasVelocity ? 1 : 0);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatVelocity, hasVelocity ? _velocity : _gpuView);
+            bool hasSegments = _segments != null;
+            cmb.SetComputeIntParam(cs, Props.SplatSegmentValid, hasSegments ? 1 : 0);
+            cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatSegment, hasSegments ? _segments : _gpuView);
         }
 
         internal void SetAssetDataOnMaterial(MaterialPropertyBlock mat)
@@ -899,6 +974,7 @@ namespace GaussianSplatting.Runtime
             DisposeBuffer(ref _gpuOcclusionGrid);
             DisposeBuffer(ref _gpuStyleRange);
             _styleSet.Dispose();
+            _lightSet.Dispose();
 
             _sorterArgs.resources.Dispose();
 
@@ -966,6 +1042,34 @@ namespace GaussianSplatting.Runtime
             if (GaussianSplatRenderSystem.instance.StereoOverride is { EyeSize: { x: > 0, y: > 0 } eyeSize })
                 screenPar = new Vector4(eyeSize.x, eyeSize.y, 0, 0);
             Vector4 camPos = cam.transform.position;
+            Matrix4x4 matProj = matrixOverride?.Proj ?? cam.projectionMatrix;
+
+            // A renderer this one occludes asks for the view data ahead of
+            // this renderer's own turn; the second request finds it done
+            if (_viewDataInProgress)
+                return false;
+            int gather = GaussianSplatRenderSystem.instance.GatherSerial;
+            if (_viewDataGather == gather && _viewDataCamera == cam && _viewDataView == matView &&
+                _viewDataProj == matProj && _viewDataScreen == screenPar)
+                return _viewDataValid;
+            _viewDataGather = gather;
+            _viewDataCamera = cam;
+            _viewDataView = matView;
+            _viewDataProj = matProj;
+            _viewDataScreen = screenPar;
+            _viewDataValid = false;
+
+            // The occluder's depth grid has to exist before this renderer's
+            // splats are tested against it, whatever the draw order
+            GaussianSplatRenderer occludedBy = null;
+            if (CanBeOccludedBy(occluder))
+            {
+                _viewDataInProgress = true;
+                bool occluderReady = occluder.CalcViewData(cmb, cam);
+                _viewDataInProgress = false;
+                if (occluderReady && occluder._occlusionGridGather == gather)
+                    occludedBy = occluder;
+            }
 
             if (!SetAssetDataOnCS(cmb, KernelIndices.CalcViewData, out int kernelIndex))
                 return false;
@@ -1036,8 +1140,13 @@ namespace GaussianSplatting.Runtime
             GaussianDepthOfField dof = GaussianDepthOfField.ActiveOn(cam);
             cmb.SetComputeVectorParam(csSplatUtilities, Props.DofParams, dof != null ? dof.ShaderParams : Vector4.zero);
             // The occlusion grid takes blurred splats for solid surfaces
-            bool occlusion = occlusionCulling && dof == null;
+            bool ownOcclusion = occlusionCulling && dof == null;
+            if (dof != null)
+                occludedBy = null;
+            bool occlusion = ownOcclusion || occludedBy != null;
             SetStyleOnCS(cmb, kernelIndex, projectionScale, occlusion);
+            SetLightingOnCS(cmb, csSplatUtilities, kernelIndex);
+            RenderLightShadow(cmb);
 
             csSplatUtilities.GetKernelThreadGroupSizes(kernelIndex, out uint gsX, out _, out _);
             int dispatchCount = EffectiveSplatCount;
@@ -1068,6 +1177,7 @@ namespace GaussianSplatting.Runtime
 
                     SetAssetDataOnCS(cmb, stereoKernel);
                     SetStyleOnCS(cmb, stereoKernel, projectionScale, occlusion);
+                    SetLightingOnCS(cmb, csSplatUtilities, stereoKernel);
                     csSplatUtilities.GetKernelThreadGroupSizes(stereoKernel, out uint gsX2, out _, out _);
                     int stereoGroupCount = (dispatchCount + (int)gsX2 - 1) / (int)gsX2;
                     cmb.DispatchCompute(csSplatUtilities, stereoKernel, stereoGroupCount, 1, 1);
@@ -1100,11 +1210,20 @@ namespace GaussianSplatting.Runtime
                 cmb.DispatchCompute(csSplatUtilities, kernelIndex, groupCount, 1, 1);
             }
 
-            if (occlusion)
+            if (ownOcclusion)
                 CullOccludedSplats(cmb, screenPar, isStereo);
+            if (occludedBy != null)
+                CullSplatsBehind(cmb, occludedBy);
             if (QuadsBaked && occlusion)
                 BakeDeferredQuads(cmb, matVP, eyeVP);
+            _viewDataValid = true;
             return true;
+        }
+
+        private bool CanBeOccludedBy(GaussianSplatRenderer other)
+        {
+            return other != null && other != this && other.isActiveAndEnabled && other.visible &&
+                   other.occlusionCulling && other.HasValidAsset && other.HasValidRenderSetup;
         }
 
         // Quads held back while occlusion culling reads the Gaussian footprints
@@ -1128,9 +1247,38 @@ namespace GaussianSplatting.Runtime
                 cmb.SetComputeMatrixParam(cs, Props.MatrixInvVP, vp.inverse);
             }
             cmb.SetComputeBufferParam(cs, kernel, Props.SplatViewData, _gpuView);
-            SetVelocityOnCS(cmb, cs, kernel);
+            SetStreakSourcesOnCS(cmb, cs, kernel);
             cs.GetKernelThreadGroupSizes(kernel, out uint group, out _, out _);
             cmb.DispatchCompute(cs, kernel, (EffectiveSplatCount + (int)group - 1) / (int)group, 1, 1);
+        }
+
+        // The lighting's shadow map from the splats as they are now, with the
+        // view data pass's transform and splat scale bound. The same in every
+        // view; it runs with the view data because that is where the splats'
+        // current positions are bound.
+        private void RenderLightShadow(CommandBuffer cmb)
+        {
+            if (!_lightSet.ShadowActive ||
+                !TryFindSupportedKernel(KernelIndices.LightShadowClear, out int clearKernel) ||
+                !TryFindSupportedKernel(KernelIndices.LightShadowBounds, out int boundsKernel) ||
+                !TryFindSupportedKernel(KernelIndices.LightShadowSplat, out int splatKernel))
+                return;
+
+            ComputeShader cs = csSplatUtilities;
+            _lightSet.SetShadowTargetOnCS(cmb, cs, clearKernel);
+            cs.GetKernelThreadGroupSizes(clearKernel, out uint clearGroup, out _, out _);
+            cmb.DispatchCompute(cs, clearKernel, (_lightSet.ShadowEntryCount + (int)clearGroup - 1) / (int)clearGroup, 1, 1);
+
+            DispatchPerSplat(boundsKernel);
+            DispatchPerSplat(splatKernel);
+
+            void DispatchPerSplat(int kernel)
+            {
+                SetAssetDataOnCS(cmb, kernel);
+                _lightSet.SetShadowTargetOnCS(cmb, cs, kernel);
+                cs.GetKernelThreadGroupSizes(kernel, out uint group, out _, out _);
+                cmb.DispatchCompute(cs, kernel, (EffectiveSplatCount + (int)group - 1) / (int)group, 1, 1);
+            }
         }
 
         // Runs on the view data CalcViewData just wrote, with its screen
@@ -1152,6 +1300,9 @@ namespace GaussianSplatting.Runtime
                 DisposeBuffer(ref _gpuOcclusionGrid);
                 _gpuOcclusionGrid = new GraphicsBuffer(GraphicsBuffer.Target.Raw, cellCount, 4) { name = "GaussianOcclusionGrid" };
             }
+
+            _occlusionGridSize = new Vector2Int(gridW, gridH);
+            _occlusionGridGather = _viewDataGather;
 
             ComputeShader cs = csSplatUtilities;
             cmb.SetComputeIntParams(cs, Props.OcclusionGridSize, gridW, gridH);
@@ -1175,6 +1326,25 @@ namespace GaussianSplatting.Runtime
             }
         }
 
+        // Drops the splats lying behind another renderer's nearest surface,
+        // read from the depth grid that renderer built for this same view. Runs
+        // on this renderer's view data, like CullOccludedSplats
+        private void CullSplatsBehind(CommandBuffer cmb, GaussianSplatRenderer other)
+        {
+            if (other._gpuOcclusionGrid == null ||
+                !TryFindSupportedKernel(KernelIndices.OcclusionCull, out int cullKernel))
+                return;
+
+            ComputeShader cs = csSplatUtilities;
+            cmb.SetComputeIntParams(cs, Props.OcclusionGridSize, other._occlusionGridSize.x, other._occlusionGridSize.y);
+            cmb.SetComputeFloatParam(cs, Props.OcclusionCellSize, OcclusionCellSize);
+            cmb.SetComputeFloatParam(cs, Props.OcclusionTolerance, occlusionTolerance);
+            cmb.SetComputeBufferParam(cs, cullKernel, Props.OcclusionGrid, other._gpuOcclusionGrid);
+            cmb.SetComputeBufferParam(cs, cullKernel, Props.SplatViewData, _gpuView);
+            cs.GetKernelThreadGroupSizes(cullKernel, out uint group, out _, out _);
+            cmb.DispatchCompute(cs, cullKernel, (EffectiveSplatCount + (int)group - 1) / (int)group, 1, 1);
+        }
+
         // Style color and baked quads are computed with the view data; the
         // draw-side parameters live in GaussianSplatRenderSystem
         private void SetStyleOnCS(CommandBuffer cmb, int kernelIndex, float projectionScale, bool occlusion)
@@ -1183,7 +1353,8 @@ namespace GaussianSplatting.Runtime
             SetStyleColorOnCS(cmb, cs, kernelIndex);
             // Read whether or not a style is set: the culling margins, and the
             // additivity occlusion culling discounts
-            _styleSet.SetShapeOnCS(cmb, cs, StyleActive, _velocity != null ? _velocityMaxSpeed : 0f, transform.lossyScale);
+            _styleSet.SetShapeOnCS(cmb, cs, StyleActive, _velocity != null ? _velocityMaxSpeed : 0f,
+                _segments != null ? _segmentMaxLength : 0f, transform.lossyScale);
 
             bool baked = QuadsBaked;
             cmb.SetComputeIntParam(cs, Props.BakeQuads, baked ? 1 : 0);
@@ -1352,6 +1523,14 @@ namespace GaussianSplatting.Runtime
                 }
             }
 
+            // OnEnable may have early-returned if the config appeared late
+            // (e.g. additively-loaded scene, a domain reload): recover here,
+            // asset or not, since components that give the renderer its
+            // asset do so when the render system gathers it
+            // (BeforeGather)
+            if (ResourcesAreSetUp)
+                EnsureSorterAndRegister();
+
             var curHash = splatAsset ? splatAsset.dataHash : new Hash128();
             if (_prevAsset != splatAsset || _prevHash != curHash)
             {
@@ -1360,9 +1539,6 @@ namespace GaussianSplatting.Runtime
                     _prevAsset = splatAsset;
                     _prevHash = curHash;
                     _setupErrorLogged = false;
-                    // OnEnable may have early-returned if the config appeared
-                    // late (e.g. additively-loaded scene) — recover here.
-                    EnsureSorterAndRegister();
                     CreateResourcesForAsset();
                 }
                 else if (!_setupErrorLogged)

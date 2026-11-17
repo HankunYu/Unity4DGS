@@ -23,6 +23,7 @@ namespace GaussianSplatting.Editor
         SerializedProperty m_PropOcclusionCulling;
         SerializedProperty m_PropOcclusionTolerance;
         SerializedProperty m_PropOcclusionFootprintScale;
+        SerializedProperty m_PropOccluder;
 
         int m_CameraIndex;
 
@@ -55,6 +56,7 @@ namespace GaussianSplatting.Editor
             m_PropOcclusionCulling = serializedObject.FindProperty("occlusionCulling");
             m_PropOcclusionTolerance = serializedObject.FindProperty("occlusionTolerance");
             m_PropOcclusionFootprintScale = serializedObject.FindProperty("occlusionFootprintScale");
+            m_PropOccluder = serializedObject.FindProperty("occluder");
 
             s_AllEditors.Add(this);
         }
@@ -98,10 +100,21 @@ namespace GaussianSplatting.Editor
             using (new EditorGUI.DisabledScope(!m_PropBackfaceCulling.boolValue && !m_PropBackfaceCulling.hasMultipleDifferentValues))
                 EditorGUILayout.PropertyField(m_PropBackfaceFadeAngle);
             EditorGUILayout.PropertyField(m_PropOcclusionCulling);
-            using (new EditorGUI.DisabledScope(!m_PropOcclusionCulling.boolValue && !m_PropOcclusionCulling.hasMultipleDifferentValues))
-            {
+            EditorGUILayout.PropertyField(m_PropOccluder, new GUIContent("Occluded By", m_PropOccluder.tooltip));
+            bool ownOcclusion = m_PropOcclusionCulling.boolValue || m_PropOcclusionCulling.hasMultipleDifferentValues;
+            bool otherOcclusion = m_PropOccluder.objectReferenceValue != null || m_PropOccluder.hasMultipleDifferentValues;
+            // The tolerance applies to both tests; the footprint only shapes this renderer's own depth
+            using (new EditorGUI.DisabledScope(!ownOcclusion && !otherOcclusion))
                 EditorGUILayout.PropertyField(m_PropOcclusionTolerance);
+            using (new EditorGUI.DisabledScope(!ownOcclusion))
                 EditorGUILayout.PropertyField(m_PropOcclusionFootprintScale);
+            var occluder = m_PropOccluder.objectReferenceValue as GaussianSplatRenderer;
+            if (occluder != null && !m_PropOccluder.hasMultipleDifferentValues)
+            {
+                if (occluder == target)
+                    EditorGUILayout.HelpBox("Occluded By points at this renderer: use Occlusion Culling for that.", MessageType.Warning);
+                else if (!occluder.occlusionCulling)
+                    EditorGUILayout.HelpBox($"'{occluder.name}' has Occlusion Culling off, so it builds no depth to test against.", MessageType.Warning);
             }
 
             // Validation

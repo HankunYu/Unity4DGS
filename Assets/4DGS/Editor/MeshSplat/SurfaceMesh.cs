@@ -1,18 +1,20 @@
+using GaussianSplatting.Runtime;
 using Unity.Mathematics;
 using UnityEngine;
 
 namespace GaussianSplatting.Editor.MeshSplat
 {
     // One mesh of a model, in the model root's space (Unity axes) and in the
-    // pose it is sampled in: the bind pose for skinned meshes.
+    // pose it is sampled in: the bind pose for skinned meshes, the imported
+    // shape for vertex-animated ones.
     public sealed class SurfaceMesh
     {
         // Transform path below the model root, so a sample can be traced
         // back to the renderer it came from
         public string path;
-        // The mesh asset and whether it is skinned, for the runtime binding
+        // The mesh asset and what moves it, for the runtime binding
         public Mesh source;
-        public bool skinned;
+        public GaussianMeshMotion motion;
         public float3[] positions;
         public float3[] normals;
         // Empty when the mesh has none
