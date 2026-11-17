@@ -37,7 +37,17 @@ namespace GaussianSplatting.Runtime
         [Tooltip("Per-eye equirect width in pixels. Each eye is width x width/2.")]
         [SerializeField] private int outputWidth = 5760;
 
+        [Tooltip("OmniDirectionalStereo only. Joins extra renders into each eye where an equirect " +
+                 "cannot be drawn into directly: one turned half a turn for the edge behind the viewer, " +
+                 "and one rolled a quarter turn, shared by both eyes, for straight up and down. Splats " +
+                 "there are whole and round, and bloom and other screen-space effects carry across. " +
+                 "Five renders a frame instead of two.")]
+        [SerializeField] private bool blendSeams = true;
+
         public Stereo360Projection Projection => projection;
+
+        public bool BlendsSeams =>
+            blendSeams && projection == Stereo360Projection.OmniDirectionalStereo;
 
         public Vector2Int PerEyeResolution => new Vector2Int(outputWidth, outputWidth / 2);
 
@@ -80,10 +90,30 @@ namespace GaussianSplatting.Runtime
 
         protected override string SessionDescription =>
             $"{eyeLayout}. " + (projection == Stereo360Projection.OmniDirectionalStereo
-                ? "ODS projection: 1 render per eye, no cubemap, no per-face seams."
+                ? "ODS projection: " + (BlendsSeams ? "2 renders per eye and 1 for the poles, joined behind the viewer and above and below" : "1 render per eye") +
+                  ", no cubemap, no per-face seams."
                 : "Cubemap projection: make sure GaussianSplatURPFeature has 'Use Render Context Matrices' enabled.");
 
+        private const string SeamBlendShaderName = "Hidden/Gaussian Splatting/Equirect Seam Blend";
+        // Distance from the equirect's edge, as a fraction of its width, where
+        // the turned render gives way to the straight one. Each render is
+        // only used a quarter of the width or more from its own edges, far
+        // beyond the reach of bloom.
+        private static readonly Vector4 SeamFade = new Vector4(0.125f, 0.25f, 0f, 0f);
+        private static readonly int TurnedTexId = Shader.PropertyToID("_TurnedTex");
+        private static readonly int SeamFadeId = Shader.PropertyToID("_SeamFade");
+        private static readonly int PoleTexId = Shader.PropertyToID("_PoleTex");
+        private static readonly int PoleFadeId = Shader.PropertyToID("_PoleFade");
+
         private RenderTexture _cube;
+        // The straight and the turned render of an eye, joined into its target
+        private RenderTexture _straight;
+        private RenderTexture _turned;
+        // The render rolled a quarter turn, which has the poles on its
+        // horizon. One a frame: both eyes are the same there.
+        private RenderTexture _pole;
+        private bool _poleRendered;
+        private Material _seamBlend;
         // The config and its settings as they were before the frame's views
         private GaussianSplatConfig _frameConfig;
         private GaussianSplatProjectionMode _prevMode;
@@ -112,6 +142,12 @@ namespace GaussianSplatting.Runtime
                                $"PointCloud (currently {config.renderMode}).");
                 return false;
             }
+            if (blendSeams && Shader.Find(SeamBlendShaderName) == null)
+            {
+                Debug.LogError($"[Stereo360Capture] Shader '{SeamBlendShaderName}' not found; " +
+                               "turn off Blend Seams or include the shader.");
+                return false;
+            }
             return true;
         }
 
@@ -120,6 +156,7 @@ namespace GaussianSplatting.Runtime
             _frameConfig = GaussianSplatRenderSystem.instance.Config;
             _prevMode = _frameConfig != null ? _frameConfig.projectionMode : GaussianSplatProjectionMode.Perspective;
             _prevOffset = _frameConfig != null ? _frameConfig.odsEyeOffset : 0f;
+            _poleRendered = false;
             return projection != Stereo360Projection.OmniDirectionalStereo || CanRenderOds(_frameConfig);
         }
 
@@ -171,8 +208,57 @@ namespace GaussianSplatting.Runtime
         private void RenderEyeOds(GaussianSplatConfig config, float offset, RenderTexture target)
         {
             config.projectionMode = GaussianSplatProjectionMode.OmniDirectionalStereo;
+
+            if (_seamBlend != null && !_poleRendered)
+            {
+                RenderPoles(config);
+                _poleRendered = true;
+            }
             config.odsEyeOffset = offset;
 
+            if (_seamBlend == null)
+            {
+                RenderOds(target);
+                return;
+            }
+
+            // The rig follows the camera's rotation, so turning the camera
+            // half a turn about its own up axis moves the equirect's edges
+            // from behind the viewer to in front, poles unchanged
+            Transform camTransform = TargetCamera.transform;
+            Quaternion baseRot = camTransform.rotation;
+            RenderOds(_straight);
+            camTransform.rotation = baseRot * Quaternion.Euler(0f, 180f, 0f);
+            RenderOds(_turned);
+            camTransform.rotation = baseRot;
+
+            // The eyes are one from the pole merge's end on, so the shared
+            // pole render takes over from there, fully by halfway to the pole
+            float mergeEnd = Mathf.Clamp(config.odsPoleMergeEnd, 0.01f, 89f);
+            _seamBlend.SetTexture(TurnedTexId, _turned);
+            _seamBlend.SetVector(SeamFadeId, SeamFade);
+            _seamBlend.SetTexture(PoleTexId, _pole);
+            _seamBlend.SetVector(PoleFadeId, new Vector4(mergeEnd, (mergeEnd + 90f) * 0.5f, 0f, 0f) * Mathf.Deg2Rad);
+            Graphics.Blit(_straight, target, _seamBlend);
+        }
+
+        // An equirect cannot hold what is straight up or down: screen-space
+        // effects are squeezed with the rows there, and a splat on a pole
+        // would have to ring it. Rolling the rig a quarter turn about its
+        // forward axis puts both poles on the horizon, to its left and right,
+        // where one render from the rig centre draws them like anything else.
+        private void RenderPoles(GaussianSplatConfig config)
+        {
+            config.odsEyeOffset = 0f;
+            Transform camTransform = TargetCamera.transform;
+            Quaternion baseRot = camTransform.rotation;
+            camTransform.rotation = baseRot * Quaternion.Euler(0f, 0f, 90f);
+            RenderOds(_pole);
+            camTransform.rotation = baseRot;
+        }
+
+        private void RenderOds(RenderTexture target)
+        {
             // Camera.Render() is the legacy built-in entry point: under an SRP it
             // re-enters the pipeline while this frame's render graph is still
             // executing, which strands GPU work and eventually deadlocks the next
@@ -236,11 +322,42 @@ namespace GaussianSplatting.Runtime
                 };
                 _cube.Create();
             }
+            else if (blendSeams)
+            {
+                Vector2Int eye = PerEyeResolution;
+                _straight = CreateEyeTarget(eye);
+                _turned = CreateEyeTarget(eye);
+                _pole = CreateEyeTarget(eye);
+                _seamBlend = new Material(Shader.Find(SeamBlendShaderName)) { hideFlags = HideFlags.HideAndDontSave };
+            }
+        }
+
+        // Like the shared view target, so joining the two changes no values
+        private RenderTexture CreateEyeTarget(Vector2Int resolution)
+        {
+            RenderTextureFormat format = OutputFormat == CaptureOutputFormat.Exr
+                ? RenderTextureFormat.ARGBHalf
+                : RenderTextureFormat.ARGB32;
+            var target = new RenderTexture(resolution.x, resolution.y, 24, format)
+            {
+                // The turned render is read half the width along
+                wrapMode = TextureWrapMode.Repeat
+            };
+            target.Create();
+            return target;
         }
 
         protected override void ReleaseViewResources()
         {
             ReleaseRT(ref _cube);
+            ReleaseRT(ref _straight);
+            ReleaseRT(ref _turned);
+            ReleaseRT(ref _pole);
+            if (_seamBlend != null)
+            {
+                Destroy(_seamBlend);
+                _seamBlend = null;
+            }
         }
     }
 }

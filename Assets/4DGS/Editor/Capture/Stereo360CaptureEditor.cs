@@ -12,6 +12,7 @@ namespace GaussianSplatting.Editor
         private SerializedProperty m_PropEyeSeparation;
         private SerializedProperty m_PropCubemapFaceSize;
         private SerializedProperty m_PropOutputWidth;
+        private SerializedProperty m_PropBlendSeams;
 
         private static readonly int[] WidthPresets = { 2048, 4096, 5760, 8192 };
         private static readonly string[] WidthPresetLabels = { "2K (2048)", "4K (4096)", "6K (5760)", "8K (8192)", "Custom" };
@@ -24,6 +25,7 @@ namespace GaussianSplatting.Editor
             m_PropEyeSeparation = serializedObject.FindProperty("eyeSeparation");
             m_PropCubemapFaceSize = serializedObject.FindProperty("cubemapFaceSize");
             m_PropOutputWidth = serializedObject.FindProperty("outputWidth");
+            m_PropBlendSeams = serializedObject.FindProperty("blendSeams");
         }
 
         protected override void DrawViewSettings()
@@ -39,6 +41,10 @@ namespace GaussianSplatting.Editor
             if (m_PropProjection.intValue == (int)Stereo360Projection.Cubemap)
             {
                 EditorGUILayout.PropertyField(m_PropCubemapFaceSize);
+            }
+            else
+            {
+                EditorGUILayout.PropertyField(m_PropBlendSeams);
             }
         }
 

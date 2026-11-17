@@ -774,6 +774,22 @@ float3 OdsUnproject(float4 clip)
     return mul(_MatrixRigToWorld, float4(eye + v, 1)).xyz;
 }
 
+// An equirect spreads a parallel of latitude over the full width however
+// short it is on the sphere, so anything drawn near a pole has to be wider
+// by 1/cos(elevation) to keep its shape once the image is back on a sphere.
+// Stretches the quad's half-axes along x, whatever shape they carry. Bounded:
+// at the pole itself the factor is infinite.
+#define ODS_MAX_POLE_STRETCH 20.0
+void OdsStretchQuad(inout SplatViewData view)
+{
+    if (_OdsEnabled == 0 || view.pos.w <= 0)
+        return;
+    float elev = view.pos.y / view.pos.w * (0.5 * kOdsPi);
+    float stretch = min(1.0 / max(cos(elev), 1e-4), ODS_MAX_POLE_STRETCH);
+    view.axis1.x *= stretch;
+    view.axis2.x *= stretch;
+}
+
 // Bakes a splat's draw quad into its view data for the quad shader
 // (RenderGaussianStylized.shader): the axes become the quad's half-axes in
 // pixels, drawn as they are, and pos moves to the quad's centre. The base is
@@ -1278,7 +1294,10 @@ void CSCalcViewData (uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThread
         _MatrixVP, isDeleted, isCut, splatScale, opacityScale,
         animOpacityMul, animScaleMul, animColorBlend, animColorTint, style);
     if (_QuadBakeDeferred == 0)
+    {
         BakeQuad(view, idx, centerWorldPos, _MatrixVP, DofFocalPx(_MatrixP));
+        OdsStretchQuad(view);
+    }
 
     // Apply selection highlight (negate alpha to signal selected state)
     if (isSelected)
@@ -1651,6 +1670,7 @@ void CSBakeQuads (uint3 id : SV_DispatchThreadID)
             worldPos = world.xyz / world.w;
         }
         BakeQuad(view, idx, worldPos, vp, DofFocalPx(p));
+        OdsStretchQuad(view);
         _SplatViewData[viewIdx] = view;
     }
 }
