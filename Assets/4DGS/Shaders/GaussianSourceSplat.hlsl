@@ -2,7 +2,7 @@
 // derive splats of their own from another renderer: GaussianParticleEmitter
 // (particles born on the source) and GaussianGridLinks (lines to the
 // source). The source binds its data with
-// GaussianSplatRenderer.SetAssetDataOnCS, SetStyleColorOnCS and
+// GaussianSplatRenderer.SetAssetDataOnCS, SetStyleOnCS and
 // SetLightingOnCS; the includer sets _SourceObjectToWorld,
 // _MatrixWorldToObject (its inverse) and the camera.
 //
@@ -15,7 +15,7 @@
 float4x4 _MatrixWorldToObject;
 float4 _VecWorldSpaceCameraPos;
 // The source's style and scene lighting, bound by
-// GaussianSplatRenderer.SetStyleColorOnCS and SetLightingOnCS
+// GaussianSplatRenderer.SetStyleOnCS and SetLightingOnCS
 #include "GaussianStyle.hlsl"
 #include "GaussianLighting.hlsl"
 

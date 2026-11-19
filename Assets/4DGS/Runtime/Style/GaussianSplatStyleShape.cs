@@ -1,17 +1,15 @@
 namespace GaussianSplatting.Runtime
 {
-    // What a stylized splat is drawn as. The style weight morphs the render
-    // mode's own shape into this one.
+    // What a stylized splat is drawn as (GaussianStyleShapeBlock). The style
+    // weight morphs the render mode's own shape into this one; a style
+    // without the block keeps the render mode's shape, 0 to the shaders.
+    // Values match STYLE_SHAPE_* in GaussianStyleShape.hlsl.
     public enum GaussianSplatStyleShape
     {
-        // The render mode's own shape: the Gaussian ellipse in Splats mode,
-        // the point in PointCloud mode.
-        Base,
-
         // A round dot of fixed screen size.
-        Disc,
+        Disc = 1,
 
         // A thin line trailing from the splat, brightest at the splat.
-        Streak,
+        Streak = 2,
     }
 }

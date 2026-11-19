@@ -380,7 +380,7 @@ namespace GaussianSplatting.Editor
                     entry.SetSource(source);
                     EditorUtility.SetDirty(preset);
                 }
-                source.MarkRampDirty();
+                source.NotifyChanged();
                 EditorUtility.SetDirty(source);
                 styles[snapshot] = source;
             }

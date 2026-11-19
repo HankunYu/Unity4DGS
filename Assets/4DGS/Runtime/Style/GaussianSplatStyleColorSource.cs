@@ -4,9 +4,9 @@ namespace GaussianSplatting.Runtime
     public enum GaussianSplatStyleColorSource
     {
         // The splat's own shaded (SH) color.
-        Original,
+        Original = 0,
 
         // A color from the style's ramp, looked up by GaussianSplatStyleRampInput.
-        Ramp,
+        Ramp = 1,
     }
 }

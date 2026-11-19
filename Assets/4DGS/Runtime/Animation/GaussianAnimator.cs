@@ -129,7 +129,7 @@ namespace GaussianSplatting.Runtime
             for (int i = 0; i < _volumes.Count && volumeCount < MaxVolumes; i++)
             {
                 if (!_volumes[i].isActiveAndEnabled) continue;
-                if (_volumes[i].transform.lossyScale.sqrMagnitude < 1e-6f) continue;
+                if (_volumes[i].Collapsed) continue;
                 volumeCount++;
                 var mods = _volumes[i].GetModifiers();
                 for (int j = 0; j < mods.Length && modifierCount < MaxModifiers; j++)
@@ -264,7 +264,7 @@ namespace GaussianSplatting.Runtime
             for (int i = 0; i < _volumes.Count && vi < MaxVolumes; i++)
             {
                 if (!_volumes[i].isActiveAndEnabled) continue;
-                if (_volumes[i].transform.lossyScale.sqrMagnitude < 1e-6f) continue;
+                if (_volumes[i].Collapsed) continue;
                 volData[vi] = _volumes[i].GetShaderData();
 
                 var mods = _volumes[i].GetModifiers();

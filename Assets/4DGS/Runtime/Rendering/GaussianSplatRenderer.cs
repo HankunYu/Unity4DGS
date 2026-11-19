@@ -1181,7 +1181,7 @@ namespace GaussianSplatting.Runtime
             if (dof != null)
                 occludedBy = null;
             bool occlusion = ownOcclusion || occludedBy != null;
-            SetStyleOnCS(cmb, kernelIndex, projectionScale, occlusion);
+            SetViewStyleOnCS(cmb, kernelIndex, projectionScale, occlusion);
             SetLightingOnCS(cmb, csSplatUtilities, kernelIndex);
             RenderLightShadow(cmb);
 
@@ -1213,7 +1213,7 @@ namespace GaussianSplatting.Runtime
                         new[] { leftView * matO2W, rightView * matO2W });
 
                     SetAssetDataOnCS(cmb, stereoKernel);
-                    SetStyleOnCS(cmb, stereoKernel, projectionScale, occlusion);
+                    SetViewStyleOnCS(cmb, stereoKernel, projectionScale, occlusion);
                     SetLightingOnCS(cmb, csSplatUtilities, stereoKernel);
                     csSplatUtilities.GetKernelThreadGroupSizes(stereoKernel, out uint gsX2, out _, out _);
                     int stereoGroupCount = (dispatchCount + (int)gsX2 - 1) / (int)gsX2;
@@ -1386,13 +1386,12 @@ namespace GaussianSplatting.Runtime
 
         // Style color and baked quads are computed with the view data; the
         // draw-side parameters live in GaussianSplatRenderSystem
-        private void SetStyleOnCS(CommandBuffer cmb, int kernelIndex, float projectionScale, bool occlusion)
+        private void SetViewStyleOnCS(CommandBuffer cmb, int kernelIndex, float projectionScale, bool occlusion)
         {
             ComputeShader cs = csSplatUtilities;
-            SetStyleColorOnCS(cmb, cs, kernelIndex);
-            // Read whether or not a style is set: the culling margins, and the
-            // additivity occlusion culling discounts
-            _styleSet.SetShapeOnCS(cmb, cs, StyleActive, _velocity != null ? _velocityMaxSpeed : 0f,
+            SetStyleOnCS(cmb, cs, kernelIndex);
+            // Read whether or not a style is set
+            _styleSet.SetReachOnCS(cmb, cs, StyleActive, _velocity != null ? _velocityMaxSpeed : 0f,
                 _segments != null ? _segmentMaxLength : 0f, transform.lossyScale);
 
             bool baked = QuadsBaked;
@@ -1415,12 +1414,12 @@ namespace GaussianSplatting.Runtime
             }
         }
 
-        // The style color parameters (GaussianStyle.hlsl): for the view data,
+        // The styles and their volumes (GaussianStyle.hlsl): for the view data,
         // and for another compute shader that colors splats the way this
         // renderer draws them, e.g. GaussianParticleEmitter. Styles only apply
         // in the render modes that draw them (StyleActive).
-        internal void SetStyleColorOnCS(CommandBuffer cmb, ComputeShader cs, int kernelIndex) =>
-            _styleSet.SetColorOnCS(cmb, cs, kernelIndex, StyleActive);
+        internal void SetStyleOnCS(CommandBuffer cmb, ComputeShader cs, int kernelIndex) =>
+            _styleSet.SetOnCS(cmb, cs, kernelIndex, StyleActive);
 
         internal bool SupportsGlobalSortPath()
         {

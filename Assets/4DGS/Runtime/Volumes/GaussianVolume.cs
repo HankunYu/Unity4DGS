@@ -28,6 +28,10 @@ namespace GaussianSplatting.Runtime
         private Vector3 _originalScale;
         private Coroutine _scaleCoroutine;
 
+        // Scaled down to nothing, e.g. by Release: the region holds no
+        // point, and its matrix no longer tells where one lies
+        public bool Collapsed => transform.lossyScale.sqrMagnitude < 1e-6f;
+
         // Gizmo tint, so the kinds of volume tell apart in the scene view
         protected abstract Color GizmoColor { get; }
 

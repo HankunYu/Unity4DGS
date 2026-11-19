@@ -3,7 +3,6 @@
 using System;
 using UnityEngine;
 using UnityEngine.Rendering;
-using Object = UnityEngine.Object;
 using Tide;
 
 namespace GaussianSplatting.Runtime
@@ -12,10 +11,10 @@ namespace GaussianSplatting.Runtime
     // GaussianStyler set them up, packed for the shaders. Each distinct style
     // takes a slot; each volume names its style's slot. The view-data pass
     // finds a splat's strongest volume (StyleAt in GaussianStyle.hlsl) and
-    // reads that slot's parameters.
+    // reads that slot's blocks, one channel per kind of block.
     internal sealed class GaussianStyleSet
     {
-        // Must match MAX_STYLES and MAX_STYLE_VOLUMES in GaussianStyle.hlsl;
+        // Must match MAX_STYLES and MAX_STYLE_VOLUMES in GaussianStyleCore.hlsl;
         // MaxStyles also fits the two slot bits of the baked view color
         public const int MaxStyles = 4;
         public const int MaxVolumes = 8;
@@ -26,52 +25,19 @@ namespace GaussianSplatting.Runtime
             public static readonly int StyleTime = Shader.PropertyToID("_StyleTime");
             public static readonly int StyleVolumeCount = Shader.PropertyToID("_StyleVolumeCount");
             public static readonly int StyleVolumeWorldToLocal = Shader.PropertyToID("_StyleVolumeWorldToLocal");
-            public static readonly int StyleVolumeParams = Shader.PropertyToID("_StyleVolumeParams");
-            public static readonly int StyleVolumeEdge = Shader.PropertyToID("_StyleVolumeEdge");
-            public static readonly int StyleVolumeCenters = Shader.PropertyToID("_StyleVolumeCenters");
-            public static readonly int StyleRampTex = Shader.PropertyToID("_StyleRampTex");
-            public static readonly int StyleColorParams = Shader.PropertyToID("_StyleColorParams");
-            public static readonly int StyleRampAxes = Shader.PropertyToID("_StyleRampAxes");
-            public static readonly int StyleRampBlend = Shader.PropertyToID("_StyleRampBlend");
-            public static readonly int StyleLightParams = Shader.PropertyToID("_StyleLightParams");
-            public static readonly int StyleGlintParams = Shader.PropertyToID("_StyleGlintParams");
-            public static readonly int StyleRimColors = Shader.PropertyToID("_StyleRimColors");
-            public static readonly int StyleRimNoise = Shader.PropertyToID("_StyleRimNoise");
-            public static readonly int StyleOcclusionParams = Shader.PropertyToID("_StyleOcclusionParams");
-            public static readonly int StyleDepthParams = Shader.PropertyToID("_StyleDepthParams");
-            public static readonly int StyleFlowParams = Shader.PropertyToID("_StyleFlowParams");
-            public static readonly int StyleFlowAxes = Shader.PropertyToID("_StyleFlowAxes");
-            public static readonly int StyleFlowSteps = Shader.PropertyToID("_StyleFlowSteps");
-            public static readonly int StyleShapeParams = Shader.PropertyToID("_StyleShapeParams");
-            public static readonly int StyleStreakParams = Shader.PropertyToID("_StyleStreakParams");
-            public static readonly int StyleSizeParams = Shader.PropertyToID("_StyleSizeParams");
-            public static readonly int StyleQuantizeParams = Shader.PropertyToID("_StyleQuantizeParams");
-            public static readonly int StyleSliceNormals = Shader.PropertyToID("_StyleSliceNormals");
-            public static readonly int StyleRimShapeParams = Shader.PropertyToID("_StyleRimShapeParams");
-            public static readonly int StyleThinParams = Shader.PropertyToID("_StyleThinParams");
+            public static readonly int StyleVolume = Shader.PropertyToID("_StyleVolume");
             public static readonly int StyleReach = Shader.PropertyToID("_StyleReach");
             public static readonly int StyleChunkExpand = Shader.PropertyToID("_StyleChunkExpand");
         }
 
         private readonly GaussianSplatStyle[] _styles = new GaussianSplatStyle[MaxStyles];
+        // Each volume as LoadStyleVolume (GaussianStyleCore.hlsl) unpacks it
+        private const int VolumeRows = 2;
         private readonly Matrix4x4[] _volumeWorldToLocal = new Matrix4x4[MaxVolumes];
-        private readonly Vector4[] _volumeParams = new Vector4[MaxVolumes];
-        private readonly Vector4[] _volumeEdge = new Vector4[MaxVolumes];
-        private readonly Vector4[] _volumeCenters = new Vector4[MaxVolumes];
-        private readonly Vector4[] _slotParams0 = new Vector4[MaxStyles];
-        private readonly Vector4[] _slotParams1 = new Vector4[MaxStyles];
-        private readonly Vector4[] _slotParams2 = new Vector4[MaxStyles];
-        private readonly Vector4[] _slotParams3 = new Vector4[MaxStyles];
-        private readonly Vector4[] _slotParams4 = new Vector4[MaxStyles];
-        private readonly Vector4[] _slotParams5 = new Vector4[MaxStyles];
-        private readonly Vector4[] _slotParams6 = new Vector4[MaxStyles];
-        private readonly Vector4[] _slotParams7 = new Vector4[MaxStyles];
-        private readonly Vector4[] _slotParams8 = new Vector4[MaxStyles];
-        private readonly Vector4[] _slotParams9 = new Vector4[MaxStyles];
-        private readonly Vector4[] _slotParams10 = new Vector4[MaxStyles];
-        private readonly Vector4[] _slotParams11 = new Vector4[MaxStyles];
-        // One row per slot, copied from each style's own ramp
-        private Texture2D _ramps;
+        private readonly Vector4[] _volumeRows = new Vector4[MaxVolumes * VolumeRows];
+        private readonly GaussianStyleChannel[] _channels = GaussianStyleBlocks.CreateChannels();
+        // The channels hold the styles as they are now
+        private bool _packed;
         // Some volume styles every splat at full weight
         private bool _coversAll;
 
@@ -89,9 +55,10 @@ namespace GaussianSplatting.Runtime
             {
                 if (!Active || Weight < 1f || !_coversAll)
                     return false;
+                GaussianSplatStyleRange range = StyleRange(0, true);
                 for (int i = 0; i < StyleCount; i++)
                 {
-                    if (_styles[i].Additivity < 1f)
+                    if (range.additivity[i] < 1f)
                         return false;
                 }
                 return true;
@@ -104,6 +71,7 @@ namespace GaussianSplatting.Runtime
             StyleCount = 0;
             VolumeCount = 0;
             _coversAll = false;
+            _packed = false;
             Weight = Mathf.Clamp01(weight);
         }
 
@@ -111,6 +79,10 @@ namespace GaussianSplatting.Runtime
         public bool AddVolume(GaussianStyleVolume volume)
         {
             if (volume.style == null || volume.weight <= 0f || VolumeCount >= MaxVolumes)
+                return false;
+            // A region scaled down to nothing holds no splat; its matrix
+            // would put every splat at its centre, inside it
+            if (volume.shape != GaussianVolumeShape.Unbounded && volume.Collapsed)
                 return false;
             int slot = Array.IndexOf(_styles, volume.style, 0, StyleCount);
             if (slot < 0)
@@ -120,10 +92,10 @@ namespace GaussianSplatting.Runtime
                 slot = StyleCount++;
                 _styles[slot] = volume.style;
             }
+            Vector3 center = volume.transform.position;
             _volumeWorldToLocal[VolumeCount] = volume.transform.worldToLocalMatrix;
-            _volumeParams[VolumeCount] = new Vector4((float)volume.shape, volume.falloff, volume.weight, slot);
-            _volumeEdge[VolumeCount] = new Vector4(volume.scatter, 0f, 0f, 0f);
-            _volumeCenters[VolumeCount] = volume.transform.position;
+            _volumeRows[VolumeCount * VolumeRows] = new Vector4(center.x, center.y, center.z, slot);
+            _volumeRows[VolumeCount * VolumeRows + 1] = new Vector4((float)volume.shape, volume.falloff, volume.weight, volume.scatter);
             VolumeCount++;
             if (volume.shape == GaussianVolumeShape.Unbounded && volume.weight >= 1f)
                 _coversAll = true;
@@ -147,114 +119,47 @@ namespace GaussianSplatting.Runtime
             if (!Active)
                 return range;
             for (int i = 0; i < StyleCount; i++)
-            {
-                range.additivity[i] = _styles[i].Additivity;
-                range.shape[i] = (float)_styles[i].Shape;
-                range.streakTailPower[i] = _styles[i].StreakTailPower;
-            }
+                _styles[i].FillRange(ref range, i);
             return range;
         }
 
-        // The color side (GaussianStyle.hlsl): for the view data, and for any
-        // other compute shader that colors splats the way the renderer draws
-        // them, e.g. GaussianParticleEmitter. Disabled, it binds no style.
-        public void SetColorOnCS(CommandBuffer cmb, ComputeShader cs, int kernelIndex, bool enabled)
+        // The styles and their volumes (GaussianStyle.hlsl): for the view
+        // data, and for any other compute shader that colors splats the way
+        // the renderer draws them, e.g. GaussianParticleEmitter. Disabled,
+        // no style applies.
+        public void SetOnCS(CommandBuffer cmb, ComputeShader cs, int kernelIndex, bool enabled)
         {
             bool active = enabled && Active;
             cmb.SetComputeFloatParam(cs, Props.StyleWeight, active ? Weight : 0f);
             cmb.SetComputeIntParam(cs, Props.StyleVolumeCount, active ? VolumeCount : 0);
-            cmb.SetComputeMatrixArrayParam(cs, Props.StyleVolumeWorldToLocal, _volumeWorldToLocal);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleVolumeParams, _volumeParams);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleVolumeEdge, _volumeEdge);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleVolumeCenters, _volumeCenters);
             cmb.SetComputeFloatParam(cs, Props.StyleTime, StyleClock);
-            // The kernel samples the ramps whether or not a style is set
-            if (!active)
-            {
-                cmb.SetComputeTextureParam(cs, kernelIndex, Props.StyleRampTex, Texture2D.whiteTexture);
-                return;
-            }
 
-            EnsureRamps();
-            for (int i = 0; i < StyleCount; i++)
+            cmb.SetComputeMatrixArrayParam(cs, Props.StyleVolumeWorldToLocal, _volumeWorldToLocal);
+            cmb.SetComputeVectorArrayParam(cs, Props.StyleVolume, _volumeRows);
+
+            if (!_packed)
             {
-                GaussianSplatStyle style = _styles[i];
-                cmb.CopyTexture(style.RampTexture, 0, 0, 0, 0, GaussianSplatStyle.RampResolution, 1, _ramps, 0, 0, 0, i);
-                _slotParams0[i] = new Vector4((float)style.ColorSource, (float)style.RampInput, style.RampNear,
-                    1f / Mathf.Max(style.RampFar - style.RampNear, 1e-4f));
-                Vector3 axis = style.RampAxis;
-                _slotParams5[i] = new Vector4(axis.x, axis.y, axis.z, 0f);
-                _slotParams6[i] = new Vector4(style.RampBlend, style.RampKeepLuminance ? 1f : 0f, 0f, 0f);
-                _slotParams1[i] = new Vector4(style.Intensity, style.RimAmount, style.RimPower, style.RimGlow);
-                _slotParams2[i] = new Vector4(style.GlintDensity, style.GlintRate, style.GlintIntensity, 0f);
-                Color rim = style.RimColor;
-                _slotParams3[i] = new Vector4(rim.r, rim.g, rim.b, style.RimSourceTint);
-                _slotParams4[i] = new Vector4(style.RimNoise, 1f / style.RimNoiseSize, style.RimNoiseSpeed, style.RimNoiseGrain);
-                _slotParams7[i] = new Vector4(style.OcclusionAmount, style.OcclusionContrast, 0f, 0f);
-                _slotParams8[i] = new Vector4(style.DepthAmount, 1f / style.DepthRange, style.DepthOffset, (float)style.DepthReference);
-                Vector3 flow = style.FlowDirection;
-                _slotParams9[i] = new Vector4(style.FlowAmount, style.FlowSpeed, style.FlowSpacing, style.FlowLength);
-                _slotParams10[i] = new Vector4(flow.x, flow.y, flow.z, 1f / style.FlowColumnSize);
-                _slotParams11[i] = new Vector4(style.FlowStep, 0f, 0f, 0f);
+                foreach (GaussianStyleChannel channel in _channels)
+                {
+                    // Slots without a style read as absent: plain and
+                    // additive-free, for occlusion culling
+                    for (int i = 0; i < MaxStyles; i++)
+                        channel.Write(i, _styles[i]);
+                }
+                _packed = true;
             }
-            cmb.SetComputeTextureParam(cs, kernelIndex, Props.StyleRampTex, _ramps);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleColorParams, _slotParams0);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleLightParams, _slotParams1);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleGlintParams, _slotParams2);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleRimColors, _slotParams3);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleRimNoise, _slotParams4);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleRampAxes, _slotParams5);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleRampBlend, _slotParams6);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleOcclusionParams, _slotParams7);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleDepthParams, _slotParams8);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleFlowParams, _slotParams9);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleFlowAxes, _slotParams10);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleFlowSteps, _slotParams11);
+            foreach (GaussianStyleChannel channel in _channels)
+                channel.Bind(cmb, cs, kernelIndex, active);
         }
 
-        // The shape, snap and blend side (SplatUtilities.compute). The reach
-        // margins are read whether or not a style is set; maxSpeed and
-        // maxSegment bound the renderer's velocity and segment sources (0
-        // without one), objectScale is the renderer's, for the object-space
-        // chunk bounds. Disabled, it binds no style.
-        public void SetShapeOnCS(CommandBuffer cmb, ComputeShader cs, bool enabled, float maxSpeed, float maxSegment, Vector3 objectScale)
+        // The culling margins (SplatUtilities.compute), read whether or not
+        // a style is set; maxSpeed and maxSegment bound the renderer's
+        // velocity and segment sources (0 without one), objectScale is the
+        // renderer's, for the object-space chunk bounds
+        public void SetReachOnCS(CommandBuffer cmb, ComputeShader cs, bool enabled, float maxSpeed, float maxSegment, Vector3 objectScale)
         {
-            bool active = enabled && Active;
-            for (int i = 0; i < StyleCount; i++)
-            {
-                GaussianSplatStyle style = _styles[i];
-                bool quantized = style.Quantize != GaussianSplatStyleQuantize.None;
-                _slotParams0[i] = new Vector4((float)style.Shape, style.DotSize * 0.5f, (float)style.StreakAxis, style.StreakLength);
-                Vector3 dir = style.StreakDirection;
-                _slotParams1[i] = new Vector4(dir.x, dir.y, dir.z, style.StreakTime);
-                _slotParams2[i] = new Vector4(style.StreakWidth * 0.5f, style.MinWorldSize, style.Additivity, 0f);
-                _slotParams3[i] = new Vector4((float)style.Quantize, style.QuantizeSpacing,
-                    quantized ? style.QuantizeBand * style.QuantizeSpacing * 0.5f : float.MaxValue, style.SliceOffset);
-                Vector3 normal = style.SliceNormal;
-                _slotParams4[i] = new Vector4(normal.x, normal.y, normal.z, style.Occludes ? 1f : 0f);
-                _slotParams5[i] = new Vector4(style.RimFade, style.RimSpill, 0f, 0f);
-                _slotParams6[i] = new Vector4(style.KeepFraction, style.DensityDistance, 0f, 0f);
-            }
-            // Empty slots stay plain and additive-free, for occlusion culling
-            for (int i = StyleCount; i < MaxStyles; i++)
-            {
-                _slotParams0[i] = Vector4.zero;
-                _slotParams2[i] = Vector4.zero;
-                _slotParams3[i] = new Vector4(0f, 1f, float.MaxValue, 0f);
-                _slotParams4[i] = Vector4.zero;
-                _slotParams5[i] = Vector4.zero;
-                _slotParams6[i] = new Vector4(1f, 0f, 0f, 0f);
-            }
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleShapeParams, _slotParams0);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleStreakParams, _slotParams1);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleSizeParams, _slotParams2);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleQuantizeParams, _slotParams3);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleSliceNormals, _slotParams4);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleRimShapeParams, _slotParams5);
-            cmb.SetComputeVectorArrayParam(cs, Props.StyleThinParams, _slotParams6);
-
             // The reach shrinks with the weight, like the snap and shape it bounds
-            float reach = active ? Reach(maxSpeed, maxSegment) : 0f;
+            float reach = enabled && Active ? Reach(maxSpeed, maxSegment) : 0f;
             cmb.SetComputeFloatParam(cs, Props.StyleReach, reach);
             // Object-space reach for the chunk bounds; the smallest axis scale
             // stretches a world distance the most
@@ -264,26 +169,8 @@ namespace GaussianSplatting.Runtime
 
         public void Dispose()
         {
-            if (_ramps != null)
-                Object.DestroyImmediate(_ramps);
-            _ramps = null;
-        }
-
-        private void EnsureRamps()
-        {
-            if (_ramps != null)
-                return;
-            // Linear, like each style's own ramp: splat colors are gamma space
-            // at this stage and the values go in unconverted
-            _ramps = new Texture2D(GaussianSplatStyle.RampResolution, MaxStyles, TextureFormat.RGBAHalf, false, true)
-            {
-                name = "GaussianStyleRamps",
-                wrapMode = TextureWrapMode.Clamp,
-                filterMode = FilterMode.Bilinear,
-                hideFlags = HideFlags.HideAndDontSave,
-            };
-            // Upload once without a CPU copy; the rows arrive by CopyTexture
-            _ramps.Apply(false, true);
+            foreach (GaussianStyleChannel channel in _channels)
+                channel.Dispose();
         }
 
         // Same clock as GaussianAnimator: the timeline's time while one

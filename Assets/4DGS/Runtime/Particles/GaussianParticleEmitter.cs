@@ -417,7 +417,7 @@ namespace GaussianSplatting.Runtime
             _source.RefreshStyle();
             _source.RefreshLighting();
             _source.SetAssetDataOnCS(_cmd, _shader, _kernel);
-            _source.SetStyleColorOnCS(_cmd, _shader, _kernel);
+            _source.SetStyleOnCS(_cmd, _shader, _kernel);
             _source.SetLightingOnCS(_cmd, _shader, _kernel);
             _cmd.SetComputeMatrixParam(_shader, PropSourceObjectToWorld, _source.transform.localToWorldMatrix);
             _cmd.SetComputeMatrixParam(_shader, PropMatrixWorldToObject, _source.transform.worldToLocalMatrix);

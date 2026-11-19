@@ -1,7 +1,8 @@
 namespace GaussianSplatting.Runtime
 {
     // What a style's depth mask measures a splat's depth against
-    // (GaussianSplatStyle.depthReference).
+    // (GaussianStyleDepthBlock).
+    // Values match STYLE_DEPTH_* in GaussianStyleDepth.hlsl.
     public enum GaussianSplatStyleDepthReference
     {
         // The centre of the style volume the splat is in: one near and far

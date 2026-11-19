@@ -12,7 +12,7 @@ namespace GaussianSplatting.Editor.MeshSplat
     // each one's normal the model itself closes off, so folds, armpits and
     // the hollows under a chin or a collar come out dark and exposed surfaces
     // light. Stored per splat next to the binding, for styles to use as a
-    // mask (GaussianSplatStyle's occlusion). It is judged in the sampled pose
+    // mask (a style's Occlusion block). It is judged in the sampled pose
     // (the bind pose for skinned meshes) and does not follow the animation: a
     // hand closing in on the body later darkens nothing.
     [Serializable]
