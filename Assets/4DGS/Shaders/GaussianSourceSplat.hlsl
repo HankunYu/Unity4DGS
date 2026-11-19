@@ -31,8 +31,9 @@ uint _MorphDataValid;
 float4x4 _SourceObjectToWorld;
 
 // The source splat as the view data pass sees it, in world space, its color
-// (gamma) lit and styled as drawn but without view-dependent SH
-void LoadSourceSplat(uint idx, out float3 worldPos, out float3 color, out float opacity)
+// (gamma) lit and styled as drawn but without view-dependent SH, and with
+// the style's masks apart: mask is how much of that color they leave
+void LoadSourceSplat(uint idx, out float3 worldPos, out float3 color, out float opacity, out float mask)
 {
     SplatData splat = LoadSplatData(idx, 0);
     color = splat.sh.col;
@@ -62,7 +63,17 @@ void LoadSourceSplat(uint idx, out float3 worldPos, out float3 color, out float 
     }
     worldPos = mul(_SourceObjectToWorld, float4(splat.pos, 1)).xyz;
     color = LightSplat((half3)color, splat.rot, splat.scale, worldPos);
-    color = ApplyStyle((half3)color, StyleAt(worldPos, idx), splat, worldPos, idx);
+    StyleSample style = StyleAt(worldPos, idx);
+    color = ApplyStyleUnmasked((half3)color, style, splat, worldPos, idx);
+    mask = StyleMask(style, worldPos, idx);
+}
+
+// The same with the masks in the color, as the splat is drawn
+void LoadSourceSplat(uint idx, out float3 worldPos, out float3 color, out float opacity)
+{
+    float mask;
+    LoadSourceSplat(idx, worldPos, color, opacity, mask);
+    color *= mask;
 }
 
 // Just the world position of LoadSourceSplat

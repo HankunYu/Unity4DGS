@@ -142,6 +142,22 @@ SplatData LoadBaseSplat(uint idx, uint shOrder)
     return splat;
 }
 
+// World normal of the surface a splat lies on, as it is posed now: mesh
+// splats carry it as their local +Z. Inverse transpose, as for the backface
+// normal.
+float3 LoadSurfaceNormal(uint idx)
+{
+    float4 rot;
+    if (_MorphDataValid != 0)
+        rot = _MorphedData[idx * 4 + 1];
+    else if (_DeformedBaseValid != 0)
+        rot = _DeformedBase[idx * 2 + 1];
+    else
+        rot = LoadSplatData(idx, 0).rot;
+    float3 normal = mul(QuatRotateVector(float3(0, 0, 1), rot), (float3x3)_MatrixWorldToObject);
+    return dot(normal, normal) > 1e-12 ? normalize(normal) : float3(0, 1, 0);
+}
+
 // Sort metric: 0 = view-space depth, 1 = radial distance from the camera.
 // Radial order does not change when the camera only rotates, so a throttled
 // or stale sort stays valid under head rotation (and ODS needs it anyway:
@@ -878,7 +894,19 @@ void BakeQuad(inout SplatViewData view, uint idx, float3 worldPos, float4x4 vpMa
     {
         float4 streak = _StyleStreakParams[slot];
         float3 tailWorld;
-        if (shape.z > 2.5)
+        if (shape.z > 3.5)
+        {
+            // Along the surface, across the streak direction: lines that
+            // wrap the form like the hatching of an engraving. Half of them
+            // run the other way, so the strokes centre on the surface points
+            // instead of all leaning one way.
+            float3 normal = idx < _SrcSplatCount ? LoadSurfaceNormal(idx) : float3(0, 1, 0);
+            float3 along = cross(normal, streak.xyz);
+            float len = length(along);
+            along = len > 1e-4 ? along / len : 0;
+            tailWorld = worldPos + along * (shape.w * ((idx & 1) != 0 ? 1.0 : -1.0));
+        }
+        else if (shape.z > 2.5)
         {
             // The splat's own segment
             float3 segment = _SplatSegmentValid != 0 && idx < _SrcSplatCount ? _SplatSegment[idx].xyz : 0;

@@ -27,6 +27,9 @@ namespace GaussianSplatting.Editor.MeshSplat
         public GridSampler grid = new();
         // Applied to whichever sampler is chosen
         public HiddenSurfaceFilter hiddenSurfaces = new();
+        // Baked for the splats that are kept; an asset output only, since it
+        // is stored with the binding
+        public SurfaceOcclusion occlusion = new();
 
         // Source for every surface whose material has no override
         public SplatColorKind color = SplatColorKind.Uniform;

@@ -32,6 +32,9 @@ namespace GaussianSplatting.Editor.MeshSplat
         private static readonly GUIContent s_HiddenLabel = new("Remove Hidden",
             "Drop samples the model covers itself, e.g. clothing under other clothing, judged in the sampled " +
             "pose (the bind pose for skinned meshes).");
+        private static readonly GUIContent s_OcclusionLabel = new("Bake Occlusion",
+            "Store how much the model closes off each splat's surroundings, for a style's occlusion mask to " +
+            "darken creases and hollows by. Judged in the sampled pose; an Asset output only.");
         private static readonly GUIContent s_LightLabel = new("Bake Lighting",
             "Multiply the color by a fixed directional light. An asset bakes it in the rest pose, so it turns " +
             "with the model as it animates; a sequence bakes it for every frame's pose.");
@@ -57,6 +60,8 @@ namespace GaussianSplatting.Editor.MeshSplat
         private SerializedProperty _opacity;
         private SerializedProperty _hiddenSurfaces;
         private SerializedProperty _hiddenEnabled;
+        private SerializedProperty _occlusion;
+        private SerializedProperty _occlusionEnabled;
         private SerializedProperty _quality;
         private SerializedProperty _customFormats;
 
@@ -79,6 +84,8 @@ namespace GaussianSplatting.Editor.MeshSplat
             _opacity = settings.FindPropertyRelative(nameof(MeshSplatSettings.opacity));
             _hiddenSurfaces = settings.FindPropertyRelative(nameof(MeshSplatSettings.hiddenSurfaces));
             _hiddenEnabled = _hiddenSurfaces.FindPropertyRelative(nameof(HiddenSurfaceFilter.enabled));
+            _occlusion = settings.FindPropertyRelative(nameof(MeshSplatSettings.occlusion));
+            _occlusionEnabled = _occlusion.FindPropertyRelative(nameof(SurfaceOcclusion.enabled));
             _quality = settings.FindPropertyRelative(nameof(MeshSplatSettings.quality));
             _customFormats = settings.FindPropertyRelative(nameof(MeshSplatSettings.customFormats));
         }
@@ -113,6 +120,9 @@ namespace GaussianSplatting.Editor.MeshSplat
             EditorGUILayout.PropertyField(_hiddenEnabled, s_HiddenLabel);
             if (_hiddenEnabled.boolValue || _hiddenEnabled.hasMultipleDifferentValues)
                 DrawFields(_hiddenSurfaces, _hiddenEnabled);
+            EditorGUILayout.PropertyField(_occlusionEnabled, s_OcclusionLabel);
+            if (_occlusionEnabled.boolValue || _occlusionEnabled.hasMultipleDifferentValues)
+                DrawFields(_occlusion, _occlusionEnabled);
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Color", EditorStyles.boldLabel);

@@ -23,8 +23,13 @@
 float _StyleWeight;         // GaussianStyler.weight; 0 = no style
 float _StyleTime;
 // Per slot: x GaussianSplatStyleColorSource, y GaussianSplatStyleRampInput,
-// z depth ramp near, w its reciprocal range
+// z ramp range start, w its reciprocal length
 float4 _StyleColorParams[MAX_STYLES];
+// Per slot: xyz the world direction of the World Axis ramp input
+float4 _StyleRampAxes[MAX_STYLES];
+// Per slot: x how far the ramp color replaces the splat's own, y 1 when the
+// ramp color takes the splat's brightness
+float4 _StyleRampBlend[MAX_STYLES];
 // Per slot: x intensity, y rim amount, z rim power, w rim glow
 float4 _StyleLightParams[MAX_STYLES];
 // Per slot: rgb rim glow color, w how far the glow takes the splat's own
@@ -35,6 +40,29 @@ float4 _StyleRimColors[MAX_STYLES];
 float4 _StyleRimNoise[MAX_STYLES];
 // Per slot: x glint density, y rate, z intensity
 float4 _StyleGlintParams[MAX_STYLES];
+// Per slot: x how far brightness follows the flow waves, y their speed (world
+// units per second), z distance between waves, w tail length (world units)
+float4 _StyleFlowParams[MAX_STYLES];
+// Per slot: xyz flow direction (world, normalized), w columns per world unit
+float4 _StyleFlowAxes[MAX_STYLES];
+// Per slot: x step the waves advance in (world units, 0 = smooth)
+float4 _StyleFlowSteps[MAX_STYLES];
+// Per slot: x how far the baked occlusion darkens, y its contrast
+float4 _StyleOcclusionParams[MAX_STYLES];
+// Per slot: x how far the depth mask darkens, y the reciprocal of its range,
+// z its offset away from the camera, w GaussianSplatStyleDepthReference
+float4 _StyleDepthParams[MAX_STYLES];
+// Baked occlusion of the splats (GaussianMeshBinding): a byte per splat, 0
+// covered to 255 open, four to a uint. The splats' renderer binds it.
+StructuredBuffer<uint> _SplatOcclusion;
+uint _SplatOcclusionValid;
+// The mesh each splat sits on (GaussianMeshDriver): its index, 16 bits per
+// splat, two to a uint with the first in the low half; and each mesh's
+// centre as posed, in the splats' object space
+StructuredBuffer<uint> _SplatMesh;
+StructuredBuffer<float4> _SplatMeshCenters;
+uint _SplatMeshValid;
+float4x4 _SplatMeshObjectToWorld;
 // One ramp per row, a row per slot
 Texture2D _StyleRampTex;
 SamplerState sampler_StyleRampTex;
@@ -43,17 +71,20 @@ SamplerState sampler_StyleRampTex;
 
 // Volume regions, each naming its style's slot. Params: x shape, y falloff,
 // z weight, w slot. Edge: x scatter (the falloff as a per-splat scatter
-// instead of a fade).
+// instead of a fade). Centers: xyz the volume's world position.
 uint _StyleVolumeCount;
 float4x4 _StyleVolumeWorldToLocal[MAX_STYLE_VOLUMES];
 float4 _StyleVolumeParams[MAX_STYLE_VOLUMES];
 float4 _StyleVolumeEdge[MAX_STYLE_VOLUMES];
+float4 _StyleVolumeCenters[MAX_STYLE_VOLUMES];
 
-// The style a splat wears: its slot, and how far it replaces the plain look
+// The style a splat wears: its slot, how far it replaces the plain look, and
+// the volume that gave it
 struct StyleSample
 {
     float weight;
     uint slot;
+    uint volume;
 };
 
 StyleSample NoStyle()
@@ -61,6 +92,7 @@ StyleSample NoStyle()
     StyleSample s;
     s.weight = 0;
     s.slot = 0;
+    s.volume = 0;
     return s;
 }
 
@@ -89,6 +121,70 @@ float StyleGlint(uint slot, uint idx)
     // A peak a sixth of the period wide, centred on half phase
     float flash = saturate(1.0 - abs(phase * 2.0 - 1.0) * 6.0);
     return flash * flash * g.z;
+}
+
+// Brightness of a splat under the flow: waves run along the flow direction,
+// each lit at its front and fading over its tail. Space is cut into columns
+// across the direction, each with its own offset and speed, so neighbouring
+// columns never run in step. Rounded, so points snapped to a grid of the
+// column size sit at column centres.
+float StyleFlow(uint slot, float3 worldPos)
+{
+    float4 f = _StyleFlowParams[slot];
+    if (f.x <= 0)
+        return 1.0;
+    float4 axis = _StyleFlowAxes[slot];
+    float3 side = normalize(cross(axis.xyz, abs(axis.y) < 0.9 ? float3(0, 1, 0) : float3(1, 0, 0)));
+    float3 up = cross(axis.xyz, side);
+    int2 column = (int2)round(float2(dot(worldPos, side), dot(worldPos, up)) * axis.w);
+    uint seed = (uint)column.x * 0x9e3779b1u ^ (uint)column.y * 0x85ebca6bu ^ slot;
+    float h = StyleHash01(seed);
+    float travelled = _StyleTime * f.y * (0.6 + 0.8 * StyleHash01(seed ^ 0x2c1b3c6du)) + h * f.z;
+    float along = dot(worldPos, axis.xyz);
+    float stride = _StyleFlowSteps[slot].x;
+    if (stride > 0)
+    {
+        travelled = floor(travelled / stride) * stride;
+        along = round(along / stride) * stride;
+    }
+    // Distance the nearest wave front has run past this point
+    float behind = frac((travelled - along) / f.z) * f.z;
+    float wave = saturate(1.0 - behind / f.w);
+    return lerp(1.0, wave * wave, f.x);
+}
+
+// How open a splat's surroundings are, from its baked occlusion: 0 covered,
+// 1 open, and 1 for splats without one
+float StyleOcclusion(uint idx)
+{
+    if (_SplatOcclusionValid == 0)
+        return 1.0;
+    uint word = _SplatOcclusion[idx >> 2];
+    return ((word >> ((idx & 3) * 8)) & 255) * (1.0 / 255.0);
+}
+
+// World position a splat's depth is measured against
+// (GaussianSplatStyleDepthReference): its style volume's centre, or the
+// centre of its own mesh where a mesh driver gives one
+float3 StyleDepthReference(StyleSample style, uint idx)
+{
+    if (_StyleDepthParams[style.slot].w > 0.5 && _SplatMeshValid != 0)
+    {
+        uint mesh = (_SplatMesh[idx >> 1] >> ((idx & 1) * 16)) & 0xFFFFu;
+        return mul(_SplatMeshObjectToWorld, float4(_SplatMeshCenters[mesh].xyz, 1)).xyz;
+    }
+    return _StyleVolumeCenters[style.volume].xyz;
+}
+
+// The style's depth mask: 1 nearer the camera than its depth reference by
+// half the range or more, 0 that far behind it. Distances from the camera
+// centre, so it does not change as the view turns.
+float StyleDepth(StyleSample style, float3 centerWorldPos, uint idx)
+{
+    float4 p = _StyleDepthParams[style.slot];
+    float3 cam = _VecWorldSpaceCameraPos.xyz;
+    float behind = distance(centerWorldPos, cam) - distance(StyleDepthReference(style, idx), cam) - p.z;
+    return saturate(0.5 - behind * p.y);
 }
 
 // Raises a color's brightest channel towards 1 by the lift, scaling all
@@ -169,15 +265,31 @@ StyleSample StyleAt(float3 worldPos, uint idx)
         {
             style.weight = w;
             style.slot = (uint)p.w;
+            style.volume = i;
         }
     }
     style.weight *= _StyleWeight;
     return style;
 }
 
+// How much of its light the style's masks leave a splat: covered creases
+// (occlusion) and the side facing away from the camera (depth) go dark. 1
+// without a style or with both masks off.
+float StyleMask(StyleSample style, float3 centerWorldPos, uint idx)
+{
+    if (style.weight <= 0)
+        return 1.0;
+    float2 occlusion = _StyleOcclusionParams[style.slot].xy;
+    float mask = lerp(1.0, pow(StyleOcclusion(idx), occlusion.y), occlusion.x)
+               * lerp(1.0, StyleDepth(style, centerWorldPos, idx), _StyleDepthParams[style.slot].x);
+    return lerp(1.0, mask, style.weight);
+}
+
 // The color the style gives a splat of this color (gamma space, after SH
-// and animation tint), blended in by the splat's style weight
-half3 ApplyStyle(half3 color, StyleSample style, SplatData splat, float3 centerWorldPos, uint idx)
+// and animation tint), blended in by the splat's style weight, before its
+// masks: for what takes the masks its own way (GaussianParticleEmitter fades
+// its particles by them); everything else uses ApplyStyle
+half3 ApplyStyleUnmasked(half3 color, StyleSample style, SplatData splat, float3 centerWorldPos, uint idx)
 {
     if (style.weight <= 0)
         return color;
@@ -187,19 +299,36 @@ half3 ApplyStyle(half3 color, StyleSample style, SplatData splat, float3 centerW
     half3 styled = color;
     if (colorParams.x > 0.5)
     {
-        float t = colorParams.y < 0.5
-            ? dot(color, half3(0.2126, 0.7152, 0.0722))
-            : (distance(centerWorldPos, _VecWorldSpaceCameraPos.xyz) - colorParams.z) * colorParams.w;
+        float luminance = dot(color, half3(0.2126, 0.7152, 0.0722));
+        // GaussianSplatStyleRampInput: luminance, a mask, or a world-space
+        // measure across the ramp range
+        float t = luminance;
+        if (colorParams.y > 3.5)
+        {
+            t = colorParams.y < 4.5 ? StyleOcclusion(idx) : StyleDepth(style, centerWorldPos, idx);
+        }
+        else if (colorParams.y > 0.5)
+        {
+            float measure = colorParams.y < 1.5 ? distance(centerWorldPos, _VecWorldSpaceCameraPos.xyz)
+                          : colorParams.y < 2.5 ? dot(centerWorldPos, _StyleRampAxes[style.slot].xyz)
+                          : distance(centerWorldPos, _StyleVolumeCenters[style.volume].xyz);
+            t = (measure - colorParams.z) * colorParams.w;
+        }
         // Texel centres, so both ends of the ramp are reached exactly, and
         // the slot's own row
         float u = (saturate(t) * (STYLE_RAMP_RESOLUTION - 1.0) + 0.5) / STYLE_RAMP_RESOLUTION;
         float v = (style.slot + 0.5) / MAX_STYLES;
-        styled = (half3)_StyleRampTex.SampleLevel(sampler_StyleRampTex, float2(u, v), 0).rgb;
+        half3 ramp = (half3)_StyleRampTex.SampleLevel(sampler_StyleRampTex, float2(u, v), 0).rgb;
+        float2 blend = _StyleRampBlend[style.slot].xy;
+        if (blend.y > 0.5)
+            ramp *= (half)luminance;
+        styled = lerp(color, ramp, (half)blend.x);
     }
     float rim = light.y > 0 || light.w > 0
         ? StyleRim(light.z, splat.rot, splat.scale, centerWorldPos) * StyleRimNoise(style.slot, idx)
         : 1.0;
-    styled *= (half)(light.x * lerp(1.0, rim, light.y) * (1.0 + StyleGlint(style.slot, idx)));
+    styled *= (half)(light.x * lerp(1.0, rim, light.y) * (1.0 + StyleGlint(style.slot, idx))
+                    * StyleFlow(style.slot, centerWorldPos));
     // The Fresnel glow adds light at the edges on top of the dimmed base, in
     // the rim color tinted by the splat's own color, lifted to full
     // brightness so dark colors glow as strongly as light ones
@@ -207,6 +336,13 @@ half3 ApplyStyle(half3 color, StyleSample style, SplatData splat, float3 centerW
     float3 glow = rimColor.rgb * lerp(1.0, LiftColor(color, 1.0), rimColor.w);
     styled += (half3)(glow * (light.w * rim));
     return lerp(color, styled, (half)style.weight);
+}
+
+// The styled color as drawn: the masks darken all the light the splat
+// gives, base and glow alike
+half3 ApplyStyle(half3 color, StyleSample style, SplatData splat, float3 centerWorldPos, uint idx)
+{
+    return ApplyStyleUnmasked(color, style, splat, centerWorldPos, idx) * (half)StyleMask(style, centerWorldPos, idx);
 }
 
 #endif // GAUSSIAN_STYLE_HLSL

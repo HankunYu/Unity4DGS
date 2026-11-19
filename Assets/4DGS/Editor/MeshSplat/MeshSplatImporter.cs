@@ -64,9 +64,10 @@ namespace GaussianSplatting.Editor.MeshSplat
         private void ImportAsset(AssetImportContext ctx, string name, List<SurfaceMesh> meshes)
         {
             var samples = settings.SampleSurface(meshes);
+            float[] openness = settings.occlusion.Bake(meshes, samples);
             GaussianSplatAsset asset = BuildAsset(ctx, name, meshes, samples, "", out NativeArray<int> sourceIndices);
             using (sourceIndices)
-                AddBinding(ctx, name, meshes, samples, sourceIndices, asset);
+                AddBinding(ctx, name, meshes, samples, sourceIndices, asset, openness);
             ctx.SetMainObject(asset);
         }
 
@@ -181,8 +182,9 @@ namespace GaussianSplatting.Editor.MeshSplat
                 ctx.DependsOnArtifact(path);
         }
 
+        // openness is the samples' baked occlusion, null without one
         private void AddBinding(AssetImportContext ctx, string name, List<SurfaceMesh> meshes,
-            List<SurfaceSample> samples, NativeArray<int> sourceIndices, GaussianSplatAsset asset)
+            List<SurfaceSample> samples, NativeArray<int> sourceIndices, GaussianSplatAsset asset, float[] openness)
         {
             MeshSplatBaker.BuildBinding(meshes, samples, sourceIndices, out var meshInfos,
                 out var entries, out var vertices, out var bindposes);
@@ -198,6 +200,11 @@ namespace GaussianSplatting.Editor.MeshSplat
                 binding.vertexData = AddBlock(ctx, $"{name}_vtx", vertices.Reinterpret<byte>(GaussianMeshBinding.VertexSize));
                 binding.assetDataHash = asset.dataHash;
                 binding.splatCount = asset.splatCount;
+                if (openness != null)
+                {
+                    using NativeArray<byte> occlusion = MeshSplatBaker.PackOcclusion(openness, sourceIndices);
+                    binding.occlusionData = AddBlock(ctx, $"{name}_occ", occlusion);
+                }
                 ctx.AddObjectToAsset("binding", binding);
             }
         }

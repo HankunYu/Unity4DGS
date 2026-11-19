@@ -10,6 +10,7 @@
 #pragma kernel CSDriveSplats
 #pragma kernel CSDriveSplatsFromMesh
 #pragma kernel CSDriveChunkBounds
+#pragma kernel CSDriveMeshCenters
 
 #define GROUP_SIZE 256
 static const uint kChunkSize = 256;
@@ -206,4 +207,31 @@ void CSDriveChunkBounds(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThr
         _DeformedChunkBounds[gid.x * 2 + 1] = float4(OrderedUintToFloat(gs_boundsMax[0]),
             OrderedUintToFloat(gs_boundsMax[1]), OrderedUintToFloat(gs_boundsMax[2]), 0);
     }
+}
+
+// Per mesh: its first entry and entry count
+StructuredBuffer<uint2> _DriveMeshRanges;
+// Per mesh: the centre of its driven splats (object space), 1
+RWStructuredBuffer<float4> _DriveMeshCenters;
+uint _DriveMeshCount;
+static const uint kCenterSamples = 256;
+
+// One thread per mesh: the mean of a spread of its splats' driven centers.
+// The entries follow the importer's sampling, even over the surface, so the
+// mean sits in the bulk of the mesh (a figure's torso) and a raised arm
+// barely moves it, which the middle of its bounds would follow.
+[numthreads(64,1,1)]
+void CSDriveMeshCenters(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _DriveMeshCount)
+        return;
+    uint2 range = _DriveMeshRanges[id.x];
+    uint samples = min(range.y, kCenterSamples);
+    uint stride = samples > 0 ? range.y / samples : 0;
+    float3 sum = 0;
+    for (uint i = 0; i < samples; i++)
+    {
+        sum += _DeformedBase[_DriveEntries[range.x + i * stride].splat * 2].xyz;
+    }
+    _DriveMeshCenters[id.x] = float4(samples > 0 ? sum / samples : 0, 1);
 }

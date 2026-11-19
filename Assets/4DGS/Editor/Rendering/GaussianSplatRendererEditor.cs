@@ -140,6 +140,9 @@ namespace GaussianSplatting.Editor
                 }
             }
 
+            if (targets.Length == 1 && GaussianLookPresetGUI.HasLook(gs))
+                GaussianLookPresetGUI.Draw(gs);
+
             if (validAndEnabled && targets.Length == 1)
             {
                 EditCameras(gs);

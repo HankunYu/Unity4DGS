@@ -161,6 +161,17 @@ namespace GaussianSplatting.Editor.MeshSplat
                 vertices.GetSubArray(meshInfos[m].firstVertex, meshInfos[m].vertexCount).CopyFrom(SkinVertices(meshes[m]));
         }
 
+        // The samples' openness as GaussianMeshBinding.occlusionData holds
+        // it: a byte per asset splat, padded with zeros to whole uints.
+        // sourceIndices maps each asset splat back to its sample.
+        public static NativeArray<byte> PackOcclusion(float[] openness, NativeArray<int> sourceIndices)
+        {
+            var packed = new NativeArray<byte>((sourceIndices.Length + 3) & ~3, Allocator.Persistent);
+            for (int splat = 0; splat < sourceIndices.Length; splat++)
+                packed[splat] = (byte)math.round(math.saturate(openness[sourceIndices[splat]]) * 255f);
+            return packed;
+        }
+
         // The mesh's vertices for skinning: unlike SurfaceMesh, in the mesh's
         // own space, with its four strongest bones
         public static GaussianMeshBinding.Vertex[] SkinVertices(SurfaceMesh mesh)

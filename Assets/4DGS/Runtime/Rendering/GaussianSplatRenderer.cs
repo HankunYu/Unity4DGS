@@ -197,6 +197,13 @@ namespace GaussianSplatting.Runtime
         // position and rotation (2 float4s per splat), and its chunk bounds
         private GraphicsBuffer _deformedBase;
         private GraphicsBuffer _deformedChunkBounds;
+        // Baked occlusion of the splats (GaussianMeshBinding.occlusionData),
+        // set by what holds it; null without one
+        private GraphicsBuffer _occlusion;
+        // The mesh each splat sits on and the meshes' posed centres
+        // (GaussianMeshDriver), not owned; null without them
+        private GraphicsBuffer _splatMeshes;
+        private GraphicsBuffer _splatMeshCenters;
         private GraphicsBuffer _velocity;
         private float _velocityMaxSpeed;
         // Set by GaussianParticleLinks: per-splat segments for Segment streaks
@@ -330,6 +337,12 @@ namespace GaussianSplatting.Runtime
             public static readonly int DynamicChunkBoundsValid = Shader.PropertyToID("_DynamicChunkBoundsValid");
             public static readonly int DeformedBase = Shader.PropertyToID("_DeformedBase");
             public static readonly int DeformedBaseValid = Shader.PropertyToID("_DeformedBaseValid");
+            public static readonly int SplatOcclusion = Shader.PropertyToID("_SplatOcclusion");
+            public static readonly int SplatOcclusionValid = Shader.PropertyToID("_SplatOcclusionValid");
+            public static readonly int SplatMesh = Shader.PropertyToID("_SplatMesh");
+            public static readonly int SplatMeshCenters = Shader.PropertyToID("_SplatMeshCenters");
+            public static readonly int SplatMeshValid = Shader.PropertyToID("_SplatMeshValid");
+            public static readonly int SplatMeshObjectToWorld = Shader.PropertyToID("_SplatMeshObjectToWorld");
             public static readonly int SplatVelocity = Shader.PropertyToID("_SplatVelocity");
             public static readonly int SplatVelocityValid = Shader.PropertyToID("_SplatVelocityValid");
             public static readonly int SplatSegment = Shader.PropertyToID("_SplatSegment");
@@ -442,6 +455,22 @@ namespace GaussianSplatting.Runtime
         {
             _deformedBase = null;
             _deformedChunkBounds = null;
+        }
+
+        // Per-splat baked occlusion for the styles' occlusion mask (a byte per
+        // splat, four to a uint), or null for none
+        internal void SetOcclusion(GraphicsBuffer occlusion)
+        {
+            _occlusion = occlusion;
+        }
+
+        // Which mesh each splat sits on (16 bits per splat, two to a uint)
+        // and each mesh's centre in this renderer's object space (1 float4
+        // per mesh), for the styles' per-mesh depth reference; null for none
+        internal void SetSplatMeshes(GraphicsBuffer splatMeshes, GraphicsBuffer centers)
+        {
+            _splatMeshes = splatMeshes;
+            _splatMeshCenters = centers;
         }
 
         // Per-splat world velocity (1 float4 per splat: xyz, 0) for Velocity
@@ -904,6 +933,14 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeIntParam(cs, Props.DynamicChunkBoundsValid, chunkBounds != null ? 1 : 0);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.DynamicChunkBounds, chunkBounds ?? _gpuView);
             SetStreakSourcesOnCS(cmb, cs, kernelIndex);
+            bool hasOcclusion = _occlusion != null;
+            cmb.SetComputeIntParam(cs, Props.SplatOcclusionValid, hasOcclusion ? 1 : 0);
+            cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatOcclusion, hasOcclusion ? _occlusion : _gpuView);
+            bool hasMeshes = _splatMeshes != null && _splatMeshCenters != null;
+            cmb.SetComputeIntParam(cs, Props.SplatMeshValid, hasMeshes ? 1 : 0);
+            cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatMesh, hasMeshes ? _splatMeshes : _gpuView);
+            cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatMeshCenters, hasMeshes ? _splatMeshCenters : _gpuView);
+            cmb.SetComputeMatrixParam(cs, Props.SplatMeshObjectToWorld, transform.localToWorldMatrix);
 
             // Morph data binding
             bool hasMorph = _morphedDataBuffer != null && _morphDataValid != 0;
@@ -1247,6 +1284,8 @@ namespace GaussianSplatting.Runtime
                 cmb.SetComputeMatrixParam(cs, Props.MatrixInvVP, vp.inverse);
             }
             cmb.SetComputeBufferParam(cs, kernel, Props.SplatViewData, _gpuView);
+            // Surface streaks read each splat's rotation for its normal
+            SetAssetDataOnCS(cmb, cs, kernel);
             SetStreakSourcesOnCS(cmb, cs, kernel);
             cs.GetKernelThreadGroupSizes(kernel, out uint group, out _, out _);
             cmb.DispatchCompute(cs, kernel, (EffectiveSplatCount + (int)group - 1) / (int)group, 1, 1);

@@ -255,11 +255,13 @@ void CSUpdateParticles(uint3 id : SV_DispatchThreadID)
         else
         {
             float3 worldPos, color;
-            float opacity;
-            LoadSourceSplat(src, worldPos, color, opacity);
+            float opacity, mask;
+            LoadSourceSplat(src, worldPos, color, opacity, mask);
             position.xyz = worldPos;
             velocity.xyz = InheritedVelocity(src, worldPos);
-            birthColor = float4(color, opacity);
+            // The source style's masks fade the particle instead of
+            // darkening its color, which the source lift would undo
+            birthColor = float4(color, opacity * mask);
             meta = src & META_INDEX_MASK;
         }
         position.w = lifeIndex;

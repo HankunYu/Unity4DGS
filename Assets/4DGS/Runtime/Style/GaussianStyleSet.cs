@@ -28,12 +28,20 @@ namespace GaussianSplatting.Runtime
             public static readonly int StyleVolumeWorldToLocal = Shader.PropertyToID("_StyleVolumeWorldToLocal");
             public static readonly int StyleVolumeParams = Shader.PropertyToID("_StyleVolumeParams");
             public static readonly int StyleVolumeEdge = Shader.PropertyToID("_StyleVolumeEdge");
+            public static readonly int StyleVolumeCenters = Shader.PropertyToID("_StyleVolumeCenters");
             public static readonly int StyleRampTex = Shader.PropertyToID("_StyleRampTex");
             public static readonly int StyleColorParams = Shader.PropertyToID("_StyleColorParams");
+            public static readonly int StyleRampAxes = Shader.PropertyToID("_StyleRampAxes");
+            public static readonly int StyleRampBlend = Shader.PropertyToID("_StyleRampBlend");
             public static readonly int StyleLightParams = Shader.PropertyToID("_StyleLightParams");
             public static readonly int StyleGlintParams = Shader.PropertyToID("_StyleGlintParams");
             public static readonly int StyleRimColors = Shader.PropertyToID("_StyleRimColors");
             public static readonly int StyleRimNoise = Shader.PropertyToID("_StyleRimNoise");
+            public static readonly int StyleOcclusionParams = Shader.PropertyToID("_StyleOcclusionParams");
+            public static readonly int StyleDepthParams = Shader.PropertyToID("_StyleDepthParams");
+            public static readonly int StyleFlowParams = Shader.PropertyToID("_StyleFlowParams");
+            public static readonly int StyleFlowAxes = Shader.PropertyToID("_StyleFlowAxes");
+            public static readonly int StyleFlowSteps = Shader.PropertyToID("_StyleFlowSteps");
             public static readonly int StyleShapeParams = Shader.PropertyToID("_StyleShapeParams");
             public static readonly int StyleStreakParams = Shader.PropertyToID("_StyleStreakParams");
             public static readonly int StyleSizeParams = Shader.PropertyToID("_StyleSizeParams");
@@ -49,6 +57,7 @@ namespace GaussianSplatting.Runtime
         private readonly Matrix4x4[] _volumeWorldToLocal = new Matrix4x4[MaxVolumes];
         private readonly Vector4[] _volumeParams = new Vector4[MaxVolumes];
         private readonly Vector4[] _volumeEdge = new Vector4[MaxVolumes];
+        private readonly Vector4[] _volumeCenters = new Vector4[MaxVolumes];
         private readonly Vector4[] _slotParams0 = new Vector4[MaxStyles];
         private readonly Vector4[] _slotParams1 = new Vector4[MaxStyles];
         private readonly Vector4[] _slotParams2 = new Vector4[MaxStyles];
@@ -56,6 +65,11 @@ namespace GaussianSplatting.Runtime
         private readonly Vector4[] _slotParams4 = new Vector4[MaxStyles];
         private readonly Vector4[] _slotParams5 = new Vector4[MaxStyles];
         private readonly Vector4[] _slotParams6 = new Vector4[MaxStyles];
+        private readonly Vector4[] _slotParams7 = new Vector4[MaxStyles];
+        private readonly Vector4[] _slotParams8 = new Vector4[MaxStyles];
+        private readonly Vector4[] _slotParams9 = new Vector4[MaxStyles];
+        private readonly Vector4[] _slotParams10 = new Vector4[MaxStyles];
+        private readonly Vector4[] _slotParams11 = new Vector4[MaxStyles];
         // One row per slot, copied from each style's own ramp
         private Texture2D _ramps;
         // Some volume styles every splat at full weight
@@ -109,6 +123,7 @@ namespace GaussianSplatting.Runtime
             _volumeWorldToLocal[VolumeCount] = volume.transform.worldToLocalMatrix;
             _volumeParams[VolumeCount] = new Vector4((float)volume.shape, volume.falloff, volume.weight, slot);
             _volumeEdge[VolumeCount] = new Vector4(volume.scatter, 0f, 0f, 0f);
+            _volumeCenters[VolumeCount] = volume.transform.position;
             VolumeCount++;
             if (volume.shape == GaussianVolumeShape.Unbounded && volume.weight >= 1f)
                 _coversAll = true;
@@ -151,6 +166,7 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeMatrixArrayParam(cs, Props.StyleVolumeWorldToLocal, _volumeWorldToLocal);
             cmb.SetComputeVectorArrayParam(cs, Props.StyleVolumeParams, _volumeParams);
             cmb.SetComputeVectorArrayParam(cs, Props.StyleVolumeEdge, _volumeEdge);
+            cmb.SetComputeVectorArrayParam(cs, Props.StyleVolumeCenters, _volumeCenters);
             cmb.SetComputeFloatParam(cs, Props.StyleTime, StyleClock);
             // The kernel samples the ramps whether or not a style is set
             if (!active)
@@ -164,13 +180,22 @@ namespace GaussianSplatting.Runtime
             {
                 GaussianSplatStyle style = _styles[i];
                 cmb.CopyTexture(style.RampTexture, 0, 0, 0, 0, GaussianSplatStyle.RampResolution, 1, _ramps, 0, 0, 0, i);
-                _slotParams0[i] = new Vector4((float)style.ColorSource, (float)style.RampInput, style.RampDepthNear,
-                    1f / Mathf.Max(style.RampDepthFar - style.RampDepthNear, 1e-4f));
+                _slotParams0[i] = new Vector4((float)style.ColorSource, (float)style.RampInput, style.RampNear,
+                    1f / Mathf.Max(style.RampFar - style.RampNear, 1e-4f));
+                Vector3 axis = style.RampAxis;
+                _slotParams5[i] = new Vector4(axis.x, axis.y, axis.z, 0f);
+                _slotParams6[i] = new Vector4(style.RampBlend, style.RampKeepLuminance ? 1f : 0f, 0f, 0f);
                 _slotParams1[i] = new Vector4(style.Intensity, style.RimAmount, style.RimPower, style.RimGlow);
                 _slotParams2[i] = new Vector4(style.GlintDensity, style.GlintRate, style.GlintIntensity, 0f);
                 Color rim = style.RimColor;
                 _slotParams3[i] = new Vector4(rim.r, rim.g, rim.b, style.RimSourceTint);
                 _slotParams4[i] = new Vector4(style.RimNoise, 1f / style.RimNoiseSize, style.RimNoiseSpeed, style.RimNoiseGrain);
+                _slotParams7[i] = new Vector4(style.OcclusionAmount, style.OcclusionContrast, 0f, 0f);
+                _slotParams8[i] = new Vector4(style.DepthAmount, 1f / style.DepthRange, style.DepthOffset, (float)style.DepthReference);
+                Vector3 flow = style.FlowDirection;
+                _slotParams9[i] = new Vector4(style.FlowAmount, style.FlowSpeed, style.FlowSpacing, style.FlowLength);
+                _slotParams10[i] = new Vector4(flow.x, flow.y, flow.z, 1f / style.FlowColumnSize);
+                _slotParams11[i] = new Vector4(style.FlowStep, 0f, 0f, 0f);
             }
             cmb.SetComputeTextureParam(cs, kernelIndex, Props.StyleRampTex, _ramps);
             cmb.SetComputeVectorArrayParam(cs, Props.StyleColorParams, _slotParams0);
@@ -178,6 +203,13 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeVectorArrayParam(cs, Props.StyleGlintParams, _slotParams2);
             cmb.SetComputeVectorArrayParam(cs, Props.StyleRimColors, _slotParams3);
             cmb.SetComputeVectorArrayParam(cs, Props.StyleRimNoise, _slotParams4);
+            cmb.SetComputeVectorArrayParam(cs, Props.StyleRampAxes, _slotParams5);
+            cmb.SetComputeVectorArrayParam(cs, Props.StyleRampBlend, _slotParams6);
+            cmb.SetComputeVectorArrayParam(cs, Props.StyleOcclusionParams, _slotParams7);
+            cmb.SetComputeVectorArrayParam(cs, Props.StyleDepthParams, _slotParams8);
+            cmb.SetComputeVectorArrayParam(cs, Props.StyleFlowParams, _slotParams9);
+            cmb.SetComputeVectorArrayParam(cs, Props.StyleFlowAxes, _slotParams10);
+            cmb.SetComputeVectorArrayParam(cs, Props.StyleFlowSteps, _slotParams11);
         }
 
         // The shape, snap and blend side (SplatUtilities.compute). The reach

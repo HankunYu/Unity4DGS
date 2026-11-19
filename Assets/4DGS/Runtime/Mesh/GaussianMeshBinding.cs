@@ -65,6 +65,10 @@ namespace GaussianSplatting.Runtime
         public TextAsset entryData;
         // Vertices of all meshes, VertexSize bytes each
         public TextAsset vertexData;
+        // Baked ambient occlusion (the importer's Bake Occlusion): a byte per
+        // asset splat, 0 fully covered to 255 open, padded to whole uints.
+        // Null when it was not baked.
+        public TextAsset occlusionData;
         // Hash of the splat asset these entries index into
         public Hash128 assetDataHash;
         public int splatCount;
@@ -72,8 +76,12 @@ namespace GaussianSplatting.Runtime
         public int EntryCount => entryData != null ? (int)(entryData.dataSize / EntrySize) : 0;
         public int VertexCount => vertexData != null ? (int)(vertexData.dataSize / VertexSize) : 0;
 
+        public bool HasOcclusion => occlusionData != null && occlusionData.dataSize >= splatCount;
+
         public NativeArray<Entry> GetEntries() => entryData.GetData<Entry>();
         public NativeArray<Vertex> GetVertices() => vertexData.GetData<Vertex>();
+        // Four splats to a uint, the first in its low byte
+        public NativeArray<uint> GetOcclusion() => occlusionData.GetData<uint>();
 
         public bool Matches(GaussianSplatAsset asset) =>
             asset != null && asset.splatCount == splatCount && asset.dataHash == assetDataHash;

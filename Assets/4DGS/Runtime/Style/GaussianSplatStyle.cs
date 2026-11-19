@@ -1,5 +1,6 @@
 using System;
 using UnityEngine;
+using UnityEngine.Serialization;
 
 namespace GaussianSplatting.Runtime
 {
@@ -22,10 +23,18 @@ namespace GaussianSplatting.Runtime
             alphaKeys = new[] { new GradientAlphaKey(1f, 0f), new GradientAlphaKey(1f, 1f) },
         };
         [SerializeField] private GaussianSplatStyleRampInput rampInput = GaussianSplatStyleRampInput.Luminance;
-        [Tooltip("Camera distance (scene units) at the start of the ramp, for the Depth ramp input")]
-        [SerializeField, Min(0f)] private float rampDepthNear = 0.5f;
-        [Tooltip("Camera distance (scene units) at the end of the ramp, for the Depth ramp input")]
-        [SerializeField, Min(0f)] private float rampDepthFar = 10f;
+        [Tooltip("Start of the ramp in world units, for the Depth, World Axis and Volume Distance ramp inputs: a distance from the camera or from the volume's centre, or a position along the ramp axis")]
+        [FormerlySerializedAs("rampDepthNear")]
+        [SerializeField] private float rampNear = 0.5f;
+        [Tooltip("End of the ramp in world units, for the Depth, World Axis and Volume Distance ramp inputs")]
+        [FormerlySerializedAs("rampDepthFar")]
+        [SerializeField] private float rampFar = 10f;
+        [Tooltip("World direction the ramp runs along, for the World Axis ramp input: up colors by height")]
+        [SerializeField] private Vector3 rampAxis = Vector3.up;
+        [Tooltip("How far the ramp color replaces the splat's own color: 0 keeps the splat's color, 1 takes the ramp's")]
+        [SerializeField, Range(0f, 1f)] private float rampBlend = 1f;
+        [Tooltip("Scales the ramp color by the brightness of the splat's own color, so the ramp sets the hue and the splat keeps its light and dark")]
+        [SerializeField] private bool rampKeepLuminance;
         [Tooltip("Brightness multiplier. Above 1 drives values past white, for bloom to pick up")]
         [SerializeField, Range(0f, 8f)] private float intensity = 1f;
 
@@ -53,14 +62,28 @@ namespace GaussianSplatting.Runtime
         [Tooltip("Farthest the rim pushes splats out along their surface normal (mesh splats' local +Z), in world units. Each splat goes its own random share of it, most a little and a few the whole way, so silhouettes spill a scatter of points")]
         [SerializeField, Min(0f)] private float rimSpill;
 
+        [Header("Masks")]
+        [Tooltip("How far the splat's baked occlusion darkens it: creases, armpits and the hollows under a chin or collar go dark, exposed surfaces stay. Needs a .meshsplat imported with Bake Occlusion and its mesh driver; without them nothing changes")]
+        [SerializeField, Range(0f, 1f)] private float occlusionAmount;
+        [Tooltip("Contrast of the occlusion mask: above 1 deepens and widens the dark, below 1 keeps only the deepest creases")]
+        [SerializeField, Range(0.25f, 8f)] private float occlusionContrast = 1f;
+        [Tooltip("How far the depth mask darkens the splat. The mask is white on the side of the style volume's centre that faces the camera and black behind it, so it follows the camera and whatever the depth reference follows")]
+        [SerializeField, Range(0f, 1f)] private float depthAmount;
+        [Tooltip("Depth the mask takes to go from white to black, in world units, centred on the depth reference: about the depth of a figure lights its near side and darkens its far side")]
+        [SerializeField, Min(0.01f)] private float depthRange = 0.6f;
+        [Tooltip("Moves the mask's middle away from the camera (towards it when negative), in world units; animate it to sweep the mask through the volume")]
+        [SerializeField] private float depthOffset;
+        [Tooltip("What depth is measured against: the centre of the style volume, one near and far side for all it holds, or the centre of the mesh each splat sits on (a mesh splat with a Mesh Driver), so every figure and prop is lit on its own near side")]
+        [SerializeField] private GaussianSplatStyleDepthReference depthReference = GaussianSplatStyleDepthReference.VolumeCentre;
+
         [Header("Shape")]
         [SerializeField] private GaussianSplatStyleShape shape = GaussianSplatStyleShape.Base;
         [Tooltip("Dot diameter in pixels, for the Disc shape. Below 2 pixels a dot is drawn 2 pixels wide and dimmer, so it does not alias")]
         [SerializeField, Range(0.5f, 16f)] private float dotSize = 2f;
         [SerializeField] private GaussianSplatStyleStreakAxis streakAxis = GaussianSplatStyleStreakAxis.WorldAxis;
-        [Tooltip("World direction streaks trail in, for the World Axis streak axis")]
+        [Tooltip("World direction streaks trail in, for the World Axis streak axis; the direction the hatching runs across, for the Surface streak axis")]
         [SerializeField] private Vector3 streakDirection = Vector3.down;
-        [Tooltip("Streak length in world units, for the World Axis and View Ray streak axes")]
+        [Tooltip("Streak length in world units, for the World Axis, View Ray and Surface streak axes")]
         [SerializeField, Min(0f)] private float streakLength = 0.3f;
         [Tooltip("Seconds of motion a streak covers, for the Velocity streak axis")]
         [SerializeField, Min(0f)] private float streakTime = 0.05f;
@@ -96,6 +119,22 @@ namespace GaussianSplatting.Runtime
         [Tooltip("Brightness added at the peak of a flash, as a multiple of the splat's color")]
         [SerializeField, Range(0f, 16f)] private float glintIntensity = 4f;
 
+        [Header("Flow")]
+        [Tooltip("How far brightness follows waves running through the splats: 0 leaves them alone, 1 lights only each wave and its fading tail. The space is split into columns along the flow direction, each with its own waves")]
+        [SerializeField, Range(0f, 1f)] private float flowAmount;
+        [Tooltip("World direction the waves run in")]
+        [SerializeField] private Vector3 flowDirection = Vector3.down;
+        [Tooltip("How fast the waves run, in world units per second. Each column runs at its own share of it")]
+        [SerializeField, Min(0f)] private float flowSpeed = 0.5f;
+        [Tooltip("Length of the lit tail behind each wave, in world units")]
+        [SerializeField, Min(0.001f)] private float flowLength = 0.4f;
+        [Tooltip("Distance from one wave to the next in a column, in world units. At or below the tail length the column never goes dark")]
+        [SerializeField, Min(0.001f)] private float flowSpacing = 0.8f;
+        [Tooltip("Width of a column, in world units. Match the quantize spacing on a Grid so each grid column carries its own waves")]
+        [SerializeField, Min(0.001f)] private float flowColumnSize = 0.03f;
+        [Tooltip("Steps the waves advance in, in world units: on a Grid, the quantize spacing lights whole cells one after another instead of sliding the brightness across them. 0 runs smoothly")]
+        [SerializeField, Min(0f)] private float flowStep;
+
         [Header("Blend")]
         [Tooltip("0 blends like ordinary splats, 1 adds light without occluding what is behind. Fully additive splats skip sorting")]
         [SerializeField, Range(0f, 1f)] private float additivity;
@@ -107,8 +146,11 @@ namespace GaussianSplatting.Runtime
 
         public GaussianSplatStyleColorSource ColorSource => colorSource;
         public GaussianSplatStyleRampInput RampInput => rampInput;
-        public float RampDepthNear => rampDepthNear;
-        public float RampDepthFar => rampDepthFar;
+        public float RampNear => rampNear;
+        public float RampFar => rampFar;
+        public Vector3 RampAxis => rampAxis.sqrMagnitude > 1e-8f ? rampAxis.normalized : Vector3.up;
+        public float RampBlend => rampBlend;
+        public bool RampKeepLuminance => rampKeepLuminance;
         public float Intensity => intensity;
         public float RimAmount => rimAmount;
         public float RimPower => rimPower;
@@ -121,6 +163,12 @@ namespace GaussianSplatting.Runtime
         public float RimNoiseGrain => rimNoiseGrain;
         public float RimFade => rimFade;
         public float RimSpill => rimSpill;
+        public float OcclusionAmount => occlusionAmount;
+        public float OcclusionContrast => occlusionContrast;
+        public float DepthAmount => depthAmount;
+        public float DepthRange => depthRange;
+        public float DepthOffset => depthOffset;
+        public GaussianSplatStyleDepthReference DepthReference => depthReference;
         public GaussianSplatStyleShape Shape => shape;
         public float DotSize => dotSize;
         public GaussianSplatStyleStreakAxis StreakAxis => streakAxis;
@@ -140,6 +188,13 @@ namespace GaussianSplatting.Runtime
         public float GlintDensity => glintDensity;
         public float GlintRate => glintRate;
         public float GlintIntensity => glintIntensity;
+        public float FlowAmount => flowAmount;
+        public Vector3 FlowDirection => flowDirection.sqrMagnitude > 1e-8f ? flowDirection.normalized : Vector3.down;
+        public float FlowSpeed => flowSpeed;
+        public float FlowLength => flowLength;
+        public float FlowSpacing => flowSpacing;
+        public float FlowColumnSize => flowColumnSize;
+        public float FlowStep => flowStep;
         public float Additivity => additivity;
         public bool Occludes => occludes;
 
@@ -210,7 +265,7 @@ namespace GaussianSplatting.Runtime
 
         private void OnValidate()
         {
-            rampDepthFar = Mathf.Max(rampDepthFar, rampDepthNear + 0.01f);
+            rampFar = Mathf.Max(rampFar, rampNear + 0.01f);
             _rampDirty = true;
         }
 

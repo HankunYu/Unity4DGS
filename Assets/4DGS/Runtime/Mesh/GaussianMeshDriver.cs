@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Unity.Collections;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -42,9 +43,15 @@ namespace GaussianSplatting.Runtime
         private static readonly int PropSplatCount = Shader.PropertyToID("_DriveSplatCount");
         private static readonly int PropChunkBounds = Shader.PropertyToID("_DeformedChunkBounds");
         private static readonly int PropChunkCount = Shader.PropertyToID("_DriveChunkCount");
+        private static readonly int PropMeshRanges = Shader.PropertyToID("_DriveMeshRanges");
+        private static readonly int PropMeshCenters = Shader.PropertyToID("_DriveMeshCenters");
+        private static readonly int PropMeshCount = Shader.PropertyToID("_DriveMeshCount");
 
         private const int ChunkSize = 256;
         private const int GroupSize = 256;
+        private const int MeshCenterGroupSize = 64;
+        // The splats' mesh indices take 16 bits each
+        private const int MaxIndexedMeshes = 1 << 16;
 
         [Tooltip("Binding imported with the splat asset (the .meshsplat file's Binding sub-asset).")]
         public GaussianMeshBinding binding;
@@ -58,12 +65,22 @@ namespace GaussianSplatting.Runtime
         private int _kernelDrive = -1;
         private int _kernelDriveFromMesh = -1;
         private int _kernelBounds = -1;
+        private int _kernelMeshCenters = -1;
 
         private GraphicsBuffer _entries;
         private GraphicsBuffer _vertices;
         private GraphicsBuffer _boneMatrices;
         private GraphicsBuffer _deformedBase;
         private GraphicsBuffer _chunkBounds;
+        // The binding's baked occlusion, null when it has none
+        private GraphicsBuffer _occlusion;
+        // Which mesh each splat sits on (16 bits per splat, two to a uint),
+        // each mesh's entry range, and each mesh's centre as last driven:
+        // for what treats the meshes apart, e.g. a style's depth mask. Null
+        // when the binding has more meshes than the indices can name.
+        private GraphicsBuffer _splatMeshes;
+        private GraphicsBuffer _meshRanges;
+        private GraphicsBuffer _meshCenters;
         private GaussianMeshBinding _buffersFor;
         private Matrix4x4[] _boneMatrixData;
 
@@ -91,6 +108,7 @@ namespace GaussianSplatting.Runtime
                 _kernelDrive = _shader.FindKernel("CSDriveSplats");
                 _kernelDriveFromMesh = _shader.FindKernel("CSDriveSplatsFromMesh");
                 _kernelBounds = _shader.FindKernel("CSDriveChunkBounds");
+                _kernelMeshCenters = _shader.FindKernel("CSDriveMeshCenters");
             }
             RenderPipelineManager.beginContextRendering += OnBeginContextRendering;
         }
@@ -185,7 +203,19 @@ namespace GaussianSplatting.Runtime
             _shader.SetInt(PropChunkCount, chunkCount);
             _shader.Dispatch(_kernelBounds, chunkCount, 1, 1);
 
+            if (_meshCenters != null)
+            {
+                _shader.SetBuffer(_kernelMeshCenters, PropEntries, _entries);
+                _shader.SetBuffer(_kernelMeshCenters, PropDeformedBase, _deformedBase);
+                _shader.SetBuffer(_kernelMeshCenters, PropMeshRanges, _meshRanges);
+                _shader.SetBuffer(_kernelMeshCenters, PropMeshCenters, _meshCenters);
+                _shader.SetInt(PropMeshCount, binding.meshes.Length);
+                _shader.Dispatch(_kernelMeshCenters, (binding.meshes.Length + MeshCenterGroupSize - 1) / MeshCenterGroupSize, 1, 1);
+            }
+
             _renderer.SetDeformedBase(_deformedBase, _chunkBounds);
+            _renderer.SetOcclusion(_occlusion);
+            _renderer.SetSplatMeshes(_splatMeshes, _meshCenters);
             IsDriving = true;
         }
 
@@ -254,7 +284,11 @@ namespace GaussianSplatting.Runtime
         private void Stop()
         {
             if (IsDriving && _renderer != null)
+            {
                 _renderer.ClearDeformedBase();
+                _renderer.SetOcclusion(null);
+                _renderer.SetSplatMeshes(null, null);
+            }
             IsDriving = false;
         }
 
@@ -355,7 +389,45 @@ namespace GaussianSplatting.Runtime
                 { name = "GaussianMeshDeformedBase" };
             _chunkBounds = new GraphicsBuffer(GraphicsBuffer.Target.Structured, chunkCount * 2, 16)
                 { name = "GaussianMeshDeformedChunkBounds" };
+            if (binding.HasOcclusion)
+            {
+                NativeArray<uint> occlusion = binding.GetOcclusion();
+                _occlusion = new GraphicsBuffer(GraphicsBuffer.Target.Structured, occlusion.Length, 4)
+                    { name = "GaussianMeshOcclusion" };
+                _occlusion.SetData(occlusion);
+            }
+            CreateMeshIndexBuffers();
             _buffersFor = binding;
+        }
+
+        private void CreateMeshIndexBuffers()
+        {
+            int meshCount = binding.meshes.Length;
+            if (meshCount == 0 || meshCount > MaxIndexedMeshes)
+                return;
+            NativeArray<GaussianMeshBinding.Entry> entries = binding.GetEntries();
+            var splatMeshes = new NativeArray<uint>((binding.splatCount + 1) / 2, Allocator.Temp);
+            var ranges = new NativeArray<Vector2Int>(meshCount, Allocator.Temp);
+            for (int m = 0; m < meshCount; m++)
+            {
+                GaussianMeshBinding.MeshInfo info = binding.meshes[m];
+                ranges[m] = new Vector2Int(info.firstEntry, info.entryCount);
+                for (int e = info.firstEntry; e < info.firstEntry + info.entryCount; e++)
+                {
+                    int splat = (int)entries[e].splat;
+                    splatMeshes[splat >> 1] |= (uint)m << ((splat & 1) * 16);
+                }
+            }
+            _splatMeshes = new GraphicsBuffer(GraphicsBuffer.Target.Structured, splatMeshes.Length, 4)
+                { name = "GaussianMeshSplatMeshes" };
+            _splatMeshes.SetData(splatMeshes);
+            _meshRanges = new GraphicsBuffer(GraphicsBuffer.Target.Structured, meshCount, 8)
+                { name = "GaussianMeshRanges" };
+            _meshRanges.SetData(ranges);
+            _meshCenters = new GraphicsBuffer(GraphicsBuffer.Target.Structured, meshCount, 16)
+                { name = "GaussianMeshCenters" };
+            splatMeshes.Dispose();
+            ranges.Dispose();
         }
 
         private void ReleaseBuffers()
@@ -369,6 +441,14 @@ namespace GaussianSplatting.Runtime
             _boneMatrices = null;
             _deformedBase?.Dispose();
             _deformedBase = null;
+            _occlusion?.Dispose();
+            _occlusion = null;
+            _splatMeshes?.Dispose();
+            _splatMeshes = null;
+            _meshRanges?.Dispose();
+            _meshRanges = null;
+            _meshCenters?.Dispose();
+            _meshCenters = null;
             _chunkBounds?.Dispose();
             _chunkBounds = null;
             _buffersFor = null;

@@ -21,5 +21,11 @@ namespace GaussianSplatting.Runtime
         // to the spot on the source each particle came from). Without one
         // the streaks shrink to dots.
         Segment,
+        // Along the surface the splat lies on, across the streak direction:
+        // with the direction up, the streaks run level around the form like
+        // the hatching of an engraving. For mesh splats, whose rotation
+        // carries the surface normal; where the surface faces the streak
+        // direction the streaks shrink to dots.
+        Surface,
     }
 }
