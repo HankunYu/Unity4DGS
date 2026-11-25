@@ -10,6 +10,8 @@
 #define STYLE_SHAPE_BASE 0
 #define STYLE_SHAPE_DISC 1
 #define STYLE_SHAPE_STREAK 2
+#define STYLE_SHAPE_SPHERE 3
+#define STYLE_SHAPE_CUBE 4
 // GaussianSplatStyleStreakAxis
 #define STYLE_STREAK_WORLD_AXIS 0
 #define STYLE_STREAK_VIEW_RAY 1
@@ -28,6 +30,7 @@ struct StyleShape
     float streakLength;     // world units, for the World Axis, View Ray and Surface axes
     float streakHalfWidth;  // pixels
     float minWorldSize;     // dot diameter / streak width floor in world units (0 = off)
+    float solidSize;        // sphere diameter / cube edge in world units
 };
 #define STYLE_SHAPE_ROWS 3
 float4 _StyleShape[MAX_STYLES * STYLE_SHAPE_ROWS];
@@ -48,6 +51,7 @@ StyleShape LoadStyleShape(uint slot)
     b.streakLength = r2.x;
     b.streakHalfWidth = r2.y;
     b.minWorldSize = r2.z;
+    b.solidSize = r2.w;
     return b;
 }
 

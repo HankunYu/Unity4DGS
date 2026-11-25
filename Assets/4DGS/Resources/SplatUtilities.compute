@@ -781,6 +781,20 @@ void BakeQuad(inout SplatViewData view, uint idx, float3 worldPos, float4x4 vpMa
         t1 = float2(radius, 0);
         t2 = float2(0, radius);
     }
+    else if (shapeKind == STYLE_SHAPE_SPHERE || shapeKind == STYLE_SHAPE_CUBE)
+    {
+        // The quad only has to cover the shape: the quad shader traces it.
+        // A ball off the view axis projects to an ellipse longer by the
+        // secant of its angle from the axis, so the bounding ball's disc
+        // grows by that, and by a margin for a ball close to the eye.
+        float bound = shape.solidSize * (shapeKind == STYLE_SHAPE_CUBE ? sqrt(3.0) : 1.0);
+        float2 tanView = centerNdc / (_ProjectionScale * float2(_VecScreenParams.y / _VecScreenParams.x, 1.0));
+        float secant = _OdsEnabled != 0 ? 1.0 : sqrt(1.0 + dot(tanView, tanView));
+        float radius = WorldSizeToPixels(bound, view.pos.w) * 0.5 * secant * 1.15 + 1.0;
+        shapeFade = 1.0;
+        t1 = float2(radius, 0);
+        t2 = float2(0, radius);
+    }
     else if (shapeKind == STYLE_SHAPE_STREAK)
     {
         float3 tailWorld;
@@ -1610,10 +1624,15 @@ bool LightShadowCaster(uint idx, out float3 worldPos)
     return !IsSplatCut(pos);
 }
 
+// Thread groups in a row of the clear's dispatch, which is laid out in
+// rows: a 4096 map has more entries than one row of groups may cover. Must
+// match GaussianSplatRenderer.ShadowClearRowGroups.
+#define LIGHT_SHADOW_CLEAR_ROW_GROUPS 16384
+
 [numthreads(GROUP_SIZE,1,1)]
 void CSLightShadowClear (uint3 id : SV_DispatchThreadID)
 {
-    uint i = id.x;
+    uint i = id.y * (LIGHT_SHADOW_CLEAR_ROW_GROUPS * GROUP_SIZE) + id.x;
     if (i >= LIGHT_SHADOW_HEADER + _LightShadowResolution * _LightShadowResolution)
         return;
     // Empty bounds (min above max) and empty texels (past any depth)

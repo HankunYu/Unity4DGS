@@ -47,7 +47,7 @@ namespace GaussianSplatting.Runtime
         [SerializeField, Range(128, 4096)] private int shadowResolution = 1024;
         [Tooltip("Depth, in world units, a splat may lie behind the nearest one before it is in shadow; raise it if surfaces shadow themselves in speckles")]
         [SerializeField, Min(0f)] private float shadowBias = 0.02f;
-        [Tooltip("Texels around a splat the shadow test averages, for softer edges")]
+        [Tooltip("Texels around a splat the shadow test averages, weighted smoothly, for softer edges")]
         [SerializeField, Range(0, 4)] private int shadowFilter = 1;
 
         // Lights found in the scene, refreshed once per frame

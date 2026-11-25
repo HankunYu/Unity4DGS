@@ -5,6 +5,7 @@ using System.Linq;
 using GaussianSplatting.Editor.Import;
 using GaussianSplatting.Runtime;
 using Unity.Collections;
+using Unity.Mathematics;
 using UnityEditor;
 using UnityEditor.AssetImporters;
 using UnityEngine;
@@ -204,6 +205,11 @@ namespace GaussianSplatting.Editor.MeshSplat
                 {
                     using NativeArray<byte> occlusion = MeshSplatBaker.PackOcclusion(openness, sourceIndices);
                     binding.occlusionData = AddBlock(ctx, $"{name}_occ", occlusion);
+                }
+                if (settings.storeUvs)
+                {
+                    using NativeArray<float2> uvs = MeshSplatBaker.PackUvs(meshes, samples, sourceIndices);
+                    binding.uvData = AddBlock(ctx, $"{name}_uv", uvs.Reinterpret<byte>(GaussianMeshBinding.UvSize));
                 }
                 ctx.AddObjectToAsset("binding", binding);
             }

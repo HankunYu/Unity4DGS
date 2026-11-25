@@ -26,7 +26,7 @@ namespace GaussianSplatting.Runtime
             public float keepLuminance;
             public float intensity;
             public Vector3 axis;
-            public float pad;
+            public float intensityVariation;
         }
 
         [SerializeField] private GaussianSplatStyleColorSource source = GaussianSplatStyleColorSource.Original;
@@ -49,6 +49,8 @@ namespace GaussianSplatting.Runtime
         [SerializeField] private bool keepLuminance;
         [Tooltip("Brightness multiplier. Above 1 drives values past white, for bloom to pick up")]
         [SerializeField, Range(0f, 8f)] private float intensity = 1f;
+        [Tooltip("Per-splat randomness in the brightness: each splat is brighter or darker by up to this share, so a field of one color breaks into lighter and darker ones. 0 leaves them alike")]
+        [SerializeField, Range(0f, 1f)] private float intensityVariation;
 
         // Counts the changes to the ramp, for what keeps a baked copy of it
         [NonSerialized] private int _rampVersion;
@@ -81,6 +83,7 @@ namespace GaussianSplatting.Runtime
             keepLuminance = keepLuminance ? 1f : 0f,
             intensity = intensity,
             axis = axis.sqrMagnitude > 1e-8f ? axis.normalized : Vector3.up,
+            intensityVariation = intensityVariation,
         };
 
         internal override void Validate()

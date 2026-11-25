@@ -73,15 +73,25 @@ float3 LightShadowSpace(float3 worldPos)
 // The map's square on the light-space plane from the header's bounds: its
 // corner, the size of a texel, and the nearest depth. False before the
 // first shadow pass.
+//
+// The texels sit on a grid fixed in light space: their size is the next
+// half-octave step that fits the bounds, and the corner a whole number of
+// them. Splats that move change the bounds every frame; a map stretched
+// over the bounds would shift all its texels with them, and every shadow
+// edge in the scene would land on new texels and flicker. On the fixed grid
+// only what moves changes, until the bounds outgrow a step.
 bool LightShadowFrameOf(uint3 loBits, uint3 hiBits, out float2 origin, out float texel, out float minZ)
 {
     float3 lo = float3(LightSortableFloat(loBits.x), LightSortableFloat(loBits.y), LightSortableFloat(loBits.z));
     float3 hi = float3(LightSortableFloat(hiBits.x), LightSortableFloat(hiBits.y), LightSortableFloat(hiBits.z));
-    origin = lo.xy;
     minZ = lo.z;
     float size = max(hi.x - lo.x, hi.y - lo.y);
-    texel = size / _LightShadowResolution;
-    return all(hi >= lo) && size > 0;
+    bool valid = all(hi >= lo) && size > 0;
+    // One texel is lost to snapping the corner down
+    float fit = max(size, 1e-12) / (_LightShadowResolution - 1.0);
+    texel = exp2(ceil(log2(fit) * 2.0) * 0.5);
+    origin = floor(lo.xy / texel) * texel;
+    return valid;
 }
 
 bool LightShadowFrame(out float2 origin, out float texel, out float minZ)
@@ -94,7 +104,9 @@ uint LightShadowAddress(uint2 texel)
     return (LIGHT_SHADOW_HEADER + texel.y * _LightShadowResolution + texel.x) * 4;
 }
 
-// 1 lit, 0 in shadow, filtered over the texels around the splat
+// 1 lit, 0 in shadow, filtered over the texels around the splat: a box of
+// the filter radius, weighted by how far the splat lies into the texels at
+// its rim, so the result changes smoothly as the splat or the shadow moves
 float LightShadow(float3 worldPos)
 {
     if (_LightShadowParams.x < 0.5)
@@ -106,26 +118,32 @@ float LightShadow(float3 worldPos)
     float3 p = LightShadowSpace(worldPos);
     if (_LightShadowParams.y > 0.5 && p.z <= 0)
         return 1.0;
-    int2 center = int2(floor((p.xy - origin) / texel));
+    // Texel centres sit at half coordinates
+    float2 at = (p.xy - origin) / texel - 0.5;
+    int2 corner = int2(floor(at));
+    float2 into = at - floor(at);
     float depth = p.z - minZ - _LightShadowParams.z;
     int radius = (int)_LightShadowParams.w;
-    float lit = 0, count = 0;
-    for (int y = -radius; y <= radius; y++)
+    float lit = 0, total = 0;
+    for (int y = -radius; y <= radius + 1; y++)
     {
-        for (int x = -radius; x <= radius; x++)
+        float wy = y == -radius ? 1.0 - into.y : (y == radius + 1 ? into.y : 1.0);
+        for (int x = -radius; x <= radius + 1; x++)
         {
-            int2 t = center + int2(x, y);
-            count += 1;
+            float wx = x == -radius ? 1.0 - into.x : (x == radius + 1 ? into.x : 1.0);
+            float w = wx * wy;
+            int2 t = corner + int2(x, y);
+            total += w;
             if (any(t < 0) || any(t >= (int)_LightShadowResolution))
             {
-                lit += 1;
+                lit += w;
                 continue;
             }
             // Empty texels hold the clear value, past any depth
-            lit += depth <= asfloat(_LightShadowMap.Load(LightShadowAddress(uint2(t)))) ? 1 : 0;
+            lit += depth <= asfloat(_LightShadowMap.Load(LightShadowAddress(uint2(t)))) ? w : 0;
         }
     }
-    return lit / count;
+    return lit / max(total, 1e-6);
 }
 
 float3 LightGammaToLinear(float3 c)

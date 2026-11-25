@@ -90,6 +90,22 @@ StyleContext MakeStyleContext(StyleSample style, uint idx, float3 worldPos, floa
     return c;
 }
 
+// A splat's surface normal in world space: a flat splat's shortest axis.
+// flatness is how far it is one, 0 for a round splat, which has no
+// meaningful normal.
+float3 StyleWorldNormal(float4 rot, float3 scale, out float flatness)
+{
+    float3 s = abs(scale);
+    float minScale = min(s.x, min(s.y, s.z));
+    float maxScale = max(s.x, max(s.y, s.z));
+    float midScale = s.x + s.y + s.z - minScale - maxScale;
+    float3 axis = s.x == minScale ? float3(1, 0, 0) : (s.y == minScale ? float3(0, 1, 0) : float3(0, 0, 1));
+    float3 objNormal = QuatRotateVector(axis, rot);
+    flatness = 1.0 - minScale / max(midScale, 1e-8);
+    // Inverse transpose, as for the backface normal
+    return normalize(mul(objNormal, (float3x3)_MatrixWorldToObject));
+}
+
 uint StyleHash(uint x)
 {
     x ^= x >> 16; x *= 0x7feb352du;

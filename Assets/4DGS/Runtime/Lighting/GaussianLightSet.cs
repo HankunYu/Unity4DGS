@@ -20,6 +20,7 @@ namespace GaussianSplatting.Runtime
             public static readonly int LightCount = Shader.PropertyToID("_LightCount");
             public static readonly int LightPositions = Shader.PropertyToID("_LightPositions");
             public static readonly int LightColors = Shader.PropertyToID("_LightColors");
+            public static readonly int QuadKeyLight = Shader.PropertyToID("_QuadKeyLight");
             public static readonly int LightSpotDirections = Shader.PropertyToID("_LightSpotDirections");
             public static readonly int LightSpotParams = Shader.PropertyToID("_LightSpotParams");
             public static readonly int LightAmbient = Shader.PropertyToID("_LightAmbient");
@@ -40,6 +41,8 @@ namespace GaussianSplatting.Runtime
 
         private int _shadowLight;
         private float _shadowLightPower;
+        private int _strongestLight;
+        private float _strongestLightPower;
         private Matrix4x4 _shadowMatrix;
         private bool _shadowPerspective;
         private bool _shadowsWanted;
@@ -62,6 +65,8 @@ namespace GaussianSplatting.Runtime
             LightCount = 0;
             _shadowLight = -1;
             _shadowLightPower = 0f;
+            _strongestLight = -1;
+            _strongestLightPower = 0f;
             _shadowsWanted = false;
         }
 
@@ -133,6 +138,11 @@ namespace GaussianSplatting.Runtime
             LightCount++;
 
             float power = Mathf.Max(color.r, Mathf.Max(color.g, color.b));
+            if (power > _strongestLightPower)
+            {
+                _strongestLight = i;
+                _strongestLightPower = power;
+            }
             if (light.shadows != LightShadows.None && light.type != LightType.Point && power > _shadowLightPower)
             {
                 _shadowLight = i;
@@ -159,6 +169,10 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeVectorArrayParam(cs, Props.LightSpotParams, _spotParams);
             cmb.SetComputeVectorArrayParam(cs, Props.LightAmbient, _ambient);
             cmb.SetComputeVectorParam(cs, Props.LightParams, _params);
+            // The quad shader shades solid shapes (Sphere, Cube) by one
+            // light: the one that casts the shadows, else the strongest
+            int keyLight = _shadowLight >= 0 ? _shadowLight : _strongestLight;
+            cmb.SetGlobalVector(Props.QuadKeyLight, Active && keyLight >= 0 ? _positions[keyLight] : Vector4.zero);
             SetShadowParamsOnCS(cmb, cs, shadows);
             EnsureShadowMap(shadows);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.LightShadowMap, _shadowMap);

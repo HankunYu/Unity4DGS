@@ -29,6 +29,7 @@ struct StyleColor
     bool keepLuminance;     // the ramp color takes the splat's brightness
     float intensity;
     float3 axis;            // world direction of the World Axis input
+    float intensityVariation; // share each splat's brightness strays, at random
 };
 #define STYLE_COLOR_ROWS 3
 float4 _StyleColor[MAX_STYLES * STYLE_COLOR_ROWS];
@@ -49,6 +50,7 @@ StyleColor LoadStyleColor(uint slot)
     b.keepLuminance = r1.z > 0.5;
     b.intensity = r1.w;
     b.axis = r2.xyz;
+    b.intensityVariation = r2.w;
     return b;
 }
 
@@ -97,7 +99,8 @@ void StyleColorLight(StyleContext c, inout float gain, inout float3 emission)
     StyleColor b = LoadStyleColor(c.slot);
     if (!b.on)
         return;
-    gain *= b.intensity;
+    // The splat's own lasting share, brighter or darker
+    gain *= b.intensity * (1.0 + b.intensityVariation * (StyleHash01(c.idx ^ 0x51ed270bu) * 2.0 - 1.0));
 }
 
 void StyleColorBound(uint slot, inout float gain, inout float emission)
@@ -105,7 +108,7 @@ void StyleColorBound(uint slot, inout float gain, inout float emission)
     StyleColor b = LoadStyleColor(slot);
     if (!b.on)
         return;
-    gain *= b.intensity;
+    gain *= b.intensity * (1.0 + b.intensityVariation);
 }
 
 #endif // GAUSSIAN_STYLE_COLOR_HLSL

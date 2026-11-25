@@ -11,5 +11,10 @@ namespace GaussianSplatting.Runtime
 
         // Onto the points of a cubic grid, for a dot-matrix look.
         Grid = 2,
+
+        // Onto the three sets of planes of a cubic grid, each splat to the
+        // plane nearest to it: where the planes cut a surface they draw the
+        // lines of a world grid on it.
+        Lattice = 3,
     }
 }

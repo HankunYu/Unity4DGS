@@ -35,6 +35,9 @@ namespace GaussianSplatting.Editor.MeshSplat
         private static readonly GUIContent s_OcclusionLabel = new("Bake Occlusion",
             "Store how much the model closes off each splat's surroundings, for a style's occlusion mask to " +
             "darken creases and hollows by. Judged in the sampled pose; an Asset output only.");
+        private static readonly GUIContent s_UvsLabel = new("Store UVs",
+            "Keep the UV each splat was sampled at, for a style's flow to run in the meshes' UV space. " +
+            "8 bytes per splat; an Asset output only.");
         private static readonly GUIContent s_LightLabel = new("Bake Lighting",
             "Multiply the color by a fixed directional light. An asset bakes it in the rest pose, so it turns " +
             "with the model as it animates; a sequence bakes it for every frame's pose.");
@@ -52,6 +55,7 @@ namespace GaussianSplatting.Editor.MeshSplat
         private SerializedProperty _sampler;
         private SerializedProperty _color;
         private SerializedProperty _colorOverrides;
+        private SerializedProperty _storeUvs;
         private SerializedProperty _bakeLighting;
         private SerializedProperty _lightDirection;
         private SerializedProperty _ambient;
@@ -86,6 +90,7 @@ namespace GaussianSplatting.Editor.MeshSplat
             _hiddenEnabled = _hiddenSurfaces.FindPropertyRelative(nameof(HiddenSurfaceFilter.enabled));
             _occlusion = settings.FindPropertyRelative(nameof(MeshSplatSettings.occlusion));
             _occlusionEnabled = _occlusion.FindPropertyRelative(nameof(SurfaceOcclusion.enabled));
+            _storeUvs = settings.FindPropertyRelative(nameof(MeshSplatSettings.storeUvs));
             _quality = settings.FindPropertyRelative(nameof(MeshSplatSettings.quality));
             _customFormats = settings.FindPropertyRelative(nameof(MeshSplatSettings.customFormats));
         }
@@ -123,6 +128,7 @@ namespace GaussianSplatting.Editor.MeshSplat
             EditorGUILayout.PropertyField(_occlusionEnabled, s_OcclusionLabel);
             if (_occlusionEnabled.boolValue || _occlusionEnabled.hasMultipleDifferentValues)
                 DrawFields(_occlusion, _occlusionEnabled);
+            EditorGUILayout.PropertyField(_storeUvs, s_UvsLabel);
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Color", EditorStyles.boldLabel);

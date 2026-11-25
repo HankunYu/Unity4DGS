@@ -65,16 +65,9 @@ float3 LiftColor(float3 color, float lift)
 // agree, like the SH evaluation.
 float StyleRimFacing(float rimPower, float4 rot, float3 scale, float3 centerWorldPos)
 {
-    float3 s = abs(scale);
-    float minScale = min(s.x, min(s.y, s.z));
-    float maxScale = max(s.x, max(s.y, s.z));
-    float midScale = s.x + s.y + s.z - minScale - maxScale;
-    float3 axis = s.x == minScale ? float3(1, 0, 0) : (s.y == minScale ? float3(0, 1, 0) : float3(0, 0, 1));
-    float3 objNormal = QuatRotateVector(axis, rot);
-    // Inverse transpose, as for the backface normal
-    float3 worldNormal = normalize(mul(objNormal, (float3x3)_MatrixWorldToObject));
+    float flatness;
+    float3 worldNormal = StyleWorldNormal(rot, scale, flatness);
     float facing = abs(dot(worldNormal, normalize(_VecWorldSpaceCameraPos.xyz - centerWorldPos)));
-    float flatness = 1.0 - minScale / max(midScale, 1e-8);
     return pow(saturate(1.0 - facing), rimPower) * flatness;
 }
 

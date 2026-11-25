@@ -172,6 +172,22 @@ namespace GaussianSplatting.Editor.MeshSplat
             return packed;
         }
 
+        // The samples' UVs as GaussianMeshBinding.uvData holds them: a
+        // float2 per asset splat, NoUv where the mesh has none.
+        // sourceIndices maps each asset splat back to its sample.
+        public static NativeArray<float2> PackUvs(IReadOnlyList<SurfaceMesh> meshes,
+            IReadOnlyList<SurfaceSample> samples, NativeArray<int> sourceIndices)
+        {
+            var packed = new NativeArray<float2>(sourceIndices.Length, Allocator.Persistent);
+            for (int splat = 0; splat < sourceIndices.Length; splat++)
+            {
+                SurfaceSample sample = samples[sourceIndices[splat]];
+                SurfaceMesh mesh = meshes[sample.mesh];
+                packed[splat] = mesh.uvs.Length > 0 ? mesh.Uv(sample) : new float2(GaussianMeshBinding.NoUv);
+            }
+            return packed;
+        }
+
         // The mesh's vertices for skinning: unlike SurfaceMesh, in the mesh's
         // own space, with its four strongest bones
         public static GaussianMeshBinding.Vertex[] SkinVertices(SurfaceMesh mesh)

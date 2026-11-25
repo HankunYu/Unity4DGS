@@ -13,7 +13,7 @@ namespace GaussianSplatting.Runtime
     [StructLayout(LayoutKind.Sequential)]
     internal struct GaussianSplatStyleRange
     {
-        public const int Stride = 64;
+        public const int Stride = 112;
 
         // First splat of the renderer in the draw's view data; ranges ascend
         public uint start;
@@ -27,5 +27,12 @@ namespace GaussianSplatting.Runtime
         public Vector4 additivity;
         public Vector4 shape;
         public Vector4 streakTailPower;
+        // Per slot, for the solid shapes (Sphere, Cube): diameter or edge in
+        // world units; how far its own form swings its color around the
+        // splat's, brighter towards the key light and darker away; how
+        // far below that size a splat's own shape may fall
+        public Vector4 solidSize;
+        public Vector4 solidShading;
+        public Vector4 solidSizeVariation;
     }
 }

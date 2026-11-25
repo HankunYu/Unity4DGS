@@ -78,6 +78,7 @@ float StyleMask(StyleSample style, float3 centerWorldPos, uint idx)
     float mask = 1.0;
     StyleOcclusionMask(c, mask);
     StyleDepthMask(c, mask);
+    StyleQuantizeMask(c, mask);
     return lerp(1.0, mask, style.weight);
 }
 

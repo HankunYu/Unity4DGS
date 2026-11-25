@@ -30,6 +30,9 @@ namespace GaussianSplatting.Editor.MeshSplat
         // Baked for the splats that are kept; an asset output only, since it
         // is stored with the binding
         public SurfaceOcclusion occlusion = new();
+        // Keeps the UV each splat was sampled at, for what runs in the
+        // meshes' UV space; an asset output only, like the occlusion
+        public bool storeUvs;
 
         // Source for every surface whose material has no override
         public SplatColorKind color = SplatColorKind.Uniform;

@@ -56,6 +56,10 @@ namespace GaussianSplatting.Runtime
 
         public const int EntrySize = 24;
         public const int VertexSize = 56;
+        public const int UvSize = 8;
+        // The U and V of a splat whose mesh has no UVs: far below any real
+        // one, for GaussianStyleFlow.hlsl to tell
+        public const float NoUv = -1e30f;
 
         // The model the splats were sampled from, for setting up a scene
         public GameObject model;
@@ -69,6 +73,10 @@ namespace GaussianSplatting.Runtime
         // asset splat, 0 fully covered to 255 open, padded to whole uints.
         // Null when it was not baked.
         public TextAsset occlusionData;
+        // UV of the spot each asset splat was sampled at (the importer's
+        // Store UVs): a float2 per splat, NoUv on meshes without UVs. Null
+        // when they were not stored.
+        public TextAsset uvData;
         // Hash of the splat asset these entries index into
         public Hash128 assetDataHash;
         public int splatCount;
@@ -77,11 +85,13 @@ namespace GaussianSplatting.Runtime
         public int VertexCount => vertexData != null ? (int)(vertexData.dataSize / VertexSize) : 0;
 
         public bool HasOcclusion => occlusionData != null && occlusionData.dataSize >= splatCount;
+        public bool HasUvs => uvData != null && uvData.dataSize >= (long)splatCount * UvSize;
 
         public NativeArray<Entry> GetEntries() => entryData.GetData<Entry>();
         public NativeArray<Vertex> GetVertices() => vertexData.GetData<Vertex>();
         // Four splats to a uint, the first in its low byte
         public NativeArray<uint> GetOcclusion() => occlusionData.GetData<uint>();
+        public NativeArray<float2> GetUvs() => uvData.GetData<float2>();
 
         public bool Matches(GaussianSplatAsset asset) =>
             asset != null && asset.splatCount == splatCount && asset.dataHash == assetDataHash;

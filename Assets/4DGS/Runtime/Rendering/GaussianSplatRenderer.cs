@@ -200,6 +200,9 @@ namespace GaussianSplatting.Runtime
         // Baked occlusion of the splats (GaussianMeshBinding.occlusionData),
         // set by what holds it; null without one
         private GraphicsBuffer _occlusion;
+        // UVs of the splats (GaussianMeshBinding.uvData), set by what holds
+        // them; null without them
+        private GraphicsBuffer _splatUvs;
         // The mesh each splat sits on and the meshes' posed centres
         // (GaussianMeshDriver), not owned; null without them
         private GraphicsBuffer _splatMeshes;
@@ -290,6 +293,9 @@ namespace GaussianSplatting.Runtime
             public static readonly int MatrixRigToWorld = Shader.PropertyToID("_MatrixRigToWorld");
             public static readonly int DofParams = Shader.PropertyToID("_DofParams");
             public static readonly int MatrixInvVP = Shader.PropertyToID("_MatrixInvVP");
+            public static readonly int QuadInvViewProjection = Shader.PropertyToID("_QuadInvViewProjection");
+            public static readonly int QuadEyePosition = Shader.PropertyToID("_QuadEyePosition");
+            public static readonly int QuadRaysValid = Shader.PropertyToID("_QuadRaysValid");
             public static readonly int MatrixInvVPEye = Shader.PropertyToID("_MatrixInvVP_Eye");
             public static readonly int StyleRanges = Shader.PropertyToID("_StyleRanges");
             public static readonly int StyleRangeCount = Shader.PropertyToID("_StyleRangeCount");
@@ -339,6 +345,8 @@ namespace GaussianSplatting.Runtime
             public static readonly int DeformedBaseValid = Shader.PropertyToID("_DeformedBaseValid");
             public static readonly int SplatOcclusion = Shader.PropertyToID("_SplatOcclusion");
             public static readonly int SplatOcclusionValid = Shader.PropertyToID("_SplatOcclusionValid");
+            public static readonly int SplatUv = Shader.PropertyToID("_SplatUv");
+            public static readonly int SplatUvValid = Shader.PropertyToID("_SplatUvValid");
             public static readonly int SplatMesh = Shader.PropertyToID("_SplatMesh");
             public static readonly int SplatMeshCenters = Shader.PropertyToID("_SplatMeshCenters");
             public static readonly int SplatMeshValid = Shader.PropertyToID("_SplatMeshValid");
@@ -462,6 +470,13 @@ namespace GaussianSplatting.Runtime
         internal void SetOcclusion(GraphicsBuffer occlusion)
         {
             _occlusion = occlusion;
+        }
+
+        // Per-splat UVs for the styles' UV-space flow (a float2 per splat),
+        // or null for none
+        internal void SetSplatUvs(GraphicsBuffer uvs)
+        {
+            _splatUvs = uvs;
         }
 
         // Which mesh each splat sits on (16 bits per splat, two to a uint)
@@ -936,6 +951,9 @@ namespace GaussianSplatting.Runtime
             bool hasOcclusion = _occlusion != null;
             cmb.SetComputeIntParam(cs, Props.SplatOcclusionValid, hasOcclusion ? 1 : 0);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatOcclusion, hasOcclusion ? _occlusion : _gpuView);
+            bool hasUvs = _splatUvs != null;
+            cmb.SetComputeIntParam(cs, Props.SplatUvValid, hasUvs ? 1 : 0);
+            cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatUv, hasUvs ? _splatUvs : _gpuView);
             bool hasMeshes = _splatMeshes != null && _splatMeshCenters != null;
             cmb.SetComputeIntParam(cs, Props.SplatMeshValid, hasMeshes ? 1 : 0);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatMesh, hasMeshes ? _splatMeshes : _gpuView);
@@ -1161,6 +1179,11 @@ namespace GaussianSplatting.Runtime
             cmb.SetComputeVectorParam(csSplatUtilities, Props.VecScreenParams, screenPar);
             // Also set as global so the render shader can use the same screen params
             cmb.SetGlobalVector(Props.VecScreenParams, screenPar);
+            // The quad shader traces solid shapes (Sphere, Cube) along eye
+            // rays, which only one eye under a plain projection has
+            cmb.SetGlobalMatrix(Props.QuadInvViewProjection, matVP.inverse);
+            cmb.SetGlobalVector(Props.QuadEyePosition, camPos);
+            cmb.SetGlobalInt(Props.QuadRaysValid, useOds || isStereo ? 0 : 1);
             cmb.SetComputeVectorParam(csSplatUtilities, Props.VecWorldSpaceCameraPos, camPos);
             cmb.SetComputeFloatParam(csSplatUtilities, Props.SplatScale, splatScale);
             cmb.SetComputeFloatParam(csSplatUtilities, Props.SplatOpacityScale, opacityScale);
@@ -1295,6 +1318,9 @@ namespace GaussianSplatting.Runtime
         // view data pass's transform and splat scale bound. The same in every
         // view; it runs with the view data because that is where the splats'
         // current positions are bound.
+        // Must match LIGHT_SHADOW_CLEAR_ROW_GROUPS in SplatUtilities.compute
+        private const int ShadowClearRowGroups = 16384;
+
         private void RenderLightShadow(CommandBuffer cmb)
         {
             if (!_lightSet.ShadowActive ||
@@ -1305,8 +1331,12 @@ namespace GaussianSplatting.Runtime
 
             ComputeShader cs = csSplatUtilities;
             _lightSet.SetShadowTargetOnCS(cmb, cs, clearKernel);
+            // In rows: the entries of a large map need more thread groups
+            // than one dispatch dimension holds (65535)
             cs.GetKernelThreadGroupSizes(clearKernel, out uint clearGroup, out _, out _);
-            cmb.DispatchCompute(cs, clearKernel, (_lightSet.ShadowEntryCount + (int)clearGroup - 1) / (int)clearGroup, 1, 1);
+            int clearGroups = (_lightSet.ShadowEntryCount + (int)clearGroup - 1) / (int)clearGroup;
+            cmb.DispatchCompute(cs, clearKernel, Mathf.Min(clearGroups, ShadowClearRowGroups),
+                (clearGroups + ShadowClearRowGroups - 1) / ShadowClearRowGroups, 1);
 
             DispatchPerSplat(boundsKernel);
             DispatchPerSplat(splatKernel);

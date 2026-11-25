@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Unity.Collections;
+using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -74,6 +75,8 @@ namespace GaussianSplatting.Runtime
         private GraphicsBuffer _chunkBounds;
         // The binding's baked occlusion, null when it has none
         private GraphicsBuffer _occlusion;
+        // The binding's stored UVs, null when it has none
+        private GraphicsBuffer _uvs;
         // Which mesh each splat sits on (16 bits per splat, two to a uint),
         // each mesh's entry range, and each mesh's centre as last driven:
         // for what treats the meshes apart, e.g. a style's depth mask. Null
@@ -215,6 +218,7 @@ namespace GaussianSplatting.Runtime
 
             _renderer.SetDeformedBase(_deformedBase, _chunkBounds);
             _renderer.SetOcclusion(_occlusion);
+            _renderer.SetSplatUvs(_uvs);
             _renderer.SetSplatMeshes(_splatMeshes, _meshCenters);
             IsDriving = true;
         }
@@ -287,6 +291,7 @@ namespace GaussianSplatting.Runtime
             {
                 _renderer.ClearDeformedBase();
                 _renderer.SetOcclusion(null);
+                _renderer.SetSplatUvs(null);
                 _renderer.SetSplatMeshes(null, null);
             }
             IsDriving = false;
@@ -396,6 +401,13 @@ namespace GaussianSplatting.Runtime
                     { name = "GaussianMeshOcclusion" };
                 _occlusion.SetData(occlusion);
             }
+            if (binding.HasUvs)
+            {
+                NativeArray<float2> uvs = binding.GetUvs();
+                _uvs = new GraphicsBuffer(GraphicsBuffer.Target.Structured, uvs.Length, GaussianMeshBinding.UvSize)
+                    { name = "GaussianMeshUvs" };
+                _uvs.SetData(uvs);
+            }
             CreateMeshIndexBuffers();
             _buffersFor = binding;
         }
@@ -443,6 +455,8 @@ namespace GaussianSplatting.Runtime
             _deformedBase = null;
             _occlusion?.Dispose();
             _occlusion = null;
+            _uvs?.Dispose();
+            _uvs = null;
             _splatMeshes?.Dispose();
             _splatMeshes = null;
             _meshRanges?.Dispose();

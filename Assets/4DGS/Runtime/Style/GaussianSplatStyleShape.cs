@@ -11,5 +11,12 @@ namespace GaussianSplatting.Runtime
 
         // A thin line trailing from the splat, brightest at the splat.
         Streak = 2,
+
+        // A solid ball of fixed world size, shaded by the key light.
+        Sphere = 3,
+
+        // A solid cube of fixed world size along the world axes, shaded by
+        // the key light.
+        Cube = 4,
     }
 }
